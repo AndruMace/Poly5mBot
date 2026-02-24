@@ -407,10 +407,12 @@ export class TradingEngine extends EventEmitter {
   private async tickInner(): Promise<void> {
     const isShadow = this._mode === "shadow";
     this.updateLiveLatencyMetrics();
-    this.cleanupStaleUnconfirmedTrades(Date.now());
-
+    const now = Date.now();
     const closingBtcPrice = this.feedManager.getCurrentBtcPrice();
-    const expired = this.riskManager.resolveExpired(Date.now());
+    this.cleanupStaleUnconfirmedTrades(now);
+    this.reconcileExpiredUntrackedOpenTrades(now, closingBtcPrice);
+
+    const expired = this.riskManager.resolveExpired(now);
     for (const trade of expired) {
       const tradeShadow = trade.id.startsWith("shadow-");
       this.tracker.expireTrade(trade.id, closingBtcPrice, tradeShadow);
@@ -445,7 +447,6 @@ export class TradingEngine extends EventEmitter {
       return;
     }
 
-    const now = Date.now();
     if (now >= this.currentWindow.endTime) return;
 
     const ctx: MarketContext = {
@@ -652,6 +653,45 @@ export class TradingEngine extends EventEmitter {
           if (updated) {
             this.emit("trade", updated);
           }
+        }
+      }
+    }
+  }
+
+  /**
+   * On server restart, RiskManager has no in-memory open positions, but TradeStore
+   * replays persisted fills that may already be past window end. Reconcile those
+   * here so they don't stay "active" forever with fee-only PnL.
+   */
+  private reconcileExpiredUntrackedOpenTrades(
+    now: number,
+    closingBtcPrice: number,
+  ): void {
+    if (closingBtcPrice <= 0) return;
+    if (this.riskManager.getOpenPositions().length > 0) return;
+
+    for (const shadow of [false, true]) {
+      const open = this.tracker.getOpenTrades(shadow);
+      for (const t of open) {
+        if (t.windowEnd <= 0 || now < t.windowEnd) continue;
+        if (
+          t.status !== "filled" &&
+          t.status !== "partial" &&
+          t.status !== "expired"
+        ) {
+          continue;
+        }
+
+        if (t.status !== "expired") {
+          this.tracker.expireTrade(t.id, closingBtcPrice, shadow);
+        }
+        const current = this.tracker.getTradeRecordById(t.id, shadow);
+        if (!current) continue;
+        const won = this.didTradeWin(current);
+        this.tracker.resolveTrade(t.id, won, shadow);
+        const resolved = this.tracker.getTradeRecordById(t.id, shadow);
+        if (resolved) {
+          this.emit("trade", resolved);
         }
       }
     }
