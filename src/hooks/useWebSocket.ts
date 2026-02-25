@@ -36,6 +36,7 @@ import type {
   PricePoint,
   TradeRecord,
   WSStatusSnapshot,
+  TradesPageResponse,
 } from "../types/index.js";
 
 const PRICE_HISTORY_FLUSH_MS = 1000;
@@ -43,6 +44,9 @@ const TRADE_FLUSH_MS = 120;
 const STALE_WS_MS = 8000;
 const RESUME_RECONNECT_COOLDOWN_MS = 2000;
 const STATUS_REHYDRATE_COOLDOWN_MS = 5000;
+const TRADE_BACKFILL_COOLDOWN_MS = 5000;
+const TRADE_BACKFILL_MAX_PAGES = 6;
+const TRADE_BUFFER_LIMIT = 2000;
 
 function shallowEqualPrices(
   a: Record<string, PricePoint>,
@@ -83,7 +87,22 @@ export function useWebSocket() {
     let lastResumeReconnectAt = 0;
     let rehydrateInFlight = false;
     let lastStatusRehydrateAt = 0;
+    let tradeBackfillInFlight = false;
+    let lastTradeBackfillAt = 0;
     const pendingTrades = new Map<string, TradeRecord>();
+
+    const mergeTrades = (
+      current: TradeRecord[],
+      incoming: TradeRecord[],
+      limit = TRADE_BUFFER_LIMIT,
+    ): TradeRecord[] => {
+      const merged = new Map<string, TradeRecord>();
+      for (const t of current) merged.set(t.id, t);
+      for (const t of incoming) merged.set(t.id, t);
+      return Array.from(merged.values())
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, limit);
+    };
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${protocol}//${window.location.host}/ws`;
@@ -115,14 +134,7 @@ export function useWebSocket() {
       if (pendingTrades.size === 0) return;
       const incoming = Array.from(pendingTrades.values());
       pendingTrades.clear();
-      registry.update(tradesRx, (prev) => {
-        const merged = new Map<string, TradeRecord>();
-        for (const t of prev) merged.set(t.id, t);
-        for (const t of incoming) merged.set(t.id, t);
-        return Array.from(merged.values())
-          .sort((a, b) => b.timestamp - a.timestamp)
-          .slice(0, 200);
-      });
+      registry.update(tradesRx, (prev) => mergeTrades(prev, incoming));
     };
 
     const scheduleTradeFlush = () => {
@@ -159,6 +171,43 @@ export function useWebSocket() {
         .finally(() => {
           rehydrateInFlight = false;
         });
+    };
+
+    const backfillTrades = () => {
+      if (destroyed || tradeBackfillInFlight) return;
+      const now = Date.now();
+      if (now - lastTradeBackfillAt < TRADE_BACKFILL_COOLDOWN_MS) return;
+      lastTradeBackfillAt = now;
+      tradeBackfillInFlight = true;
+      void (async () => {
+        let cursor: string | undefined;
+        let page = 0;
+        const collected: TradeRecord[] = [];
+        try {
+          while (page < TRADE_BACKFILL_MAX_PAGES) {
+            const qs = new URLSearchParams({
+              mode: "all",
+              timeframe: "30d",
+              limit: "500",
+            });
+            if (cursor) qs.set("cursor", cursor);
+            const res = await fetch(`/api/trades?${qs.toString()}`);
+            if (!res.ok) break;
+            const payload = (await res.json()) as TradesPageResponse;
+            collected.push(...payload.items);
+            if (!payload.hasMore || !payload.nextCursor) break;
+            cursor = payload.nextCursor;
+            page += 1;
+          }
+          if (collected.length > 0 && !destroyed) {
+            registry.update(tradesRx, (prev) => mergeTrades(prev, collected));
+          }
+        } catch {
+          /* best effort */
+        } finally {
+          tradeBackfillInFlight = false;
+        }
+      })();
     };
 
     function handlePrices(data: any) {
@@ -215,7 +264,8 @@ export function useWebSocket() {
       );
       registry.set(pnlRx, data.pnl ?? { ...emptyPnl });
       registry.set(shadowPnlRx, data.shadowPnl ?? { ...emptyPnl });
-      registry.set(tradesRx, [...(data.trades ?? [])]);
+      registry.update(tradesRx, (prev) => mergeTrades(prev, [...(data.trades ?? [])]));
+      backfillTrades();
       if (data.prices) registry.set(pricesRx, data.prices);
       if (data.oracleEstimate > 0)
         registry.set(oracleEstimateRx, data.oracleEstimate);
@@ -385,6 +435,7 @@ export function useWebSocket() {
       lastResumeReconnectAt = now;
       forceReconnect();
       rehydrateFromHttpStatus();
+      backfillTrades();
     };
 
     document.addEventListener("visibilitychange", onResume);

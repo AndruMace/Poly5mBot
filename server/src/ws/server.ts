@@ -7,6 +7,8 @@ import { PolymarketClient } from "../polymarket/client.js";
 import { EventBus } from "../engine/event-bus.js";
 import type { WSMessage, EngineEvent, WSStatusSnapshot } from "../types.js";
 
+const WS_BOOTSTRAP_TRADES = 200;
+
 function broadcast(wss: WebSocketServer, msg: WSMessage): void {
   const data = JSON.stringify(msg);
   for (const client of wss.clients) {
@@ -46,7 +48,7 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
               feedService.getFeedHealth,
               engine.tracker.getSummary(false),
               engine.tracker.getSummary(true),
-              engine.tracker.getTrades(50),
+              engine.tracker.getTrades(WS_BOOTSTRAP_TRADES),
               engine.getRegime,
               engine.getKillSwitchStatus,
               engine.getRiskSnapshot,

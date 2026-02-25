@@ -5,10 +5,73 @@ import { FeedService } from "./feeds/manager.js";
 import { PolymarketClient } from "./polymarket/client.js";
 import { NotesStore } from "./notes-store.js";
 import { AppConfig } from "./config.js";
+import type { TradeRecord } from "./types.js";
 
 interface RouteResult {
   status: number;
   body: unknown;
+  contentType?: string;
+  contentDisposition?: string;
+  rawBody?: boolean;
+}
+
+type TradeModeParam = "all" | "live" | "shadow";
+type TradeTimeframeParam = "1h" | "12h" | "1d" | "7d" | "30d" | "all";
+
+function parseTradeMode(raw: string | null): TradeModeParam {
+  if (raw === "live" || raw === "shadow" || raw === "all") return raw;
+  return "all";
+}
+
+function parseTradeTimeframe(raw: string | null): TradeTimeframeParam {
+  switch (raw) {
+    case "1h":
+    case "12h":
+    case "1d":
+    case "7d":
+    case "30d":
+    case "all":
+      return raw;
+    default:
+      return "30d";
+  }
+}
+
+function parsePositiveInt(raw: string | null, fallback: number, max = 1000): number {
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(1, Math.min(n, max));
+}
+
+function timeframeToSinceMs(timeframe: TradeTimeframeParam): number | undefined {
+  const now = Date.now();
+  switch (timeframe) {
+    case "1h":
+      return now - 60 * 60 * 1000;
+    case "12h":
+      return now - 12 * 60 * 60 * 1000;
+    case "1d":
+      return now - 24 * 60 * 60 * 1000;
+    case "7d":
+      return now - 7 * 24 * 60 * 60 * 1000;
+    case "30d":
+      return now - 30 * 24 * 60 * 60 * 1000;
+    case "all":
+      return undefined;
+  }
+}
+
+function csvCell(value: unknown): string {
+  const s = String(value ?? "");
+  const needsQuote =
+    s.includes(",") ||
+    s.includes('"') ||
+    s.includes("\n") ||
+    /^[=+\-@\t\r]/.test(s);
+  if (!needsQuote) return s;
+  const escaped = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  return `"${escaped.replace(/"/g, '""')}"`;
 }
 
 export const handleRequest = (
@@ -38,6 +101,8 @@ export const handleRequest = (
     };
 
     const path = url.split("?")[0]!;
+    const parsedUrl = new URL(url, "http://localhost");
+    const searchParams = parsedUrl.searchParams;
 
     if ((method === "POST" || method === "PUT") && bodyParseError) {
       return { status: 400, body: { error: "Invalid JSON body" } };
@@ -58,8 +123,93 @@ export const handleRequest = (
         return { status: 200, body: states };
       }
       if (path === "/api/trades") {
-        const trades = yield* engine.tracker.getTrades(100);
-        return { status: 200, body: trades };
+        const mode = parseTradeMode(searchParams.get("mode"));
+        const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
+        const limit = parsePositiveInt(searchParams.get("limit"), 100, 500);
+        const cursor = searchParams.get("cursor") ?? undefined;
+        const sinceMs = timeframeToSinceMs(timeframe);
+        const result = yield* engine.tracker.listTrades({
+          mode,
+          limit,
+          cursor,
+          sinceMs,
+        });
+        return {
+          status: 200,
+          body: {
+            items: result.items,
+            nextCursor: result.nextCursor,
+            hasMore: result.hasMore,
+            limit,
+            mode,
+            timeframe,
+          },
+        };
+      }
+      if (path === "/api/trades/export.csv") {
+        const mode = parseTradeMode(searchParams.get("mode"));
+        const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
+        const sinceMs = timeframeToSinceMs(timeframe);
+        const allItems: TradeRecord[] = [];
+        let cursor: string | undefined;
+        for (let i = 0; i < 200; i++) {
+          const page = yield* engine.tracker.listTrades({
+            mode,
+            limit: 500,
+            sinceMs,
+            cursor,
+          });
+          allItems.push(...page.items);
+          if (!page.hasMore || !page.nextCursor) break;
+          cursor = page.nextCursor;
+        }
+        const headers = [
+          "ID",
+          "Time",
+          "Strategy",
+          "Side",
+          "Entry Price",
+          "Size",
+          "Shares",
+          "Fee",
+          "Status",
+          "Outcome",
+          "Last Event",
+          "CLOB Result",
+          "CLOB Order ID",
+          "CLOB Reason",
+          "P&L",
+          "Shadow",
+        ];
+        const rows = allItems.map((t) => [
+          t.id,
+          new Date(t.timestamp).toISOString(),
+          t.strategy,
+          t.side,
+          t.entryPrice,
+          t.size,
+          t.shares,
+          t.fee,
+          t.status,
+          t.outcome ?? "",
+          t.lastEventType ?? "",
+          t.clobResult ?? "",
+          t.clobOrderId ?? "",
+          t.clobReason ?? "",
+          t.pnl,
+          t.shadow ? "yes" : "no",
+        ]);
+        const csv = [
+          headers.map(csvCell).join(","),
+          ...rows.map((r) => r.map(csvCell).join(",")),
+        ].join("\n");
+        return {
+          status: 200,
+          body: csv,
+          rawBody: true,
+          contentType: "text/csv; charset=utf-8",
+          contentDisposition: `attachment; filename="trades-${timeframe}-${new Date().toISOString().slice(0, 10)}.csv"`,
+        };
       }
       if (path === "/api/pnl") {
         const summary = yield* engine.tracker.getSummary(false);

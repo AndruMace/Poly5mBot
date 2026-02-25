@@ -358,6 +358,18 @@ export interface WSStatusSnapshot {
   metrics: EngineMetrics;
 }
 
+export type TradeFilterMode = "all" | "live" | "shadow";
+export type TradeTimeframe = "1h" | "12h" | "1d" | "7d" | "30d" | "all";
+
+export interface TradesPageResponse {
+  items: ReadonlyArray<TradeRecord>;
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
+  mode: TradeFilterMode;
+  timeframe: TradeTimeframe;
+}
+
 // ── Notes ──
 
 export interface NotesPayload {

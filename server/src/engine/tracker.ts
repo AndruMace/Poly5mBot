@@ -2,6 +2,54 @@ import { Effect } from "effect";
 import { TradeStore, ShadowTradeStore, toTradeRecord } from "./trade-store.js";
 import type { Trade, TradeRecord, PnLSummary } from "../types.js";
 
+export type TradeQueryMode = "all" | "live" | "shadow";
+
+export interface TradeListQuery {
+  limit?: number;
+  cursor?: string;
+  mode?: TradeQueryMode;
+  sinceMs?: number;
+}
+
+export interface TradeListResult {
+  items: TradeRecord[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+function encodeCursor(t: TradeRecord): string {
+  return Buffer.from(
+    JSON.stringify({ ts: t.timestamp, id: t.id }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeCursor(
+  cursor: string,
+): { ts: number; id: string } | null {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as { ts: unknown; id: unknown };
+    if (
+      typeof parsed.ts === "number" &&
+      Number.isFinite(parsed.ts) &&
+      typeof parsed.id === "string" &&
+      parsed.id.length > 0
+    ) {
+      return { ts: parsed.ts, id: parsed.id };
+    }
+  } catch {
+    /* ignore bad cursor */
+  }
+  return null;
+}
+
+function sortTradesDesc(a: TradeRecord, b: TradeRecord): number {
+  if (b.timestamp !== a.timestamp) return b.timestamp - a.timestamp;
+  return b.id.localeCompare(a.id);
+}
+
 export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
   effect: Effect.gen(function* () {
     const liveStore = yield* TradeStore;
@@ -98,14 +146,49 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
         yield* s.appendEvent(id, "cancel", { reason });
       });
 
-    const getTrades = (limit = 100) =>
+    const listTrades = (query: TradeListQuery = {}) =>
       Effect.gen(function* () {
-        const live = yield* liveStore.getTrades(limit);
-        const shadow = yield* shadowStore.getTrades(limit);
-        return [...live, ...shadow]
-          .sort((a, b) => b.timestamp - a.timestamp)
-          .slice(0, limit);
+        const limit = Math.max(1, Math.min(query.limit ?? 100, 1000));
+        const mode = query.mode ?? "all";
+        const liveAll = yield* liveStore.getAllTrades;
+        const shadowAll = yield* shadowStore.getAllTrades;
+
+        let combined: TradeRecord[] = [];
+        if (mode === "all" || mode === "live") {
+          combined.push(...liveAll.map(toTradeRecord));
+        }
+        if (mode === "all" || mode === "shadow") {
+          combined.push(...shadowAll.map(toTradeRecord));
+        }
+
+        if (typeof query.sinceMs === "number" && Number.isFinite(query.sinceMs)) {
+          combined = combined.filter((t) => t.timestamp >= query.sinceMs!);
+        }
+
+        combined.sort(sortTradesDesc);
+
+        const decodedCursor = query.cursor ? decodeCursor(query.cursor) : null;
+        if (decodedCursor) {
+          combined = combined.filter(
+            (t) =>
+              t.timestamp < decodedCursor.ts ||
+              (t.timestamp === decodedCursor.ts &&
+                t.id.localeCompare(decodedCursor.id) < 0),
+          );
+        }
+
+        const items = combined.slice(0, limit);
+        const hasMore = combined.length > limit;
+        const nextCursor =
+          hasMore && items.length > 0 ? encodeCursor(items[items.length - 1]!) : null;
+
+        return { items, hasMore, nextCursor } satisfies TradeListResult;
       });
+
+    const getTrades = (limit = 100) =>
+      listTrades({ limit, mode: "all" }).pipe(
+        Effect.map((r) => r.items),
+      );
 
     const getSummary = (shadow = false) => getStore(shadow).getSummary;
 
@@ -132,6 +215,7 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
       resolveTrade,
       expireTrade,
       cancelTrade,
+      listTrades,
       getTrades,
       getSummary,
       getTradeById,

@@ -1,20 +1,91 @@
-import { useState, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRxValue } from "@effect-rx/rx-react";
 import { tradesRx } from "../store/index.js";
 import { PnLCard } from "./PnLCard.js";
 import { History, Download } from "lucide-react";
+import type {
+  TradeFilterMode,
+  TradeRecord,
+  TradesPageResponse,
+  TradeTimeframe,
+} from "../types/index.js";
 
-type TradeFilter = "all" | "live" | "shadow";
+const PAGE_SIZE = 100;
+const DISPLAY_TIMEFRAME: TradeTimeframe = "30d";
+const CSV_TIMEFRAME_OPTIONS: Array<{
+  value: TradeTimeframe;
+  label: string;
+}> = [
+  { value: "1h", label: "Past hour" },
+  { value: "12h", label: "Past 12 hours" },
+  { value: "1d", label: "Past day" },
+  { value: "7d", label: "Past week" },
+  { value: "all", label: "All" },
+];
 
 export function TradeLog() {
-  const trades = useRxValue(tradesRx);
-  const [filter, setFilter] = useState<TradeFilter>("all");
+  const wsTrades = useRxValue(tradesRx);
+  const [filter, setFilter] = useState<TradeFilterMode>("all");
+  const [rows, setRows] = useState<TradeRecord[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([null]);
+  const [csvTimeframe, setCsvTimeframe] = useState<TradeTimeframe>("1d");
+  const [exporting, setExporting] = useState(false);
+
+  const mergeTrades = useCallback((a: TradeRecord[], b: TradeRecord[]) => {
+    const merged = new Map<string, TradeRecord>();
+    for (const t of a) merged.set(t.id, t);
+    for (const t of b) merged.set(t.id, t);
+    return Array.from(merged.values()).sort((x, y) => y.timestamp - x.timestamp);
+  }, []);
+
+  const loadPage = useCallback(
+    async (mode: TradeFilterMode, cursor: string | null, targetPage: number) => {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const qs = new URLSearchParams({
+          mode,
+          timeframe: DISPLAY_TIMEFRAME,
+          limit: String(PAGE_SIZE),
+        });
+        if (cursor) qs.set("cursor", cursor);
+        const res = await fetch(`/api/trades?${qs.toString()}`);
+        if (!res.ok) throw new Error(`Trade history request failed (${res.status})`);
+        const payload = (await res.json()) as TradesPageResponse;
+        setRows([...payload.items]);
+        setNextCursor(payload.nextCursor);
+        setPageIndex(targetPage);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Could not load trade history";
+        setLoadError(msg);
+        setRows([]);
+        setNextCursor(null);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    setCursorHistory([null]);
+    void loadPage(filter, null, 0);
+  }, [filter, loadPage]);
+
+  useEffect(() => {
+    if (pageIndex !== 0 || wsTrades.length === 0) return;
+    setRows((prev) => mergeTrades(prev, wsTrades).slice(0, PAGE_SIZE));
+  }, [mergeTrades, pageIndex, wsTrades]);
 
   const filtered = useMemo(() => {
-    if (filter === "all") return trades;
-    if (filter === "shadow") return trades.filter((t) => t.shadow);
-    return trades.filter((t) => !t.shadow);
-  }, [trades, filter]);
+    if (filter === "all") return rows;
+    if (filter === "shadow") return rows.filter((t) => t.shadow);
+    return rows.filter((t) => !t.shadow);
+  }, [rows, filter]);
 
   const lossByStrategy = useMemo(() => {
     const map = new Map<string, { count: number; pnl: number }>();
@@ -28,69 +99,46 @@ export function TradeLog() {
       .sort((a, b) => a.pnl - b.pnl);
   }, [filtered]);
 
-  function csvCell(value: unknown): string {
-    const s = String(value ?? "");
-    const needsQuote =
-      s.includes(",") ||
-      s.includes('"') ||
-      s.includes("\n") ||
-      /^[=+\-@\t\r]/.test(s);
-    if (!needsQuote) return s;
-    const escaped = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
-    return `"${escaped.replace(/"/g, '""')}"`;
+  async function exportCsv() {
+    setExporting(true);
+    try {
+      const qs = new URLSearchParams({
+        mode: filter,
+        timeframe: csvTimeframe,
+      });
+      const res = await fetch(`/api/trades/export.csv?${qs.toString()}`);
+      if (!res.ok) throw new Error(`CSV export failed (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `trades-${csvTimeframe}-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
   }
 
-  function exportCsv() {
-    const headers = [
-      "ID",
-      "Time",
-      "Strategy",
-      "Side",
-      "Entry Price",
-      "Size",
-      "Shares",
-      "Fee",
-      "Status",
-      "Outcome",
-      "Last Event",
-      "CLOB Result",
-      "CLOB Order ID",
-      "CLOB Reason",
-      "P&L",
-      "Shadow",
-    ];
-    const rows = filtered.map((t) => [
-      t.id,
-      new Date(t.timestamp).toISOString(),
-      t.strategy,
-      t.side,
-      t.entryPrice,
-      t.size,
-      t.shares.toFixed(4),
-      t.fee.toFixed(4),
-      t.status,
-      t.outcome ?? "",
-      t.lastEventType ?? "",
-      t.clobResult ?? "",
-      t.clobOrderId ?? "",
-      t.clobReason ?? "",
-      t.pnl.toFixed(4),
-      t.shadow ? "yes" : "no",
-    ]);
-    const csv = [
-      headers.map(csvCell).join(","),
-      ...rows.map((r) => r.map(csvCell).join(",")),
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `trades-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function goToNextPage() {
+    if (!nextCursor || loading) return;
+    const nextPage = pageIndex + 1;
+    setCursorHistory((prev) => {
+      const copy = prev.slice(0, nextPage);
+      copy[nextPage] = nextCursor;
+      return copy;
+    });
+    await loadPage(filter, nextCursor, nextPage);
   }
 
-  const filterBtns: { label: string; value: TradeFilter }[] = [
+  async function goToPrevPage() {
+    if (pageIndex === 0 || loading) return;
+    const prevPage = pageIndex - 1;
+    const prevCursor = cursorHistory[prevPage] ?? null;
+    await loadPage(filter, prevCursor, prevPage);
+  }
+
+  const filterBtns: { label: string; value: TradeFilterMode }[] = [
     { label: "All", value: "all" },
     { label: "Live", value: "live" },
     { label: "Shadow", value: "shadow" },
@@ -108,7 +156,7 @@ export function TradeLog() {
             <History size={16} className="text-[var(--accent-blue)]" />
             <h2 className="text-lg font-semibold">Trade History</h2>
             <span className="text-xs text-[var(--text-secondary)] ml-2">
-              {filtered.length} trades
+              {loading ? "Loading..." : `${filtered.length} trades`}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -127,15 +175,46 @@ export function TradeLog() {
                 </button>
               ))}
             </div>
-            {filtered.length > 0 && (
-              <button
-                onClick={exportCsv}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[var(--bg-secondary)] text-[var(--text-secondary)] rounded hover:text-[var(--text-primary)] transition-colors border border-[var(--border)]"
-              >
-                <Download size={12} />
-                Export CSV
-              </button>
-            )}
+            <select
+              value={csvTimeframe}
+              onChange={(e) => setCsvTimeframe(e.target.value as TradeTimeframe)}
+              className="px-2 py-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-secondary)]"
+            >
+              {CSV_TIMEFRAME_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => void exportCsv()}
+              disabled={exporting}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[var(--bg-secondary)] text-[var(--text-secondary)] rounded hover:text-[var(--text-primary)] transition-colors border border-[var(--border)] disabled:opacity-50"
+            >
+              <Download size={12} />
+              {exporting ? "Exporting..." : "Export CSV"}
+            </button>
+          </div>
+        </div>
+
+        <div className="mb-3 flex items-center justify-between text-xs text-[var(--text-secondary)]">
+          <span>Showing {DISPLAY_TIMEFRAME === "30d" ? "past 30 days" : DISPLAY_TIMEFRAME}</span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => void goToPrevPage()}
+              disabled={pageIndex === 0 || loading}
+              className="px-2 py-1 rounded border border-[var(--border)] disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <span>Page {pageIndex + 1}</span>
+            <button
+              onClick={() => void goToNextPage()}
+              disabled={!nextCursor || loading}
+              className="px-2 py-1 rounded border border-[var(--border)] disabled:opacity-50"
+            >
+              Next
+            </button>
           </div>
         </div>
 
@@ -160,7 +239,11 @@ export function TradeLog() {
           </div>
         )}
 
-        {filtered.length === 0 ? (
+        {loadError ? (
+          <div className="text-sm text-[var(--accent-red)] text-center py-8">
+            {loadError}
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="text-sm text-[var(--text-secondary)] text-center py-12">
             No trades recorded yet. Enable strategies and wait for signals.
           </div>

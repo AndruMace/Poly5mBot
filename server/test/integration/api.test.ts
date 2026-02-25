@@ -123,6 +123,12 @@ const fakeEngine = {
     Effect.succeed("ok" as const),
   tracker: {
     getTrades: (_limit = 100) => Effect.succeed([]),
+    listTrades: (_query: any) =>
+      Effect.succeed({
+        items: [],
+        hasMore: false,
+        nextCursor: null,
+      }),
     getSummary: (_shadow = false) =>
       Effect.succeed({
         totalPnl: 0,
@@ -214,5 +220,29 @@ describe("API handler integration", () => {
       ).pipe(Effect.provide(testLayer)),
     );
     expect(res.status).toBe(400);
+  });
+
+  it("returns paged trades payload", async () => {
+    const res = await Effect.runPromise(
+      handleRequest("/api/trades?mode=all&timeframe=30d&limit=25", "GET", undefined, false, {}).pipe(
+        Effect.provide(testLayer),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as any).items).toEqual([]);
+    expect((res.body as any).hasMore).toBe(false);
+    expect((res.body as any).nextCursor).toBe(null);
+  });
+
+  it("returns csv export payload metadata", async () => {
+    const res = await Effect.runPromise(
+      handleRequest("/api/trades/export.csv?mode=all&timeframe=1h", "GET", undefined, false, {}).pipe(
+        Effect.provide(testLayer),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(res.contentType).toContain("text/csv");
+    expect(res.rawBody).toBe(true);
+    expect(typeof res.body).toBe("string");
   });
 });

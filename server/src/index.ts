@@ -86,12 +86,24 @@ const program = Effect.gen(function* () {
         handleRequest(url, method, parsed, parseError, req.headers).pipe(
           Effect.tap((result) =>
             Effect.sync(() => {
-              res.writeHead(result.status, {
-                "Content-Type": "application/json",
+              const commonHeaders = {
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
-              });
+              };
+              const contentType = result.contentType ?? "application/json";
+              const headers: Record<string, string> = {
+                ...commonHeaders,
+                "Content-Type": contentType,
+              };
+              if (result.contentDisposition) {
+                headers["Content-Disposition"] = result.contentDisposition;
+              }
+              res.writeHead(result.status, headers);
+              if (result.rawBody) {
+                res.end(String(result.body ?? ""));
+                return;
+              }
               res.end(JSON.stringify(result.body));
             }),
           ),
