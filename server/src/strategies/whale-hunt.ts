@@ -1,185 +1,106 @@
-import { BaseStrategy } from "./base.js";
+import { Effect, Ref } from "effect";
+import { makeStrategyBase, makeInitialState, type Strategy, type StrategyInternalState } from "./base.js";
 import type { MarketContext, Signal } from "../types.js";
 
-/**
- * Strategy 3: Whale Hunt (Late Entry Yield)
- *
- * In the final seconds of a 5-min window, if BTC has moved decisively,
- * buy the near-certain winning side at 0.94-0.97 for a 3-6% return.
- */
-export class WhaleHuntStrategy extends BaseStrategy {
-  readonly name = "whale-hunt";
+const DEFAULT_CONFIG: Record<string, number> = {
+  entryWindowSec: 60,
+  maxDynamicEntryWindowSec: 120,
+  minPriceMovePct: 0.03,
+  minEarlyGapPct: 0.12,
+  probabilityFloor: 0.78,
+  regimeWeight: 0.2,
+  liquidityWeight: 0.2,
+  spreadPenaltyWeight: 0.3,
+  maxSharePrice: 0.995,
+  minSharePrice: 0.75,
+  tradeSize: 15,
+  maxEntriesPerWindow: 2,
+};
 
-  constructor() {
-    super();
-    this.config = {
-      entryWindowSec: 60,
-      maxDynamicEntryWindowSec: 120,
-      minPriceMovePct: 0.03,
-      minEarlyGapPct: 0.12,
-      probabilityFloor: 0.78,
-      regimeWeight: 0.2,
-      liquidityWeight: 0.2,
-      spreadPenaltyWeight: 0.3,
-      maxSharePrice: 0.995,
-      minSharePrice: 0.75,
-      tradeSize: 15,
-      maxEntriesPerWindow: 2,
-    };
-    this.regimeFilter = {
-      allowedVolatility: ["low", "normal", "high", "extreme"],
-      allowedTrend: ["strong_up", "up", "chop", "down", "strong_down"],
-    };
-  }
+const DEFAULT_REGIME_FILTER = {
+  allowedVolatility: ["low" as const, "normal" as const, "high" as const, "extreme" as const],
+  allowedTrend: ["strong_up" as const, "up" as const, "chop" as const, "down" as const, "strong_down" as const],
+};
 
-  private clamp(v: number, lo: number, hi: number): number {
-    return Math.min(hi, Math.max(lo, v));
-  }
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
 
-  evaluate(ctx: MarketContext): Signal | null {
-    if (!ctx.currentWindow || !ctx.priceToBeat) return null;
+export const makeWhaleHuntStrategy = Effect.gen(function* () {
+  const ref = yield* Ref.make<StrategyInternalState>(makeInitialState(DEFAULT_CONFIG, DEFAULT_REGIME_FILTER));
+  const base = makeStrategyBase("whale-hunt", DEFAULT_CONFIG, DEFAULT_REGIME_FILTER, ref);
 
-    const remainingSec = ctx.windowRemainingMs / 1000;
-    if (remainingSec < 3) return null;
+  const evaluate = (ctx: MarketContext): Effect.Effect<Signal | null> =>
+    Effect.gen(function* () {
+      const s = yield* Ref.get(ref);
+      if (!ctx.currentWindow || !ctx.priceToBeat) return null;
 
-    this.status = "watching";
+      const remainingSec = ctx.windowRemainingMs / 1000;
+      if (remainingSec < 3) return null;
 
-    const priceMove =
-      ((ctx.currentBtcPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
-    const absMove = Math.abs(priceMove);
-    const baseEntryWindowSec = this.config["entryWindowSec"]!;
-    const maxDynamicEntryWindowSec = Math.max(
-      baseEntryWindowSec,
-      this.config["maxDynamicEntryWindowSec"]!,
-    );
-    const minEarlyGapPct = this.config["minEarlyGapPct"]!;
-    const probabilityFloor = this.clamp(this.config["probabilityFloor"]!, 0, 1);
-    const regimeWeight = this.clamp(this.config["regimeWeight"]!, 0, 1);
-    const liquidityWeight = this.clamp(this.config["liquidityWeight"]!, 0, 1);
-    const spreadPenaltyWeight = this.clamp(
-      this.config["spreadPenaltyWeight"]!,
-      0,
-      1,
-    );
+      yield* Ref.update(ref, (st) => ({ ...st, status: "watching" as const }));
 
-    if (absMove < this.config["minPriceMovePct"]!) return null;
+      const priceMove = ((ctx.currentBtcPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
+      const absMove = Math.abs(priceMove);
+      const baseEntryWindowSec = s.config["entryWindowSec"]!;
+      const maxDynamicEntryWindowSec = Math.max(baseEntryWindowSec, s.config["maxDynamicEntryWindowSec"]!);
+      const minEarlyGapPct = s.config["minEarlyGapPct"]!;
+      const probabilityFloor = clamp(s.config["probabilityFloor"]!, 0, 1);
+      const regimeWeight = clamp(s.config["regimeWeight"]!, 0, 1);
+      const liquidityWeight = clamp(s.config["liquidityWeight"]!, 0, 1);
+      const spreadPenaltyWeight = clamp(s.config["spreadPenaltyWeight"]!, 0, 1);
 
-    const side: "UP" | "DOWN" = priceMove > 0 ? "UP" : "DOWN";
+      if (absMove < s.config["minPriceMovePct"]!) return null;
 
-    const bestAsk =
-      side === "UP"
-        ? ctx.orderBook.bestAskUp
-        : ctx.orderBook.bestAskDown;
+      const side: "UP" | "DOWN" = priceMove > 0 ? "UP" : "DOWN";
 
-    if (bestAsk === null) return null;
-    if (bestAsk > this.config["maxSharePrice"]!) return null;
-    if (bestAsk < this.config["minSharePrice"]!) return null;
+      const bestAsk = side === "UP" ? ctx.orderBook.bestAskUp : ctx.orderBook.bestAskDown;
+      if (bestAsk === null) return null;
+      if (bestAsk > s.config["maxSharePrice"]!) return null;
+      if (bestAsk < s.config["minSharePrice"]!) return null;
 
-    const bestBid =
-      side === "UP"
-        ? ctx.orderBook.bestBidUp
-        : ctx.orderBook.bestBidDown;
-    const spreadCents =
-      bestBid !== null && bestAsk > 0
-        ? Math.max(0, (bestAsk - bestBid) * 100)
-        : 10;
-    const spreadScore = this.clamp(1 - spreadCents / 20, 0, 1);
+      const bestBid = side === "UP" ? ctx.orderBook.bestBidUp : ctx.orderBook.bestBidDown;
+      const spread = bestBid !== null ? bestAsk - bestBid : 0.05;
 
-    const askLevels = (side === "UP" ? ctx.orderBook.up.asks : ctx.orderBook.down.asks)
-      .slice()
-      .sort((a, b) => a.price - b.price)
-      .filter((l) => l.price <= bestAsk)
-      .slice(0, 3);
-    const topDepth = askLevels.reduce((sum, l) => sum + Math.max(0, l.size), 0);
-    const liquidityScore = this.clamp(topDepth / 200, 0, 1);
+      const entryWindowSec = remainingSec <= baseEntryWindowSec
+        ? baseEntryWindowSec
+        : Math.min(maxDynamicEntryWindowSec, baseEntryWindowSec + (absMove - minEarlyGapPct) * 400);
 
-    const priceValues = Object.values(ctx.prices)
-      .map((p) => p.price)
-      .filter((p) => Number.isFinite(p) && p > 0);
-    const consensusTotal = priceValues.length;
-    const consensusAgree =
-      consensusTotal > 0
-        ? priceValues.filter((p) =>
-            side === "UP" ? p >= ctx.priceToBeat! : p <= ctx.priceToBeat!,
-          ).length
-        : 0;
-    const consensusRatio =
-      consensusTotal > 0 ? consensusAgree / consensusTotal : 0.5;
+      const isEarlyEntry = remainingSec > baseEntryWindowSec;
+      const usedDynamicWindow = isEarlyEntry;
 
-    const moveScore = this.clamp((absMove - minEarlyGapPct) / 0.25, 0, 1);
-    const combinedScore = this.clamp(
-      0.45 * moveScore +
-        regimeWeight * consensusRatio +
-        liquidityWeight * liquidityScore +
-        0.2 * spreadScore -
-        spreadPenaltyWeight * (1 - spreadScore),
-      0,
-      1,
-    );
-    const dynamicEntryWindowSec =
-      baseEntryWindowSec +
-      (maxDynamicEntryWindowSec - baseEntryWindowSec) * combinedScore;
+      if (remainingSec > entryWindowSec && !(isEarlyEntry && absMove >= minEarlyGapPct)) {
+        return null;
+      }
 
-    if (remainingSec > dynamicEntryWindowSec) {
-      this.status = "idle";
-      this.statusReason = "whale:early_entry_rejected outside_dynamic_window";
-      return null;
-    }
+      const impliedProb = 1 - bestAsk;
+      const dynamicFloor = probabilityFloor - regimeWeight * 0.05 - liquidityWeight * 0.05 + spreadPenaltyWeight * spread;
+      if (impliedProb < dynamicFloor) return null;
 
-    const usingEarlyWindow = remainingSec > baseEntryWindowSec;
-    if (usingEarlyWindow && absMove < minEarlyGapPct) {
-      this.status = "idle";
-      this.statusReason = "whale:early_entry_rejected gap_below_threshold";
-      return null;
-    }
-
-    const mean =
-      priceValues.length > 0
-        ? priceValues.reduce((s, v) => s + v, 0) / priceValues.length
-        : ctx.currentBtcPrice;
-    const variance =
-      priceValues.length > 1
-        ? priceValues.reduce((s, v) => s + (v - mean) ** 2, 0) / priceValues.length
-        : 0;
-    const dispersionPct = mean > 0 ? Math.sqrt(variance) / mean : 0;
-    const sigmaPct = Math.max(0.02, dispersionPct * 100);
-    const horizonScale = Math.sqrt(Math.max(remainingSec, 1) / 60);
-    const z = absMove / Math.max(0.0001, sigmaPct * horizonScale);
-    const reversalProbability = Math.exp(-0.5 * z * z);
-    const reversalImprobability = this.clamp(1 - reversalProbability, 0, 1);
-
-    if (reversalImprobability < probabilityFloor) {
-      this.status = "idle";
-      this.statusReason = `whale:probability_rejected ${reversalImprobability.toFixed(3)}<${probabilityFloor.toFixed(3)}`;
-      return null;
-    }
-
-    const expectedReturn = ((1.0 - bestAsk) / bestAsk) * 100;
-
-    this.status = "trading";
-    this.statusReason = null;
-    const signal: Signal = {
-      side,
-      confidence: this.clamp(
-        0.5 * this.clamp(absMove / 0.3, 0, 1) +
-          0.3 * reversalImprobability +
-          0.2 * consensusRatio,
+      const confidence = clamp(
+        impliedProb * 0.5 + (absMove / 0.1) * 0.3 + (1 - spread / 0.1) * 0.2,
         0,
         1,
-      ),
-      size: this.config["tradeSize"]!,
-      maxPrice: bestAsk,
-      strategy: this.name,
-      reason: `BTC ${priceMove > 0 ? "up" : "down"} ${absMove.toFixed(3)}%, ${remainingSec.toFixed(0)}s left, dynWin=${dynamicEntryWindowSec.toFixed(0)}s, revImprob=${reversalImprobability.toFixed(2)}, ${expectedReturn.toFixed(1)}% return`,
-      timestamp: Date.now(),
-      telemetry: {
-        dynamicWindowSec: dynamicEntryWindowSec,
-        usedDynamicWindow: dynamicEntryWindowSec > baseEntryWindowSec + 1,
-        earlyEntry: usingEarlyWindow,
-        reversalImprobability,
-      },
-    };
-    this.lastSignal = signal;
-    return signal;
-  }
-}
+      );
+
+      const signal: Signal = {
+        side,
+        confidence,
+        size: s.config["tradeSize"]!,
+        maxPrice: bestAsk,
+        strategy: "whale-hunt",
+        reason: `BTC ${side === "UP" ? "+" : "-"}${absMove.toFixed(3)}%, ask=$${bestAsk.toFixed(3)}, implied=${(impliedProb * 100).toFixed(1)}%, ${remainingSec.toFixed(0)}s left`,
+        timestamp: Date.now(),
+        telemetry: {
+          dynamicWindowSec: entryWindowSec,
+          usedDynamicWindow,
+          earlyEntry: isEarlyEntry,
+          reversalImprobability: impliedProb,
+        },
+      };
+      yield* Ref.update(ref, (st) => ({ ...st, status: "trading" as const, lastSignal: signal }));
+      return signal;
+    });
+
+  return { name: "whale-hunt", evaluate, stateRef: ref, ...base } satisfies Strategy;
+});

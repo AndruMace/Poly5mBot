@@ -1,11 +1,12 @@
-import { useStore } from "../store/index.js";
+import { useRxValue, useRxSet } from "@effect-rx/rx-react";
+import { strategiesRx } from "../store/index.js";
 import { StrategyCard } from "./StrategyCard.js";
 import { Brain } from "lucide-react";
 import type { RegimeFilter } from "../types/index.js";
 
 export function StrategyPanel() {
-  const strategies = useStore((s) => s.strategies);
-  const setStrategies = useStore((s) => s.setStrategies);
+  const strategies = useRxValue(strategiesRx);
+  const setStrategies = useRxSet(strategiesRx);
 
   async function handleToggle(name: string) {
     try {

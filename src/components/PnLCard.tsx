@@ -1,4 +1,10 @@
-import { useStore } from "../store/index.js";
+import { useMemo } from "react";
+import { useRxValue } from "@effect-rx/rx-react";
+import { pnlRx, shadowPnlRx, modeRx } from "../store/index.js";
+import {
+  STRATEGY_UI_ORDER,
+  getStrategyDisplayName,
+} from "../utils/strategy.js";
 import {
   LineChart,
   Line,
@@ -13,11 +19,31 @@ import {
 } from "lucide-react";
 
 export function PnLCard() {
-  const pnl = useStore((s) => s.pnl);
-  const shadowPnl = useStore((s) => s.shadowPnl);
-  const mode = useStore((s) => s.mode);
+  const pnl = useRxValue(pnlRx);
+  const shadowPnl = useRxValue(shadowPnlRx);
+  const mode = useRxValue(modeRx);
 
   const activePnl = mode === "shadow" ? shadowPnl : pnl;
+  const byStrategyRows = useMemo(() => {
+    const withKnownStrategies = STRATEGY_UI_ORDER.map((key) => {
+      const row = activePnl.byStrategy[key];
+      return {
+        key,
+        pnl: row?.pnl ?? 0,
+        trades: row?.trades ?? 0,
+        winRate: row?.winRate ?? 0,
+      };
+    });
+    const extras = Object.entries(activePnl.byStrategy)
+      .filter(([key]) => !STRATEGY_UI_ORDER.includes(key as (typeof STRATEGY_UI_ORDER)[number]))
+      .map(([key, row]) => ({
+        key,
+        pnl: row.pnl,
+        trades: row.trades,
+        winRate: row.winRate,
+      }));
+    return [...withKnownStrategies, ...extras];
+  }, [activePnl.byStrategy]);
 
   const cards = [
     {
@@ -80,8 +106,8 @@ export function PnLCard() {
       </div>
 
       {activePnl.history.length > 1 && (
-        <div className="h-16">
-          <ResponsiveContainer width="100%" height="100%">
+        <div className="h-16 min-w-0">
+          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1}>
             <LineChart data={activePnl.history}>
               <Line
                 type="monotone"
@@ -100,18 +126,18 @@ export function PnLCard() {
         </div>
       )}
 
-      {Object.keys(activePnl.byStrategy).length > 0 && (
+      {byStrategyRows.length > 0 && (
         <div className="mt-3 border-t border-[var(--border)] pt-3">
           <div className="text-xs text-[var(--text-secondary)] mb-2">
             By Strategy
           </div>
           <div className="grid grid-cols-2 gap-2">
-            {Object.entries(activePnl.byStrategy).map(([name, s]) => (
+            {byStrategyRows.map((s) => (
               <div
-                key={name}
+                key={s.key}
                 className="flex items-center justify-between text-xs bg-[var(--bg-secondary)] px-2 py-1.5 rounded"
               >
-                <span className="capitalize">{name}</span>
+                <span>{getStrategyDisplayName(s.key)}</span>
                 <span
                   className="font-mono"
                   style={{

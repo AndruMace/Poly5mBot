@@ -1,17 +1,25 @@
-import { useStore } from "../store/index.js";
+import { useMemo } from "react";
+import { useRxValue } from "@effect-rx/rx-react";
+import { tradesRx, modeRx } from "../store/index.js";
 import { History } from "lucide-react";
+import { getStrategyDisplayName } from "../utils/strategy.js";
 
 export function RecentTrades() {
-  const trades = useStore((s) => s.trades);
-  const mode = useStore((s) => s.mode);
-  const modeTrades = trades
-    .filter((t) => (mode === "shadow" ? t.shadow : !t.shadow))
-    .sort((a, b) => b.timestamp - a.timestamp);
-  const recent = modeTrades
-    .slice(0, 10);
-  const recentLosses = modeTrades
-    .filter((t) => t.status === "resolved" && t.outcome === "loss")
-    .slice(0, 3);
+  const trades = useRxValue(tradesRx);
+  const mode = useRxValue(modeRx);
+
+  const { recent, recentLosses } = useMemo(() => {
+    const modeTrades = trades
+      .filter((t) => (mode === "shadow" ? t.shadow : !t.shadow))
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    return {
+      recent: modeTrades.slice(0, 10),
+      recentLosses: modeTrades
+        .filter((t) => t.status === "resolved" && t.outcome === "loss")
+        .slice(0, 3),
+    };
+  }, [trades, mode]);
 
   return (
     <div className="bg-[var(--bg-card)] rounded-xl p-4 border border-[var(--border)]">
@@ -29,8 +37,8 @@ export function RecentTrades() {
           <div className="space-y-1 text-[var(--text-secondary)]">
             {recentLosses.map((t) => (
               <div key={`loss-${t.id}`} className="flex items-center justify-between">
-                <span className="capitalize">
-                  {t.strategy} ({new Date(t.timestamp).toLocaleTimeString()})
+                <span>
+                  {getStrategyDisplayName(t.strategy)} ({new Date(t.timestamp).toLocaleTimeString()})
                 </span>
                 <span className="font-mono text-[var(--accent-red)]">
                   ${t.pnl.toFixed(2)}
@@ -74,8 +82,8 @@ export function RecentTrades() {
                   <td className="py-1.5 px-2 font-mono text-[var(--text-secondary)]">
                     {new Date(t.timestamp).toLocaleTimeString()}
                   </td>
-                  <td className="py-1.5 px-2 capitalize">
-                    {t.strategy}
+                  <td className="py-1.5 px-2">
+                    {getStrategyDisplayName(t.strategy)}
                     {t.status === "resolved" && t.outcome === "loss" && (
                       <span className="ml-1 rounded bg-[var(--accent-red)]/15 px-1 py-0.5 text-[10px] text-[var(--accent-red)]">
                         LOSS

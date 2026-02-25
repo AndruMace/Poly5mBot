@@ -1,12 +1,13 @@
 import { useState, useMemo } from "react";
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import { tradesRx } from "../store/index.js";
 import { PnLCard } from "./PnLCard.js";
 import { History, Download } from "lucide-react";
 
 type TradeFilter = "all" | "live" | "shadow";
 
 export function TradeLog() {
-  const trades = useStore((s) => s.trades);
+  const trades = useRxValue(tradesRx);
   const [filter, setFilter] = useState<TradeFilter>("all");
 
   const filtered = useMemo(() => {

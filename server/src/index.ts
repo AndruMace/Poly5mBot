@@ -1,48 +1,130 @@
-import express from "express";
-import cors from "cors";
-import { config } from "./config.js";
-import { FeedManager } from "./feeds/manager.js";
+import dotenv from "dotenv";
+import { fileURLToPath } from "node:url";
+import http from "http";
+import { Effect, Layer, Runtime, Scope } from "effect";
+import { NodeContext, NodeRuntime } from "@effect/platform-node";
+import { AppConfig } from "./config.js";
+import { FeedService } from "./feeds/manager.js";
+import { PolymarketClient } from "./polymarket/client.js";
+import { OrderService } from "./polymarket/orders.js";
+import { MarketService } from "./polymarket/markets.js";
+import { AutoRedeemer } from "./polymarket/redeemer.js";
+import { TradeStore, ShadowTradeStore } from "./engine/trade-store.js";
+import { PnLTracker } from "./engine/tracker.js";
+import { RiskManager } from "./engine/risk.js";
+import { FillSimulator } from "./engine/fill-simulator.js";
+import { PositionSizer } from "./engine/position-sizer.js";
+import { RegimeDetector } from "./engine/regime-detector.js";
+import { EventBus } from "./engine/event-bus.js";
 import { TradingEngine } from "./engine/engine.js";
-import { createWSServer } from "./ws/server.js";
-import { createRestApi } from "./api.js";
-import { getPolymarketClient, getWalletAddress } from "./polymarket/client.js";
+import { NotesStore } from "./notes-store.js";
+import { WebSocketService } from "./ws/server.js";
+import { handleRequest } from "./api.js";
 
-const app = express();
-app.use(
-  cors({
-    origin: ["http://localhost:5173", "http://127.0.0.1:5173"],
-  }),
+// Always resolve env from workspace root regardless of cwd (server/src or server/dist).
+dotenv.config({
+  path: fileURLToPath(new URL("../../.env", import.meta.url)),
+});
+
+const AppLive = WebSocketService.Default.pipe(
+  Layer.provideMerge(TradingEngine.Default),
+  Layer.provideMerge(AutoRedeemer.Default),
+  Layer.provideMerge(PnLTracker.Default),
+  Layer.provideMerge(TradeStore.Default),
+  Layer.provideMerge(ShadowTradeStore.Default),
+  Layer.provideMerge(FeedService.Default),
+  Layer.provideMerge(RiskManager.Default),
+  Layer.provideMerge(FillSimulator.Default),
+  Layer.provideMerge(PositionSizer.Default),
+  Layer.provideMerge(RegimeDetector.Default),
+  Layer.provideMerge(EventBus.Default),
+  Layer.provideMerge(OrderService.Default),
+  Layer.provideMerge(MarketService.Default),
+  Layer.provideMerge(PolymarketClient.Default),
+  Layer.provideMerge(NotesStore.Default),
+  Layer.provideMerge(AppConfig.Default),
+  Layer.provideMerge(NodeContext.layer),
 );
-app.use(express.json());
 
-const feedManager = new FeedManager();
-const engine = new TradingEngine(feedManager);
+const program = Effect.gen(function* () {
+  const config = yield* AppConfig;
+  const wsService = yield* WebSocketService;
+  const polyClient = yield* PolymarketClient;
+  const runtime = yield* Effect.runtime<
+    TradingEngine | FeedService | PolymarketClient | NotesStore | AppConfig
+  >();
+  const runFork = Runtime.runFork(runtime);
 
-const server = app.listen(config.server.port, "127.0.0.1", () => {
-  console.log(`Server running on http://127.0.0.1:${config.server.port}`);
-});
+  const httpServer = http.createServer((req, res) => {
+    const url = req.url ?? "/";
+    const method = req.method ?? "GET";
 
-const wss = createWSServer(server, engine, feedManager);
-createRestApi(app, engine, feedManager);
+    if (method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      });
+      res.end();
+      return;
+    }
 
-feedManager.start();
-engine.start();
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      let parsed: any = undefined;
+      if (body) {
+        try { parsed = JSON.parse(body); } catch { parsed = {}; }
+      }
 
-if (config.poly.privateKey) {
-  getPolymarketClient()
-    .then(() => {
-      console.log(`[Startup] Polymarket auto-connected: ${getWalletAddress()}`);
-    })
-    .catch((err) => {
-      console.error("[Startup] Polymarket auto-connect failed:", err.message);
+      const fiber = runFork(
+        handleRequest(url, method, parsed, req.headers).pipe(
+          Effect.tap((result) =>
+            Effect.sync(() => {
+              res.writeHead(result.status, {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+              });
+              res.end(JSON.stringify(result.body));
+            }),
+          ),
+          Effect.catchAllDefect((defect) =>
+            Effect.sync(() => {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: String(defect) }));
+            }),
+          ),
+        ),
+      );
     });
-}
+  });
 
-process.on("SIGINT", () => {
-  console.log("Shutting down...");
-  feedManager.stop();
-  engine.stop();
-  wss.close();
-  server.close();
-  process.exit(0);
+  yield* wsService.attach(httpServer);
+
+  if (config.poly.privateKey) {
+    yield* Effect.gen(function* () {
+      yield* polyClient.getClient;
+      const addr = yield* polyClient.getWalletAddress;
+      yield* Effect.log(`[Startup] Polymarket auto-connected: ${addr}`);
+    }).pipe(
+      Effect.catchAll((err) =>
+        Effect.logError(`[Startup] Polymarket auto-connect failed: ${err}`),
+      ),
+    );
+  }
+
+  yield* Effect.async<void, never>((resume) => {
+    httpServer.listen(config.server.port, "127.0.0.1", () => {
+      resume(Effect.void);
+    });
+  });
+
+  yield* Effect.log(`Server running on http://127.0.0.1:${config.server.port}`);
+  yield* Effect.never;
 });
+
+const main = program.pipe(Effect.scoped, Effect.provide(AppLive));
+
+NodeRuntime.runMain(main);

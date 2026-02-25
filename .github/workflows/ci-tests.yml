@@ -1,0 +1,76 @@
+name: Test Suite
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Unit (server + client)
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      CI_LIVE_INTEGRATION: "false"
+      LIVE_TEST_TIMEOUT_MS: "5000"
+      PLAYWRIGHT_BASE_URL: "http://127.0.0.1:4173"
+      TEST_OPERATOR_TOKEN: "ci-test-token"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install deps
+        run: |
+          npm ci
+          npm --prefix server ci
+      - name: Run unit tests
+        run: npm run test:unit
+
+  integration:
+    name: Integration (http/ws + e2e smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      CI_LIVE_INTEGRATION: "false"
+      LIVE_TEST_TIMEOUT_MS: "5000"
+      PLAYWRIGHT_BASE_URL: "http://127.0.0.1:4173"
+      TEST_OPERATOR_TOKEN: "ci-test-token"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install deps
+        run: |
+          npm ci
+          npm --prefix server ci
+      - name: Run server integration
+        run: npm run test:integration
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run e2e smoke
+        run: npm run test:e2e -- --grep "dashboard boot|strategy and trade tabs"
+
+  live-smoke:
+    name: Live Provider Smoke
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      CI_LIVE_INTEGRATION: "true"
+      LIVE_TEST_TIMEOUT_MS: "4000"
+      PLAYWRIGHT_BASE_URL: "http://127.0.0.1:4173"
+      TEST_OPERATOR_TOKEN: "${{ secrets.TEST_OPERATOR_TOKEN }}"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install server deps
+        run: npm --prefix server ci
+      - name: Run live smoke checks
+        run: npm --prefix server run test:live

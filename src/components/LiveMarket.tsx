@@ -1,5 +1,11 @@
 import { useState, useEffect } from "react";
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import {
+  currentMarketRx,
+  orderBookRx,
+  tradingActiveRx,
+  regimeRx,
+} from "../store/index.js";
 import {
   ExternalLink,
   TrendingUp,
@@ -27,10 +33,10 @@ const REGIME_COLORS: Record<string, string> = {
 };
 
 export function LiveMarket() {
-  const currentMarket = useStore((s) => s.currentMarket);
-  const orderBook = useStore((s) => s.orderBook);
-  const tradingActive = useStore((s) => s.tradingActive);
-  const regime = useStore((s) => s.regime);
+  const currentMarket = useRxValue(currentMarketRx);
+  const orderBook = useRxValue(orderBookRx);
+  const tradingActive = useRxValue(tradingActiveRx);
+  const regime = useRxValue(regimeRx);
   const [remaining, setRemaining] = useState(0);
 
   useEffect(() => {

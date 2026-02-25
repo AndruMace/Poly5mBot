@@ -1,6 +1,8 @@
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import { strategiesRx } from "../store/index.js";
 import { useState } from "react";
 import { Brain, Zap, Eye, Pause, ShieldOff } from "lucide-react";
+import { getStrategyDisplayName } from "../utils/strategy.js";
 
 const STATUS_ICONS: Record<string, typeof Pause> = {
   idle: Pause,
@@ -17,7 +19,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export function StrategyMini() {
-  const strategies = useStore((s) => s.strategies);
+  const strategies = useRxValue(strategiesRx);
   const [selectedReason, setSelectedReason] = useState<{
     name: string;
     reason: string;
@@ -60,7 +62,7 @@ export function StrategyMini() {
                   size={12}
                   className={STATUS_COLORS[s.status] ?? STATUS_COLORS.idle}
                 />
-                <span className="text-sm capitalize">{s.name}</span>
+                <span className="text-sm">{getStrategyDisplayName(s.name)}</span>
               </div>
               <div className="flex items-center gap-2 text-xs font-mono">
                 <span className="text-[var(--accent-green)]">{s.wins}W</span>
@@ -77,8 +79,8 @@ export function StrategyMini() {
       </div>
       {selectedReason && (
         <div className="mt-3 text-xs bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-secondary)]">
-          <span className="font-medium capitalize text-[var(--text-primary)]">
-            {selectedReason.name}
+          <span className="font-medium text-[var(--text-primary)]">
+            {getStrategyDisplayName(selectedReason.name)}
           </span>
           <span>: {selectedReason.reason}</span>
         </div>

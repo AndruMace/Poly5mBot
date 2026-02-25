@@ -1,8 +1,9 @@
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import { orderBookRx } from "../store/index.js";
 import { BookOpen } from "lucide-react";
 
 export function OrderBook() {
-  const orderBook = useStore((s) => s.orderBook);
+  const orderBook = useRxValue(orderBookRx);
 
   const maxBidSize = Math.max(
     ...orderBook.up.bids.map((b) => b.size),

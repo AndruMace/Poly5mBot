@@ -1,5 +1,6 @@
 import { ShieldAlert } from "lucide-react";
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import { riskRx, killSwitchesRx } from "../store/index.js";
 
 function fmtMoney(v: number): string {
   return `${v >= 0 ? "+" : ""}$${v.toFixed(2)}`;
@@ -14,8 +15,8 @@ function ratioColor(current: number, limit: number): string {
 }
 
 export function RiskStatusCard() {
-  const risk = useStore((s) => s.risk);
-  const killSwitches = useStore((s) => s.killSwitches);
+  const risk = useRxValue(riskRx);
+  const killSwitches = useRxValue(killSwitchesRx);
   const activeCount = killSwitches.filter((k) => k.active).length;
 
   const rows = [

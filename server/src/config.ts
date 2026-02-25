@@ -1,48 +1,139 @@
-import dotenv from "dotenv";
-import path from "path";
+import { Config, Effect, Layer, Redacted } from "effect";
 
-dotenv.config({ path: path.resolve(import.meta.dirname, "../../.env") });
+export interface AppConfigShape {
+  readonly poly: {
+    readonly privateKey: string;
+    readonly signatureType: number;
+    readonly proxyAddress: string;
+    readonly apiKey: string;
+    readonly apiSecret: string;
+    readonly apiPassphrase: string;
+    readonly builderApiKey: string;
+    readonly builderSecret: string;
+    readonly builderPassphrase: string;
+    readonly clobUrl: string;
+    readonly chainId: number;
+  };
+  readonly risk: {
+    readonly maxTradeSize: number;
+    readonly maxTotalExposure: number;
+    readonly maxDailyLoss: number;
+    readonly maxConcurrentPositions: number;
+    readonly maxHourlyLoss: number;
+    readonly maxLossPerWindow: number;
+    readonly maxConsecutiveLosses: number;
+    readonly staleDataMs: number;
+    readonly maxSpreadCents: number;
+    readonly maxSignalAgeMs: number;
+  };
+  readonly trading: {
+    readonly mode: "live" | "shadow";
+  };
+  readonly redemption: {
+    readonly enabled: boolean;
+    readonly intervalMs: number;
+    readonly polygonRpcUrl: string;
+  };
+  readonly server: {
+    readonly port: number;
+    readonly operatorToken: string;
+  };
+  readonly test: {
+    readonly ciLiveIntegration: boolean;
+    readonly liveTestTimeoutMs: number;
+    readonly playwrightBaseUrl: string;
+    readonly testOperatorToken: string;
+  };
+}
 
-export const config = {
-  poly: {
-    privateKey: process.env.POLY_PRIVATE_KEY ?? "",
-    signatureType: parseInt(process.env.POLY_SIGNATURE_TYPE ?? "2", 10),
-    proxyAddress: process.env.POLY_PROXY_ADDRESS ?? "",
-    apiKey: process.env.POLY_API_KEY ?? "",
-    apiSecret: process.env.POLY_API_SECRET ?? "",
-    apiPassphrase: process.env.POLY_API_PASSPHRASE ?? "",
-    builderApiKey: process.env.POLY_BUILDER_API_KEY ?? "",
-    builderSecret: process.env.POLY_BUILDER_SECRET ?? "",
-    builderPassphrase: process.env.POLY_BUILDER_PASSPHRASE ?? "",
-    clobUrl: "https://clob.polymarket.com",
-    chainId: 137,
-  },
-  risk: {
-    maxTradeSize: parseFloat(process.env.MAX_TRADE_SIZE ?? "10"),
-    maxTotalExposure: parseFloat(process.env.MAX_TOTAL_EXPOSURE ?? "100"),
-    maxDailyLoss: parseFloat(process.env.MAX_DAILY_LOSS ?? "50"),
-    maxConcurrentPositions: parseInt(
-      process.env.MAX_CONCURRENT_POSITIONS ?? "5",
-      10,
-    ),
-    maxHourlyLoss: parseFloat(process.env.MAX_HOURLY_LOSS ?? "25"),
-    maxLossPerWindow: parseInt(process.env.MAX_LOSS_PER_WINDOW ?? "2", 10),
-    maxConsecutiveLosses: parseInt(process.env.MAX_CONSECUTIVE_LOSSES ?? "5", 10),
-    staleDataMs: parseInt(process.env.STALE_DATA_MS ?? "5000", 10),
-    maxSpreadCents: parseInt(process.env.MAX_SPREAD_CENTS ?? "15", 10),
-    maxSignalAgeMs: parseInt(process.env.MAX_SIGNAL_AGE_MS ?? "2000", 10),
-  },
-  trading: {
-    mode: (process.env.TRADING_MODE ?? "shadow") as "live" | "shadow",
-  },
-  redemption: {
-    enabled: (process.env.AUTO_REDEEM ?? "true") !== "false",
-    intervalMs: parseInt(process.env.REDEEM_INTERVAL_MS ?? "45000", 10),
-    polygonRpcUrl:
-      process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com",
-  },
-  server: {
-    port: parseInt(process.env.SERVER_PORT ?? "3001", 10),
-    operatorToken: process.env.OPERATOR_TOKEN ?? "",
-  },
-} as const;
+export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
+  effect: Effect.gen(function* () {
+    const privateKey = yield* Config.string("POLY_PRIVATE_KEY").pipe(Config.withDefault(""));
+    const signatureType = yield* Config.integer("POLY_SIGNATURE_TYPE").pipe(Config.withDefault(2));
+    const proxyAddress = yield* Config.string("POLY_PROXY_ADDRESS").pipe(Config.withDefault(""));
+    const apiKey = yield* Config.string("POLY_API_KEY").pipe(Config.withDefault(""));
+    const apiSecret = yield* Config.string("POLY_API_SECRET").pipe(Config.withDefault(""));
+    const apiPassphrase = yield* Config.string("POLY_API_PASSPHRASE").pipe(Config.withDefault(""));
+    const builderApiKey = yield* Config.string("POLY_BUILDER_API_KEY").pipe(Config.withDefault(""));
+    const builderSecret = yield* Config.string("POLY_BUILDER_SECRET").pipe(Config.withDefault(""));
+    const builderPassphrase = yield* Config.string("POLY_BUILDER_PASSPHRASE").pipe(Config.withDefault(""));
+
+    const maxTradeSize = yield* Config.number("MAX_TRADE_SIZE").pipe(Config.withDefault(10));
+    const maxTotalExposure = yield* Config.number("MAX_TOTAL_EXPOSURE").pipe(Config.withDefault(100));
+    const maxDailyLoss = yield* Config.number("MAX_DAILY_LOSS").pipe(Config.withDefault(50));
+    const maxConcurrentPositions = yield* Config.integer("MAX_CONCURRENT_POSITIONS").pipe(Config.withDefault(5));
+    const maxHourlyLoss = yield* Config.number("MAX_HOURLY_LOSS").pipe(Config.withDefault(25));
+    const maxLossPerWindow = yield* Config.integer("MAX_LOSS_PER_WINDOW").pipe(Config.withDefault(2));
+    const maxConsecutiveLosses = yield* Config.integer("MAX_CONSECUTIVE_LOSSES").pipe(Config.withDefault(5));
+    const staleDataMs = yield* Config.integer("STALE_DATA_MS").pipe(Config.withDefault(5000));
+    const maxSpreadCents = yield* Config.integer("MAX_SPREAD_CENTS").pipe(Config.withDefault(15));
+    const maxSignalAgeMs = yield* Config.integer("MAX_SIGNAL_AGE_MS").pipe(Config.withDefault(2000));
+
+    const tradingMode = yield* Config.literal("live", "shadow")("TRADING_MODE").pipe(Config.withDefault("shadow" as const));
+
+    const redeemEnabled = yield* Config.string("AUTO_REDEEM").pipe(
+      Config.withDefault("true"),
+      Config.map((v) => v !== "false"),
+    );
+    const redeemIntervalMs = yield* Config.integer("REDEEM_INTERVAL_MS").pipe(Config.withDefault(45000));
+    const polygonRpcUrl = yield* Config.string("POLYGON_RPC_URL").pipe(Config.withDefault("https://polygon-rpc.com"));
+
+    const serverPort = yield* Config.integer("SERVER_PORT").pipe(Config.withDefault(3001));
+    const operatorToken = yield* Config.string("OPERATOR_TOKEN").pipe(Config.withDefault(""));
+    const ciLiveIntegration = yield* Config.string("CI_LIVE_INTEGRATION").pipe(
+      Config.withDefault("false"),
+      Config.map((v) => v === "true"),
+    );
+    const liveTestTimeoutMs = yield* Config.integer("LIVE_TEST_TIMEOUT_MS").pipe(
+      Config.withDefault(15_000),
+    );
+    const playwrightBaseUrl = yield* Config.string("PLAYWRIGHT_BASE_URL").pipe(
+      Config.withDefault("http://127.0.0.1:5173"),
+    );
+    const testOperatorToken = yield* Config.string("TEST_OPERATOR_TOKEN").pipe(
+      Config.withDefault("test-operator-token"),
+    );
+
+    const cfg: AppConfigShape = {
+      poly: {
+        privateKey,
+        signatureType,
+        proxyAddress,
+        apiKey,
+        apiSecret,
+        apiPassphrase,
+        builderApiKey,
+        builderSecret,
+        builderPassphrase,
+        clobUrl: "https://clob.polymarket.com",
+        chainId: 137,
+      },
+      risk: {
+        maxTradeSize,
+        maxTotalExposure,
+        maxDailyLoss,
+        maxConcurrentPositions,
+        maxHourlyLoss,
+        maxLossPerWindow,
+        maxConsecutiveLosses,
+        staleDataMs,
+        maxSpreadCents,
+        maxSignalAgeMs,
+      },
+      trading: { mode: tradingMode },
+      redemption: {
+        enabled: redeemEnabled,
+        intervalMs: redeemIntervalMs,
+        polygonRpcUrl,
+      },
+      server: { port: serverPort, operatorToken },
+      test: {
+        ciLiveIntegration,
+        liveTestTimeoutMs,
+        playwrightBaseUrl,
+        testOperatorToken,
+      },
+    };
+    return cfg;
+  }),
+}) {}

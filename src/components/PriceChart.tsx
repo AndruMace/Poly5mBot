@@ -1,5 +1,11 @@
 import { useMemo } from "react";
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import {
+  priceHistoryRx,
+  pricesRx,
+  oracleEstimateRx,
+  currentMarketRx,
+} from "../store/index.js";
 import {
   LineChart,
   Line,
@@ -30,10 +36,11 @@ interface ChartPoint {
 }
 
 export function PriceChart() {
-  const priceHistory = useStore((s) => s.priceHistory);
-  const prices = useStore((s) => s.prices);
-  const oracleEstimate = useStore((s) => s.oracleEstimate);
-  const priceToBeat = useStore((s) => s.currentMarket?.priceToBeat ?? 0);
+  const priceHistory = useRxValue(priceHistoryRx);
+  const prices = useRxValue(pricesRx);
+  const oracleEstimate = useRxValue(oracleEstimateRx);
+  const currentMarket = useRxValue(currentMarketRx);
+  const priceToBeat = currentMarket?.priceToBeat ?? 0;
 
   const latestPrice = useMemo(() => {
     let best: number | null = null;
@@ -139,8 +146,8 @@ export function PriceChart() {
         </div>
       </div>
 
-      <div className="h-56">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-56 min-w-0">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1}>
           <LineChart data={data}>
             <XAxis
               dataKey="label"

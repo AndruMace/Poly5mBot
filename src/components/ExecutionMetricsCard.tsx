@@ -1,10 +1,15 @@
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import { metricsRx } from "../store/index.js";
 import { Gauge } from "lucide-react";
+import {
+  STRATEGY_UI_ORDER,
+  getStrategyDisplayName,
+} from "../utils/strategy.js";
 
-const STRATEGY_ORDER = ["arb", "efficiency", "whale-hunt", "mean-reversion"];
+const STRATEGY_ORDER = STRATEGY_UI_ORDER;
 
 export function ExecutionMetricsCard() {
-  const metrics = useStore((s) => s.metrics);
+  const metrics = useRxValue(metricsRx);
   const recon = metrics.reconciliation;
 
   return (
@@ -72,7 +77,7 @@ export function ExecutionMetricsCard() {
               const row = metrics.window[name];
               return (
                 <tr key={name} className="border-t border-[var(--border)]/50">
-                  <td className="py-1 capitalize">{name}</td>
+                  <td className="py-1">{getStrategyDisplayName(name)}</td>
                   <td className="py-1 text-right font-mono">{row?.signals ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.riskRejected ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.liveRejected ?? 0}</td>
@@ -130,7 +135,7 @@ export function ExecutionMetricsCard() {
                 const row = recon.strategies.find((s) => s.strategy === name);
                 return (
                   <tr key={`recon-${name}`} className="border-t border-[var(--border)]/50">
-                    <td className="py-1 capitalize">{name}</td>
+                    <td className="py-1">{getStrategyDisplayName(name)}</td>
                     <td className="py-1 text-right font-mono">
                       {row?.liveSignals ?? 0} / {row?.shadowSignals ?? 0}
                     </td>

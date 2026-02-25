@@ -1,60 +1,57 @@
-import { BaseStrategy } from "./base.js";
-import { effectiveFeeRate } from "../polymarket/orders.js";
+import { Effect, Ref } from "effect";
+import { effectiveFeeRateStatic } from "../polymarket/orders.js";
+import { makeStrategyBase, makeInitialState, type Strategy, type StrategyInternalState } from "./base.js";
 import type { MarketContext, Signal } from "../types.js";
 
-/**
- * Strategy 2: Market Efficiency Arbitrage (Yes + No < $1.00)
- *
- * When the sum of best ask prices for Up and Down contracts is less than
- * $1.00 minus fees, buy both sides to lock in a risk-free profit.
- */
-export class EfficiencyStrategy extends BaseStrategy {
-  readonly name = "efficiency";
+const DEFAULT_CONFIG: Record<string, number> = {
+  minProfitBps: 8,
+  tradeSize: 20,
+  maxEntriesPerWindow: 2,
+};
 
-  constructor() {
-    super();
-    this.config = {
-      minProfitBps: 8,
-      tradeSize: 20,
-      maxEntriesPerWindow: 2,
-    };
-    this.regimeFilter = {
-      allowedLiquidity: ["thin", "normal", "deep"],
-      allowedSpread: ["tight", "normal", "wide", "blowout"],
-    };
-  }
+const DEFAULT_REGIME_FILTER = {
+  allowedLiquidity: ["thin" as const, "normal" as const, "deep" as const],
+  allowedSpread: ["tight" as const, "normal" as const, "wide" as const, "blowout" as const],
+};
 
-  evaluate(ctx: MarketContext): Signal | null {
-    if (!ctx.currentWindow) return null;
+export const makeEfficiencyStrategy = Effect.gen(function* () {
+  const ref = yield* Ref.make<StrategyInternalState>(makeInitialState(DEFAULT_CONFIG, DEFAULT_REGIME_FILTER));
+  const base = makeStrategyBase("efficiency", DEFAULT_CONFIG, DEFAULT_REGIME_FILTER, ref);
 
-    const { bestAskUp, bestAskDown } = ctx.orderBook;
-    if (bestAskUp === null || bestAskDown === null) return null;
+  const evaluate = (ctx: MarketContext): Effect.Effect<Signal | null> =>
+    Effect.gen(function* () {
+      const s = yield* Ref.get(ref);
+      if (!ctx.currentWindow) return null;
 
-    this.status = "watching";
+      const { bestAskUp, bestAskDown } = ctx.orderBook;
+      if (bestAskUp === null || bestAskDown === null) return null;
 
-    const totalCost = bestAskUp + bestAskDown;
-    if (totalCost >= 1.0) return null;
+      yield* Ref.update(ref, (st) => ({ ...st, status: "watching" as const }));
 
-    const feeUp = effectiveFeeRate(bestAskUp);
-    const feeDown = effectiveFeeRate(bestAskDown);
-    const totalFees = feeUp + feeDown;
+      const totalCost = bestAskUp + bestAskDown;
+      if (totalCost >= 1.0) return null;
 
-    const netProfit = 1.0 - totalCost - totalFees;
-    const profitBps = netProfit * 10000;
+      const feeUp = effectiveFeeRateStatic(bestAskUp);
+      const feeDown = effectiveFeeRateStatic(bestAskDown);
+      const totalFees = feeUp + feeDown;
 
-    if (profitBps < this.config["minProfitBps"]!) return null;
+      const netProfit = 1.0 - totalCost - totalFees;
+      const profitBps = netProfit * 10000;
 
-    this.status = "trading";
-    const signal: Signal = {
-      side: "UP",
-      confidence: Math.min(1, profitBps / 200),
-      size: this.config["tradeSize"]!,
-      maxPrice: bestAskUp,
-      strategy: this.name,
-      reason: `Sum=${totalCost.toFixed(4)}, profit=${profitBps.toFixed(0)}bps after fees`,
-      timestamp: Date.now(),
-    };
-    this.lastSignal = signal;
-    return signal;
-  }
-}
+      if (profitBps < s.config["minProfitBps"]!) return null;
+
+      const signal: Signal = {
+        side: "UP",
+        confidence: Math.min(1, profitBps / 200),
+        size: s.config["tradeSize"]!,
+        maxPrice: bestAskUp,
+        strategy: "efficiency",
+        reason: `Sum=${totalCost.toFixed(4)}, profit=${profitBps.toFixed(0)}bps after fees`,
+        timestamp: Date.now(),
+      };
+      yield* Ref.update(ref, (st) => ({ ...st, status: "trading" as const, lastSignal: signal }));
+      return signal;
+    });
+
+  return { name: "efficiency", evaluate, stateRef: ref, ...base } satisfies Strategy;
+});

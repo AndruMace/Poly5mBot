@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import {
+  connectedRx,
+  walletAddressRx,
+  killSwitchesRx,
+} from "../store/index.js";
 import {
   Settings,
   Shield,
@@ -12,9 +17,9 @@ import {
 } from "lucide-react";
 
 export function ConnectionSetup() {
-  const connected = useStore((s) => s.connected);
-  const walletAddress = useStore((s) => s.walletAddress);
-  const killSwitches = useStore((s) => s.killSwitches);
+  const connected = useRxValue(connectedRx);
+  const walletAddress = useRxValue(walletAddressRx);
+  const killSwitches = useRxValue(killSwitchesRx);
 
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);

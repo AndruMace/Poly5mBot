@@ -1,94 +1,119 @@
+import { Effect, Ref } from "effect";
 import type { MarketContext, Signal, TradeRecord, StrategyState, RegimeState, RegimeFilter } from "../types.js";
 
-export abstract class BaseStrategy {
-  abstract readonly name: string;
-  enabled = false;
-  status: "idle" | "watching" | "trading" | "regime_blocked" = "idle";
-  config: Record<string, number> = {};
-  lastSignal: Signal | null = null;
-  statusReason: string | null = null;
-  regimeFilter: RegimeFilter = {};
-  regimeBlockReason: string | null = null;
-  wins = 0;
-  losses = 0;
-  totalPnl = 0;
+export interface StrategyInternalState {
+  enabled: boolean;
+  status: "idle" | "watching" | "trading" | "regime_blocked";
+  statusReason: string | null;
+  lastSignal: Signal | null;
+  config: Record<string, number>;
+  wins: number;
+  losses: number;
+  totalPnl: number;
+  regimeBlockReason: string | null;
+  regimeFilter: RegimeFilter;
+}
 
-  abstract evaluate(ctx: MarketContext): Signal | null;
+export interface Strategy {
+  readonly name: string;
+  readonly evaluate: (ctx: MarketContext) => Effect.Effect<Signal | null>;
+  readonly getState: Effect.Effect<StrategyState>;
+  readonly onTrade: (trade: TradeRecord) => Effect.Effect<void>;
+  readonly updateConfig: (newConfig: Record<string, unknown>) => Effect.Effect<boolean>;
+  readonly updateRegimeFilter: (filter: RegimeFilter) => Effect.Effect<void>;
+  readonly setEnabled: (enabled: boolean) => Effect.Effect<void>;
+  readonly stateRef: Ref.Ref<StrategyInternalState>;
+}
 
-  shouldRunInRegime(regime: RegimeState): boolean {
-    const f = this.regimeFilter;
-
-    if (f.allowedVolatility && !f.allowedVolatility.includes(regime.volatilityRegime)) {
-      this.regimeBlockReason = `Vol: ${regime.volatilityRegime}`;
-      return false;
-    }
-    if (f.allowedTrend && !f.allowedTrend.includes(regime.trendRegime)) {
-      this.regimeBlockReason = `Trend: ${regime.trendRegime}`;
-      return false;
-    }
-    if (f.allowedLiquidity && !f.allowedLiquidity.includes(regime.liquidityRegime)) {
-      this.regimeBlockReason = `Liquidity: ${regime.liquidityRegime}`;
-      return false;
-    }
-    if (f.allowedSpread && !f.allowedSpread.includes(regime.spreadRegime)) {
-      this.regimeBlockReason = `Spread: ${regime.spreadRegime}`;
-      return false;
-    }
-
-    this.regimeBlockReason = null;
-    return true;
+export function shouldRunInRegime(filter: RegimeFilter, regime: RegimeState): { allowed: boolean; reason: string | null } {
+  if (filter.allowedVolatility && !filter.allowedVolatility.includes(regime.volatilityRegime)) {
+    return { allowed: false, reason: `Vol: ${regime.volatilityRegime}` };
   }
-
-  onTrade(trade: TradeRecord): void {
-    if (trade.strategy !== this.name) return;
-    if (trade.outcome === "win") {
-      this.wins++;
-      this.totalPnl += trade.pnl;
-    } else if (trade.outcome === "loss") {
-      this.losses++;
-      this.totalPnl += trade.pnl;
-    }
+  if (filter.allowedTrend && !filter.allowedTrend.includes(regime.trendRegime)) {
+    return { allowed: false, reason: `Trend: ${regime.trendRegime}` };
   }
-
-  getWinRate(): number {
-    const total = this.wins + this.losses;
-    return total > 0 ? (this.wins / total) * 100 : 0;
+  if (filter.allowedLiquidity && !filter.allowedLiquidity.includes(regime.liquidityRegime)) {
+    return { allowed: false, reason: `Liquidity: ${regime.liquidityRegime}` };
   }
+  if (filter.allowedSpread && !filter.allowedSpread.includes(regime.spreadRegime)) {
+    return { allowed: false, reason: `Spread: ${regime.spreadRegime}` };
+  }
+  return { allowed: true, reason: null };
+}
 
-  getState(): StrategyState {
-    return {
-      name: this.name,
-      enabled: this.enabled,
-      status: this.status,
-      statusReason: this.statusReason,
-      lastSignal: this.lastSignal,
-      config: { ...this.config },
-      wins: this.wins,
-      losses: this.losses,
-      totalPnl: this.totalPnl,
-      regimeBlockReason: this.regimeBlockReason,
+export function makeStrategyBase(
+  name: string,
+  defaultConfig: Record<string, number>,
+  defaultRegimeFilter: RegimeFilter,
+  ref: Ref.Ref<StrategyInternalState>,
+) {
+  const getState: Effect.Effect<StrategyState> = Ref.get(ref).pipe(
+    Effect.map((s) => ({
+      name,
+      enabled: s.enabled,
+      status: s.status,
+      statusReason: s.statusReason,
+      lastSignal: s.lastSignal,
+      config: { ...s.config },
+      wins: s.wins,
+      losses: s.losses,
+      totalPnl: s.totalPnl,
+      regimeBlockReason: s.regimeBlockReason,
       regimeFilter: {
-        allowedVolatility: this.regimeFilter.allowedVolatility ? [...this.regimeFilter.allowedVolatility] : undefined,
-        allowedTrend: this.regimeFilter.allowedTrend ? [...this.regimeFilter.allowedTrend] : undefined,
-        allowedLiquidity: this.regimeFilter.allowedLiquidity ? [...this.regimeFilter.allowedLiquidity] : undefined,
-        allowedSpread: this.regimeFilter.allowedSpread ? [...this.regimeFilter.allowedSpread] : undefined,
+        allowedVolatility: s.regimeFilter.allowedVolatility ? [...s.regimeFilter.allowedVolatility] : undefined,
+        allowedTrend: s.regimeFilter.allowedTrend ? [...s.regimeFilter.allowedTrend] : undefined,
+        allowedLiquidity: s.regimeFilter.allowedLiquidity ? [...s.regimeFilter.allowedLiquidity] : undefined,
+        allowedSpread: s.regimeFilter.allowedSpread ? [...s.regimeFilter.allowedSpread] : undefined,
       },
-    };
-  }
+    })),
+  );
 
-  updateRegimeFilter(filter: RegimeFilter): void {
-    this.regimeFilter = { ...filter };
-  }
+  const onTrade = (trade: TradeRecord) =>
+    Ref.update(ref, (s) => {
+      if (trade.strategy !== name) return s;
+      if (trade.outcome === "win") {
+        return { ...s, wins: s.wins + 1, totalPnl: s.totalPnl + trade.pnl };
+      } else if (trade.outcome === "loss") {
+        return { ...s, losses: s.losses + 1, totalPnl: s.totalPnl + trade.pnl };
+      }
+      return s;
+    });
 
-  updateConfig(newConfig: Record<string, unknown>): boolean {
-    const validated: Record<string, number> = {};
-    for (const [key, value] of Object.entries(newConfig)) {
-      if (!(key in this.config)) continue;
-      const num = Number(value);
-      if (!Number.isFinite(num) || num < 0 || num > 1_000_000) return false;
-      validated[key] = num;
-    }
-    this.config = { ...this.config, ...validated };
-    return true;
-  }
+  const updateConfig = (newConfig: Record<string, unknown>) =>
+    Ref.modify(ref, (s) => {
+      const validated: Record<string, number> = {};
+      for (const [key, value] of Object.entries(newConfig)) {
+        if (!(key in s.config)) continue;
+        const num = Number(value);
+        if (!Number.isFinite(num) || num < 0 || num > 1_000_000) return [false, s] as const;
+        validated[key] = num;
+      }
+      return [true, { ...s, config: { ...s.config, ...validated } }] as const;
+    });
+
+  const updateRegimeFilter = (filter: RegimeFilter) =>
+    Ref.update(ref, (s) => ({ ...s, regimeFilter: { ...filter } }));
+
+  const setEnabled = (enabled: boolean) =>
+    Ref.update(ref, (s) => ({ ...s, enabled }));
+
+  return { getState, onTrade, updateConfig, updateRegimeFilter, setEnabled };
+}
+
+export function makeInitialState(
+  config: Record<string, number>,
+  regimeFilter: RegimeFilter,
+): StrategyInternalState {
+  return {
+    enabled: false,
+    status: "idle",
+    statusReason: null,
+    lastSignal: null,
+    config: { ...config },
+    wins: 0,
+    losses: 0,
+    totalPnl: 0,
+    regimeBlockReason: null,
+    regimeFilter: { ...regimeFilter },
+  };
 }

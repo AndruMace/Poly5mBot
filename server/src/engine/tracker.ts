@@ -1,120 +1,117 @@
-import { TradeStore } from "./trade-store.js";
-import type { TradeRecord, PnLSummary, Trade } from "../types.js";
+import { Effect } from "effect";
+import { TradeStore, ShadowTradeStore, toTradeRecord } from "./trade-store.js";
+import type { Trade, TradeRecord, PnLSummary } from "../types.js";
 
-/**
- * Thin wrapper around TradeStore that preserves the legacy API
- * used by the engine and WebSocket server.
- */
-export class PnLTracker {
-  readonly store: TradeStore;
-  private shadowStore: TradeStore;
+export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
+  effect: Effect.gen(function* () {
+    const liveStore = yield* TradeStore;
+    const shadowStore = yield* ShadowTradeStore;
 
-  constructor() {
-    this.store = new TradeStore(false);
-    this.shadowStore = new TradeStore(true);
-  }
+    const getStore = (shadow: boolean) => (shadow ? shadowStore : liveStore);
 
-  getStore(shadow: boolean): TradeStore {
-    return shadow ? this.shadowStore : this.store;
-  }
+    const addTrade = (trade: TradeRecord) =>
+      Effect.gen(function* () {
+        const shadow = (trade as any).shadow === true;
+        const s = getStore(shadow);
+        const existing = yield* s.getTrade(trade.id);
+        if (existing) return;
 
-  addTrade(trade: TradeRecord): void {
-    const shadow = (trade as any).shadow === true;
-    const s = this.getStore(shadow);
-    const existing = s.getTrade(trade.id);
-    if (existing) return;
+        yield* s.createTrade({
+          id: trade.id,
+          conditionId: trade.conditionId,
+          strategy: trade.strategy,
+          side: trade.side,
+          tokenId: trade.tokenId,
+          priceToBeatAtEntry: trade.priceToBeatAtEntry,
+          windowEnd: trade.windowEnd,
+          shadow,
+          size: trade.size,
+          requestedShares: trade.shares,
+          clobOrderId: trade.clobOrderId,
+          clobResult: trade.clobResult,
+          clobReason: trade.clobReason,
+        });
 
-    s.createTrade({
-      id: trade.id,
-      conditionId: trade.conditionId,
-      strategy: trade.strategy,
-      side: trade.side,
-      tokenId: trade.tokenId,
-      priceToBeatAtEntry: trade.priceToBeatAtEntry,
-      windowEnd: trade.windowEnd,
-      shadow,
-      size: trade.size,
-      requestedShares: trade.shares,
-      clobOrderId: trade.clobOrderId,
-      clobResult: trade.clobResult,
-      clobReason: trade.clobReason,
-    });
+        yield* s.appendEvent(trade.id, "signal_generated", {
+          conditionId: trade.conditionId,
+          strategy: trade.strategy,
+          side: trade.side,
+          tokenId: trade.tokenId,
+          priceToBeatAtEntry: trade.priceToBeatAtEntry,
+          windowEnd: trade.windowEnd,
+          shadow,
+          size: trade.size,
+          requestedShares: trade.shares,
+        });
 
-    s.appendEvent(trade.id, "signal_generated", {
-      conditionId: trade.conditionId,
-      strategy: trade.strategy,
-      side: trade.side,
-      tokenId: trade.tokenId,
-      priceToBeatAtEntry: trade.priceToBeatAtEntry,
-      windowEnd: trade.windowEnd,
-      shadow,
-      size: trade.size,
-      requestedShares: trade.shares,
-    });
-
-    if (trade.status === "filled") {
-      s.appendEvent(trade.id, "fill", {
-        shares: trade.shares,
-        price: trade.entryPrice,
-        fee: trade.fee,
-        orderId: trade.clobOrderId,
-        result: trade.clobResult,
-        reason: trade.clobReason,
+        if (trade.status === "filled") {
+          yield* s.appendEvent(trade.id, "fill", {
+            shares: trade.shares,
+            price: trade.entryPrice,
+            fee: trade.fee,
+            orderId: trade.clobOrderId,
+            result: trade.clobResult,
+            reason: trade.clobReason,
+          });
+        } else {
+          yield* s.appendEvent(trade.id, "order_submitted", {
+            shares: trade.shares,
+            price: trade.entryPrice,
+            orderId: trade.clobOrderId,
+            result: trade.clobResult,
+            reason: trade.clobReason,
+          });
+        }
       });
-    } else {
-      s.appendEvent(trade.id, "order_submitted", {
-        shares: trade.shares,
-        price: trade.entryPrice,
-        orderId: trade.clobOrderId,
-        result: trade.clobResult,
-        reason: trade.clobReason,
+
+    const resolveTrade = (id: string, won: boolean, shadow = false) =>
+      getStore(shadow).appendEvent(id, "resolved", { won });
+
+    const expireTrade = (id: string, closingBtcPrice: number, shadow = false) =>
+      getStore(shadow).appendEvent(id, "expired", { closingBtcPrice });
+
+    const cancelTrade = (id: string, reason: string, shadow = false) =>
+      Effect.gen(function* () {
+        const s = getStore(shadow);
+        const trade = yield* s.getTrade(id);
+        if (!trade) return;
+        if (trade.status === "cancelled" || trade.status === "resolved") return;
+        yield* s.appendEvent(id, "cancel", { reason });
       });
-    }
-  }
 
-  resolveTrade(id: string, won: boolean, shadow = false): void {
-    const s = this.getStore(shadow);
-    const trade = s.getTrade(id);
-    if (!trade) return;
-    s.appendEvent(id, "resolved", { won });
-  }
+    const getTrades = (limit = 100) =>
+      Effect.gen(function* () {
+        const live = yield* liveStore.getTrades(limit);
+        const shadow = yield* shadowStore.getTrades(limit);
+        return [...live, ...shadow]
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .slice(0, limit);
+      });
 
-  expireTrade(id: string, closingBtcPrice: number, shadow = false): void {
-    const s = this.getStore(shadow);
-    s.appendEvent(id, "expired", { closingBtcPrice });
-  }
+    const getSummary = (shadow = false) => getStore(shadow).getSummary;
 
-  cancelTrade(id: string, reason: string, shadow = false): void {
-    const s = this.getStore(shadow);
-    const trade = s.getTrade(id);
-    if (!trade) return;
-    if (trade.status === "cancelled" || trade.status === "resolved") return;
-    s.appendEvent(id, "cancel", { reason });
-  }
+    const getTradeById = (id: string, shadow = false) => getStore(shadow).getTrade(id);
 
-  getTrades(limit = 100): TradeRecord[] {
-    const live = this.store.getTrades(limit);
-    const shadow = this.shadowStore.getTrades(limit);
-    return [...live, ...shadow]
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, limit);
-  }
+    const getTradeRecordById = (id: string, shadow = false) =>
+      Effect.gen(function* () {
+        const trade = yield* getStore(shadow).getTrade(id);
+        return trade ? toTradeRecord(trade) : undefined;
+      });
 
-  getSummary(shadow = false): PnLSummary {
-    return this.getStore(shadow).getSummary();
-  }
+    const getOpenTrades = (shadow = false) => getStore(shadow).getOpenTrades;
 
-  getTradeById(id: string, shadow = false): Trade | undefined {
-    return this.getStore(shadow).getTrade(id);
-  }
-
-  getTradeRecordById(id: string, shadow = false): TradeRecord | undefined {
-    const s = this.getStore(shadow);
-    const trade = s.getTrade(id);
-    return trade ? s.toTradeRecord(trade) : undefined;
-  }
-
-  getOpenTrades(shadow = false): Trade[] {
-    return this.getStore(shadow).getOpenTrades();
-  }
-}
+    return {
+      liveStore,
+      shadowStore,
+      addTrade,
+      resolveTrade,
+      expireTrade,
+      cancelTrade,
+      getTrades,
+      getSummary,
+      getTradeById,
+      getTradeRecordById,
+      getOpenTrades,
+    } as const;
+  }),
+}) {}

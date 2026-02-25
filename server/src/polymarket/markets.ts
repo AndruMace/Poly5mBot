@@ -1,4 +1,6 @@
+import { Effect, Ref } from "effect";
 import type { MarketWindow } from "../types.js";
+import { PolymarketError } from "../errors.js";
 
 const FIVE_MIN_S = 300;
 const FIVE_MIN_MS = FIVE_MIN_S * 1000;
@@ -26,66 +28,6 @@ interface GammaMarket {
   active: boolean;
   closed: boolean;
   acceptingOrders: boolean;
-}
-
-let cachedWindow: MarketWindow | null = null;
-let lastFetch = 0;
-const CACHE_TTL = 8_000;
-
-export async function fetchCurrentBtc5mWindow(): Promise<MarketWindow | null> {
-  const now = Date.now();
-
-  if (
-    cachedWindow &&
-    now - lastFetch < CACHE_TTL &&
-    cachedWindow.endTime > now
-  ) {
-    return cachedWindow;
-  }
-
-  const nowSec = Math.floor(now / 1000);
-  const currentStart = Math.floor(nowSec / FIVE_MIN_S) * FIVE_MIN_S;
-
-  const slugs = [
-    `btc-updown-5m-${currentStart}`,
-    `btc-updown-5m-${currentStart + FIVE_MIN_S}`,
-  ];
-
-  for (const slug of slugs) {
-    try {
-      const url = `${GAMMA_API}/events?slug=${slug}`;
-      const res = await fetch(url);
-      if (!res.ok) continue;
-
-      const events = (await res.json()) as GammaEvent[];
-      if (!events || events.length === 0) continue;
-
-      const evt = events[0]!;
-      if (evt.closed || !evt.markets || evt.markets.length === 0) continue;
-
-      const mkt = evt.markets[0]!;
-      const window = parseGammaMarket(mkt, evt);
-
-      if (window.endTime > now) {
-        const isNew = cachedWindow?.conditionId !== window.conditionId;
-        cachedWindow = window;
-        lastFetch = now;
-        if (isNew) {
-          console.log(`[Markets] Found: ${evt.title} (${slug})`);
-        }
-        return cachedWindow;
-      }
-    } catch (err) {
-      console.error(`[Markets] Error fetching ${slug}:`, err);
-    }
-  }
-
-  lastFetch = now;
-  if (cachedWindow && cachedWindow.endTime <= now) {
-    console.log("[Markets] Cached window expired, clearing");
-    cachedWindow = null;
-  }
-  return cachedWindow;
 }
 
 function extractPriceToBeat(
@@ -121,7 +63,6 @@ function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
 
   const endTime = new Date(m.endDate).getTime();
   const startTime = endTime - FIVE_MIN_MS;
-
   const priceToBeat = extractPriceToBeat(evt.title, m.description);
 
   return {
@@ -142,14 +83,72 @@ export function formatWindowTitle(window: MarketWindow): string {
   const start = new Date(window.startTime);
   const end = new Date(window.endTime);
   const fmt = (d: Date) =>
-    d.toLocaleTimeString("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
-  const date = start.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-  });
+    d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  const date = start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   return `BTC Up or Down — ${date}, ${fmt(start)}–${fmt(end)} ET`;
 }
+
+const CACHE_TTL = 8_000;
+
+export class MarketService extends Effect.Service<MarketService>()("MarketService", {
+  effect: Effect.gen(function* () {
+    const cacheRef = yield* Ref.make<{ window: MarketWindow | null; lastFetch: number }>({
+      window: null,
+      lastFetch: 0,
+    });
+
+    const fetchCurrentBtc5mWindow = Effect.gen(function* () {
+      const now = Date.now();
+      const cache = yield* Ref.get(cacheRef);
+
+      if (cache.window && now - cache.lastFetch < CACHE_TTL && cache.window.endTime > now) {
+        return cache.window;
+      }
+
+      const nowSec = Math.floor(now / 1000);
+      const currentStart = Math.floor(nowSec / FIVE_MIN_S) * FIVE_MIN_S;
+      const slugs = [
+        `btc-updown-5m-${currentStart}`,
+        `btc-updown-5m-${currentStart + FIVE_MIN_S}`,
+      ];
+
+      for (const slug of slugs) {
+        const result = yield* Effect.tryPromise({
+          try: async () => {
+            const url = `${GAMMA_API}/events?slug=${slug}`;
+            const res = await fetch(url);
+            if (!res.ok) return null;
+            const events = (await res.json()) as GammaEvent[];
+            if (!events || events.length === 0) return null;
+            const evt = events[0]!;
+            if (evt.closed || !evt.markets || evt.markets.length === 0) return null;
+            const mkt = evt.markets[0]!;
+            return { market: parseGammaMarket(mkt, evt), slug, title: evt.title };
+          },
+          catch: (err) => new PolymarketError({ message: `Error fetching ${slug}: ${err}`, cause: err }),
+        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+        if (result && result.market.endTime > now) {
+          const isNew = cache.window?.conditionId !== result.market.conditionId;
+          yield* Ref.set(cacheRef, { window: result.market, lastFetch: now });
+          if (isNew) {
+            yield* Effect.log(`[Markets] Found: ${result.title} (${result.slug})`);
+          }
+          return result.market;
+        }
+      }
+
+      yield* Ref.update(cacheRef, (c) => {
+        const updated = { ...c, lastFetch: now };
+        if (c.window && c.window.endTime <= now) {
+          return { ...updated, window: null };
+        }
+        return updated;
+      });
+      const final = yield* Ref.get(cacheRef);
+      return final.window;
+    });
+
+    return { fetchCurrentBtc5mWindow, formatWindowTitle } as const;
+  }),
+}) {}

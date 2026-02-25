@@ -1,151 +1,157 @@
 import { WebSocketServer, WebSocket } from "ws";
-import type { Server } from "http";
-import type { TradingEngine } from "../engine/engine.js";
-import type { FeedManager } from "../feeds/manager.js";
-import { isConnected, getWalletAddress } from "../polymarket/client.js";
-import type { WSMessage } from "../types.js";
+import type http from "http";
+import { Effect, Queue, Chunk, Schedule, PubSub } from "effect";
+import { TradingEngine } from "../engine/engine.js";
+import { FeedService } from "../feeds/manager.js";
+import { PolymarketClient } from "../polymarket/client.js";
+import { EventBus } from "../engine/event-bus.js";
+import type { WSMessage, EngineEvent, WSStatusSnapshot } from "../types.js";
 
-export function createWSServer(
-  server: Server,
-  engine: TradingEngine,
-  feedManager: FeedManager,
-): WebSocketServer {
-  const wss = new WebSocketServer({ server, path: "/ws" });
-
-  function broadcast(msg: WSMessage): void {
-    const data = JSON.stringify(msg);
-    for (const client of wss.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(data);
-      }
+function broadcast(wss: WebSocketServer, msg: WSMessage): void {
+  const data = JSON.stringify(msg);
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(data);
     }
   }
+}
 
-  let priceThrottle: ReturnType<typeof setInterval> | null = null;
+export class WebSocketService extends Effect.Service<WebSocketService>()("WebSocketService", {
+  scoped: Effect.gen(function* () {
+    const engine = yield* TradingEngine;
+    const feedService = yield* FeedService;
+    const polyClient = yield* PolymarketClient;
+    const eventBus = yield* EventBus;
 
-  let lastExchangeConnected = isConnected();
+    let wss: WebSocketServer | null = null;
 
-  priceThrottle = setInterval(() => {
-    broadcast({
-      type: "prices",
-      data: {
-        prices: feedManager.getLatestPrices(),
-        oracleEstimate: feedManager.getOracleEstimate(),
-      },
-      timestamp: Date.now(),
-    });
-    broadcast({
-      type: "feedHealth",
-      data: feedManager.getFeedHealth(),
-      timestamp: Date.now(),
-    });
-    const nowConnected = isConnected();
-    if (nowConnected !== lastExchangeConnected) {
-      lastExchangeConnected = nowConnected;
-      broadcast({
-        type: "exchangeStatus",
-        data: {
-          exchangeConnected: nowConnected,
-          walletAddress: getWalletAddress(),
-        },
-        timestamp: Date.now(),
+    const attach = (server: http.Server) =>
+      Effect.gen(function* () {
+        wss = new WebSocketServer({ server, path: "/ws" });
+
+        wss.on("connection", (ws) => {
+          Effect.gen(function* () {
+            yield* Effect.log("[WS] Client connected");
+
+            const [tradingActive, mode, strategies, market, orderbook, prices, oracleEst, feedHealth, pnl, shadowPnl, trades, regime, killSwitches, risk, metrics, connected, walletAddr] = yield* Effect.all([
+              engine.isTradingActive,
+              engine.getMode,
+              engine.getStrategyStates,
+              engine.getCurrentWindow,
+              engine.getOrderBookState,
+              feedService.getLatestPrices,
+              feedService.getOracleEstimate,
+              feedService.getFeedHealth,
+              engine.tracker.getSummary(false),
+              engine.tracker.getSummary(true),
+              engine.tracker.getTrades(50),
+              engine.getRegime,
+              engine.getKillSwitchStatus,
+              engine.getRiskSnapshot,
+              engine.getMetrics,
+              polyClient.isConnected,
+              polyClient.getWalletAddress,
+            ]);
+
+            const snapshot: WSStatusSnapshot = {
+              tradingActive,
+              mode,
+              exchangeConnected: connected,
+              walletAddress: walletAddr,
+              strategies,
+              market,
+              orderbook,
+              prices,
+              oracleEstimate: oracleEst,
+              feedHealth,
+              pnl,
+              shadowPnl,
+              trades,
+              regime,
+              killSwitches,
+              risk,
+              metrics,
+            };
+
+            const initial: WSMessage = {
+              type: "status",
+              data: snapshot,
+              timestamp: Date.now(),
+            };
+            ws.send(JSON.stringify(initial));
+          }).pipe(Effect.runSync);
+
+          ws.on("close", () => {
+            Effect.runSync(Effect.log("[WS] Client disconnected"));
+          });
+        });
+
+        // Subscribe to engine events and broadcast
+        const eventQueue = yield* eventBus.subscribe;
+
+        yield* Effect.gen(function* () {
+          const items = yield* Queue.takeAll(eventQueue);
+          const events = Chunk.toReadonlyArray(items);
+          for (const event of events) {
+            if (!wss) continue;
+            const type = eventTagToWSType(event._tag);
+            if (type) {
+              broadcast(wss, { type, data: event.data, timestamp: Date.now() });
+            }
+          }
+        }).pipe(
+          Effect.repeat(Schedule.fixed("50 millis")),
+          Effect.catchAll(() => Effect.void),
+          Effect.forkScoped,
+        );
+
+        // Throttled price + feed health broadcasts
+        yield* Effect.gen(function* () {
+          if (!wss) return;
+          const [prices, oracleEst, feedHealth, connected, walletAddr] = yield* Effect.all([
+            feedService.getLatestPrices,
+            feedService.getOracleEstimate,
+            feedService.getFeedHealth,
+            polyClient.isConnected,
+            polyClient.getWalletAddress,
+          ]);
+          broadcast(wss, {
+            type: "prices",
+            data: { prices, oracleEstimate: oracleEst },
+            timestamp: Date.now(),
+          });
+          broadcast(wss, {
+            type: "feedHealth",
+            data: feedHealth,
+            timestamp: Date.now(),
+          });
+        }).pipe(
+          Effect.repeat(Schedule.fixed("500 millis")),
+          Effect.catchAll(() => Effect.void),
+          Effect.forkScoped,
+        );
+
+        yield* Effect.log("[WS] Server ready on /ws");
       });
-    }
-  }, 500);
 
-  engine.on("market", (market) => {
-    broadcast({ type: "market", data: market, timestamp: Date.now() });
-  });
+    return { attach } as const;
+  }),
+}) {}
 
-  engine.on("orderbook", (orderbook) => {
-    broadcast({ type: "orderbook", data: orderbook, timestamp: Date.now() });
-  });
-
-  engine.on("strategies", (strategies) => {
-    broadcast({ type: "strategies", data: strategies, timestamp: Date.now() });
-  });
-
-  engine.on("trade", (trade) => {
-    broadcast({ type: "trade", data: trade, timestamp: Date.now() });
-  });
-
-  engine.on("pnl", (pnl) => {
-    broadcast({ type: "pnl", data: pnl, timestamp: Date.now() });
-  });
-
-  engine.on("shadowPnl", (pnl) => {
-    broadcast({ type: "shadowPnl", data: pnl, timestamp: Date.now() });
-  });
-
-  engine.on("killswitch", (status) => {
-    broadcast({ type: "killswitch", data: status, timestamp: Date.now() });
-  });
-
-  engine.on("risk", (risk) => {
-    broadcast({ type: "risk", data: risk, timestamp: Date.now() });
-  });
-
-  engine.on("tradingActive", (active: boolean) => {
-    broadcast({
-      type: "tradingActive",
-      data: { tradingActive: active },
-      timestamp: Date.now(),
-    });
-  });
-
-  engine.on("mode", (mode: string) => {
-    broadcast({
-      type: "mode",
-      data: { mode },
-      timestamp: Date.now(),
-    });
-  });
-
-  engine.on("regime", (regime) => {
-    broadcast({ type: "regime", data: regime, timestamp: Date.now() });
-  });
-
-  engine.on("metrics", (metrics) => {
-    broadcast({ type: "metrics", data: metrics, timestamp: Date.now() });
-  });
-
-  wss.on("connection", (ws) => {
-    console.log("[WS] Client connected");
-
-    const initial: WSMessage = {
-      type: "status",
-      data: {
-        tradingActive: engine.tradingActive,
-        mode: engine.mode,
-        exchangeConnected: isConnected(),
-        walletAddress: getWalletAddress(),
-        strategies: engine.getStrategyStates(),
-        market: engine.getCurrentWindow(),
-        orderbook: engine.getOrderBookState(),
-        prices: feedManager.getLatestPrices(),
-        oracleEstimate: feedManager.getOracleEstimate(),
-        feedHealth: feedManager.getFeedHealth(),
-        pnl: engine.tracker.getSummary(),
-        shadowPnl: engine.tracker.getSummary(true),
-        trades: engine.tracker.getTrades(50),
-        regime: engine.getRegime(),
-        killSwitches: engine.getKillSwitchStatus(),
-        risk: engine.getRiskSnapshot(),
-        metrics: engine.getMetrics(),
-      },
-      timestamp: Date.now(),
-    };
-    ws.send(JSON.stringify(initial));
-
-    ws.on("close", () => {
-      console.log("[WS] Client disconnected");
-    });
-  });
-
-  wss.on("close", () => {
-    if (priceThrottle) clearInterval(priceThrottle);
-  });
-
-  console.log("[WS] Server ready on /ws");
-  return wss;
+function eventTagToWSType(tag: EngineEvent["_tag"]): WSMessage["type"] | null {
+  const map: Record<string, string> = {
+    Market: "market",
+    OrderBook: "orderbook",
+    Strategies: "strategies",
+    Trade: "trade",
+    Pnl: "pnl",
+    ShadowPnl: "shadowPnl",
+    KillSwitch: "killswitch",
+    Risk: "risk",
+    TradingActive: "tradingActive",
+    Mode: "mode",
+    Regime: "regime",
+    Metrics: "metrics",
+  };
+  return (map[tag] as WSMessage["type"]) ?? null;
 }

@@ -1,4 +1,4 @@
-import { create } from "zustand";
+import { Rx } from "@effect-rx/rx";
 import type {
   PricePoint,
   MarketWindow,
@@ -13,66 +13,15 @@ import type {
   FeedHealthSnapshot,
 } from "../types/index.js";
 
-interface PriceHistory {
+export interface PriceHistory {
   exchange: string;
   price: number;
   time: number;
 }
 
-interface AppState {
-  connected: boolean;
-  exchangeConnected: boolean;
-  walletAddress: string | null;
-  tradingActive: boolean;
-  mode: "live" | "shadow";
+export const MAX_PRICE_HISTORY = 600;
 
-  prices: Record<string, PricePoint>;
-  oracleEstimate: number;
-  priceHistory: PriceHistory[];
-
-  currentMarket: MarketWindow | null;
-
-  orderBook: OrderBookState;
-
-  strategies: StrategyState[];
-
-  trades: TradeRecord[];
-
-  pnl: PnLSummary;
-  shadowPnl: PnLSummary;
-
-  regime: RegimeState;
-  killSwitches: KillSwitchStatus[];
-  risk: RiskSnapshot;
-  metrics: EngineMetrics;
-  feedHealth: FeedHealthSnapshot;
-
-  setConnected: (connected: boolean, wallet?: string | null) => void;
-  setExchangeConnected: (connected: boolean, wallet?: string | null) => void;
-  setTradingActive: (active: boolean) => void;
-  setMode: (mode: "live" | "shadow") => void;
-  setPrices: (
-    prices: Record<string, PricePoint>,
-    oracleEstimate: number,
-  ) => void;
-  setMarket: (market: MarketWindow) => void;
-  setOrderBook: (ob: OrderBookState) => void;
-  setStrategies: (strategies: StrategyState[]) => void;
-  addTrade: (trade: TradeRecord) => void;
-  setTrades: (trades: TradeRecord[]) => void;
-  setPnl: (pnl: PnLSummary) => void;
-  setShadowPnl: (pnl: PnLSummary) => void;
-  setRegime: (regime: RegimeState) => void;
-  setKillSwitches: (ks: KillSwitchStatus[]) => void;
-  setRisk: (risk: RiskSnapshot) => void;
-  setMetrics: (m: EngineMetrics) => void;
-  setFeedHealth: (f: FeedHealthSnapshot) => void;
-  setInitialState: (data: any) => void;
-}
-
-const MAX_PRICE_HISTORY = 600;
-
-const emptyPnl: PnLSummary = {
+export const emptyPnl: PnLSummary = {
   totalPnl: 0,
   todayPnl: 0,
   totalTrades: 0,
@@ -81,7 +30,7 @@ const emptyPnl: PnLSummary = {
   history: [],
 };
 
-const emptyOrderBook: OrderBookState = {
+export const emptyOrderBook: OrderBookState = {
   up: { bids: [], asks: [] },
   down: { bids: [], asks: [] },
   bestAskUp: null,
@@ -90,7 +39,7 @@ const emptyOrderBook: OrderBookState = {
   bestBidDown: null,
 };
 
-const defaultRegime: RegimeState = {
+export const defaultRegime: RegimeState = {
   volatilityRegime: "normal",
   trendRegime: "chop",
   liquidityRegime: "normal",
@@ -101,7 +50,7 @@ const defaultRegime: RegimeState = {
   spreadValue: 0,
 };
 
-const emptyMetrics: EngineMetrics = {
+export const emptyMetrics: EngineMetrics = {
   windowConditionId: null,
   rolling: {},
   window: {},
@@ -126,24 +75,19 @@ const emptyMetrics: EngineMetrics = {
   },
 };
 
-const emptyFeedHealth: FeedHealthSnapshot = {
-  sources: [
-    "binance",
-    "bybit",
-    "coinbase",
-    "kraken",
-    "bitstamp",
-    "okx",
-  ].map((name) => ({
-    name,
-    connected: false,
-    status: "down",
-    lastUpdateTs: null,
-    ageMs: null,
-    price: null,
-    bid: null,
-    ask: null,
-  })),
+export const emptyFeedHealth: FeedHealthSnapshot = {
+  sources: ["binance", "bybit", "coinbase", "kraken", "bitstamp", "okx"].map(
+    (name) => ({
+      name,
+      connected: false,
+      status: "down" as const,
+      lastUpdateTs: null,
+      ageMs: null,
+      price: null,
+      bid: null,
+      ask: null,
+    }),
+  ),
   healthyCount: 0,
   staleCount: 0,
   downCount: 6,
@@ -152,7 +96,7 @@ const emptyFeedHealth: FeedHealthSnapshot = {
   updatedAt: 0,
 };
 
-const emptyRisk: RiskSnapshot = {
+export const emptyRisk: RiskSnapshot = {
   openPositions: 0,
   maxConcurrentPositions: 0,
   openExposure: 0,
@@ -168,161 +112,23 @@ const emptyRisk: RiskSnapshot = {
   pauseRemainingSec: 0,
 };
 
-export const useStore = create<AppState>((set) => ({
-  connected: false,
-  exchangeConnected: false,
-  walletAddress: null,
-  tradingActive: false,
-  mode: "shadow",
-
-  prices: {},
-  oracleEstimate: 0,
-  priceHistory: [],
-
-  currentMarket: null,
-
-  orderBook: emptyOrderBook,
-
-  strategies: [],
-  trades: [],
-  pnl: { ...emptyPnl },
-  shadowPnl: { ...emptyPnl },
-
-  regime: { ...defaultRegime },
-  killSwitches: [],
-  risk: { ...emptyRisk },
-  metrics: { ...emptyMetrics },
-  feedHealth: { ...emptyFeedHealth },
-
-  setConnected: (connected, wallet) =>
-    set({ connected, walletAddress: wallet ?? null }),
-
-  setExchangeConnected: (exchangeConnected, wallet) =>
-    set((state) => ({
-      exchangeConnected,
-      walletAddress: wallet ?? state.walletAddress,
-    })),
-
-  setTradingActive: (active) => set({ tradingActive: active }),
-
-  setMode: (mode) => set({ mode }),
-
-  setPrices: (prices, oracleEstimate) =>
-    set((state) => {
-      const validEstimate =
-        oracleEstimate > 0 ? oracleEstimate : state.oracleEstimate;
-      const newHistory = [...state.priceHistory];
-      const now = Date.now();
-      for (const [exchange, p] of Object.entries(prices)) {
-        if (p.price > 0) {
-          newHistory.push({ exchange, price: p.price, time: now });
-        }
-      }
-      if (validEstimate > 0) {
-        newHistory.push({ exchange: "oracle", price: validEstimate, time: now });
-      }
-      return {
-        prices,
-        oracleEstimate: validEstimate,
-        priceHistory: newHistory.slice(-MAX_PRICE_HISTORY),
-      };
-    }),
-
-  setMarket: (market) => set({ currentMarket: market }),
-
-  setOrderBook: (ob) => set({ orderBook: ob }),
-
-  setStrategies: (strategies) => set({ strategies }),
-
-  addTrade: (trade) =>
-    set((state) => ({
-      trades: [trade, ...state.trades.filter((t) => t.id !== trade.id)].slice(
-        0,
-        200,
-      ),
-    })),
-
-  setTrades: (trades) => set({ trades }),
-
-  setPnl: (pnl) => set({ pnl }),
-
-  setShadowPnl: (pnl) => set({ shadowPnl: pnl }),
-
-  setRegime: (regime) =>
-    set({
-      regime: {
-        ...defaultRegime,
-        ...regime,
-      },
-    }),
-
-  setKillSwitches: (killSwitches) => set({ killSwitches }),
-
-  setRisk: (risk) =>
-    set({
-      risk: {
-        ...emptyRisk,
-        ...risk,
-      },
-    }),
-
-  setMetrics: (metrics) =>
-    set({
-      metrics: {
-        ...emptyMetrics,
-        ...metrics,
-      },
-    }),
-
-  setFeedHealth: (feedHealth) =>
-    set({
-      feedHealth: {
-        ...emptyFeedHealth,
-        ...feedHealth,
-      },
-    }),
-
-  setInitialState: (data) =>
-    set((state) => ({
-      tradingActive: data.tradingActive ?? false,
-      mode: data.mode ?? "shadow",
-      exchangeConnected: data.exchangeConnected ?? false,
-      walletAddress: data.walletAddress ?? state.walletAddress,
-      strategies: data.strategies ?? [],
-      currentMarket: data.market ?? null,
-      orderBook: data.orderbook ?? emptyOrderBook,
-      pnl: data.pnl ?? { ...emptyPnl },
-      shadowPnl: data.shadowPnl ?? { ...emptyPnl },
-      trades: data.trades ?? [],
-      prices: data.prices ?? state.prices,
-      oracleEstimate:
-        data.oracleEstimate > 0
-          ? data.oracleEstimate
-          : state.oracleEstimate,
-      regime: data.regime
-        ? {
-            ...defaultRegime,
-            ...data.regime,
-          }
-        : { ...defaultRegime },
-      killSwitches: data.killSwitches ?? [],
-      risk: data.risk
-        ? {
-            ...emptyRisk,
-            ...data.risk,
-          }
-        : { ...emptyRisk },
-      metrics: data.metrics
-        ? {
-            ...emptyMetrics,
-            ...data.metrics,
-          }
-        : { ...emptyMetrics },
-      feedHealth: data.feedHealth
-        ? {
-            ...emptyFeedHealth,
-            ...data.feedHealth,
-          }
-        : { ...emptyFeedHealth },
-    })),
-}));
+// Writable Rx atoms
+export const connectedRx = Rx.make(false);
+export const exchangeConnectedRx = Rx.make(false);
+export const walletAddressRx = Rx.make<string | null>(null);
+export const tradingActiveRx = Rx.make(false);
+export const modeRx = Rx.make<"live" | "shadow">("shadow");
+export const pricesRx = Rx.make<Record<string, PricePoint>>({});
+export const oracleEstimateRx = Rx.make(0);
+export const priceHistoryRx = Rx.make<PriceHistory[]>([]);
+export const currentMarketRx = Rx.make<MarketWindow | null>(null);
+export const orderBookRx = Rx.make<OrderBookState>({ ...emptyOrderBook });
+export const strategiesRx = Rx.make<StrategyState[]>([]);
+export const tradesRx = Rx.make<TradeRecord[]>([]);
+export const pnlRx = Rx.make<PnLSummary>({ ...emptyPnl });
+export const shadowPnlRx = Rx.make<PnLSummary>({ ...emptyPnl });
+export const regimeRx = Rx.make<RegimeState>({ ...defaultRegime });
+export const killSwitchesRx = Rx.make<KillSwitchStatus[]>([]);
+export const riskRx = Rx.make<RiskSnapshot>({ ...emptyRisk });
+export const metricsRx = Rx.make<EngineMetrics>({ ...emptyMetrics });
+export const feedHealthRx = Rx.make<FeedHealthSnapshot>({ ...emptyFeedHealth });

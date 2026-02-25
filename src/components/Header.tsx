@@ -1,14 +1,22 @@
 import { useState, useMemo } from "react";
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import {
+  connectedRx,
+  exchangeConnectedRx,
+  walletAddressRx,
+  pricesRx,
+  tradingActiveRx,
+  modeRx,
+} from "../store/index.js";
 import { Wifi, WifiOff, Wallet, Play, Square, Loader2, Eye, Radio } from "lucide-react";
 
 export function Header() {
-  const wsConnected = useStore((s) => s.connected);
-  const exchangeConnected = useStore((s) => s.exchangeConnected);
-  const walletAddress = useStore((s) => s.walletAddress);
-  const prices = useStore((s) => s.prices);
-  const tradingActive = useStore((s) => s.tradingActive);
-  const mode = useStore((s) => s.mode);
+  const wsConnected = useRxValue(connectedRx);
+  const exchangeConnected = useRxValue(exchangeConnectedRx);
+  const walletAddress = useRxValue(walletAddressRx);
+  const prices = useRxValue(pricesRx);
+  const tradingActive = useRxValue(tradingActiveRx);
+  const mode = useRxValue(modeRx);
   const [toggling, setToggling] = useState(false);
   const [switchingMode, setSwitchingMode] = useState(false);
 

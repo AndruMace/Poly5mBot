@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import { feedHealthRx } from "../store/index.js";
 import { Activity } from "lucide-react";
 
 function formatAge(ageMs: number | null): string {
@@ -15,7 +16,7 @@ function statusClass(status: "healthy" | "stale" | "down"): string {
 }
 
 export function FeedHealthCard() {
-  const feedHealth = useStore((s) => s.feedHealth);
+  const feedHealth = useRxValue(feedHealthRx);
 
   const qualityLabel = useMemo(() => {
     const active = feedHealth.healthyCount + feedHealth.staleCount;

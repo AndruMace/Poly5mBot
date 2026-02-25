@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
-import { useStore } from "../store/index.js";
+import { useRxValue } from "@effect-rx/rx-react";
+import { currentMarketRx, oracleEstimateRx } from "../store/index.js";
 import { Clock, TrendingUp, TrendingDown } from "lucide-react";
 
 export function MarketTimer() {
-  const currentMarket = useStore((s) => s.currentMarket);
-  const oracleEstimate = useStore((s) => s.oracleEstimate);
+  const currentMarket = useRxValue(currentMarketRx);
+  const oracleEstimate = useRxValue(oracleEstimateRx);
   const [remaining, setRemaining] = useState(0);
 
   useEffect(() => {
