@@ -81,6 +81,10 @@ export function createWSServer(
     broadcast({ type: "killswitch", data: status, timestamp: Date.now() });
   });
 
+  engine.on("risk", (risk) => {
+    broadcast({ type: "risk", data: risk, timestamp: Date.now() });
+  });
+
   engine.on("tradingActive", (active: boolean) => {
     broadcast({
       type: "tradingActive",
@@ -126,6 +130,7 @@ export function createWSServer(
         trades: engine.tracker.getTrades(50),
         regime: engine.getRegime(),
         killSwitches: engine.getKillSwitchStatus(),
+        risk: engine.getRiskSnapshot(),
         metrics: engine.getMetrics(),
       },
       timestamp: Date.now(),

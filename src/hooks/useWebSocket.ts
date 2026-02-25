@@ -21,6 +21,7 @@ export function useWebSocket() {
       setMode,
       setRegime,
       setKillSwitches,
+      setRisk,
       setMetrics,
       setFeedHealth,
     } = useStore.getState();
@@ -82,6 +83,9 @@ export function useWebSocket() {
               break;
             case "killswitch":
               setKillSwitches(msg.data);
+              break;
+            case "risk":
+              setRisk(msg.data);
               break;
             case "metrics":
               setMetrics(msg.data);

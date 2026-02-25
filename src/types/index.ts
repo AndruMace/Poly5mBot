@@ -216,6 +216,22 @@ export interface KillSwitchStatus {
   reason: string;
 }
 
+export interface RiskSnapshot {
+  openPositions: number;
+  maxConcurrentPositions: number;
+  openExposure: number;
+  maxTotalExposure: number;
+  dailyPnl: number;
+  maxDailyLoss: number;
+  hourlyPnl: number;
+  maxHourlyLoss: number;
+  consecutiveLosses: number;
+  maxConsecutiveLosses: number;
+  windowLosses: number;
+  maxLossPerWindow: number;
+  pauseRemainingSec: number;
+}
+
 export interface WSMessage {
   type: string;
   data: any;

@@ -6,6 +6,7 @@ import { StrategyMini } from "./StrategyMini.js";
 import { RecentTrades } from "./RecentTrades.js";
 import { ExecutionMetricsCard } from "./ExecutionMetricsCard.js";
 import { FeedHealthCard } from "./FeedHealthCard.js";
+import { RiskStatusCard } from "./RiskStatusCard.js";
 
 export function Dashboard() {
   return (
@@ -17,10 +18,13 @@ export function Dashboard() {
         <PriceChart />
       </div>
       <div className="col-span-12">
-        <FeedHealthCard />
+        <RecentTrades />
       </div>
       <div className="col-span-12">
         <PnLCard />
+      </div>
+      <div className="col-span-12">
+        <RiskStatusCard />
       </div>
       <div className="col-span-5">
         <OrderBook />
@@ -29,7 +33,7 @@ export function Dashboard() {
         <StrategyMini />
       </div>
       <div className="col-span-12">
-        <RecentTrades />
+        <FeedHealthCard />
       </div>
       <div className="col-span-12">
         <ExecutionMetricsCard />

@@ -200,6 +200,27 @@ export class RiskManager {
     return this.dailyPnl;
   }
 
+  getHourlyPnl(): number {
+    return this.hourlyPnl;
+  }
+
+  getWindowLosses(): number {
+    return this.windowLosses;
+  }
+
+  getConsecutiveLosses(): number {
+    return this.consecutiveLosses;
+  }
+
+  getPauseRemainingSec(now = Date.now()): number {
+    if (now >= this.pauseUntil) return 0;
+    return Math.ceil((this.pauseUntil - now) / 1000);
+  }
+
+  getOpenExposure(): number {
+    return this.openPositions.reduce((sum, t) => sum + t.size, 0);
+  }
+
   getKillSwitchStatus(): KillSwitchStatus[] {
     return [
       {

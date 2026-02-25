@@ -277,6 +277,22 @@ export interface FeedHealthSnapshot {
   updatedAt: number;
 }
 
+export interface RiskSnapshot {
+  openPositions: number;
+  maxConcurrentPositions: number;
+  openExposure: number;
+  maxTotalExposure: number;
+  dailyPnl: number;
+  maxDailyLoss: number;
+  hourlyPnl: number;
+  maxHourlyLoss: number;
+  consecutiveLosses: number;
+  maxConsecutiveLosses: number;
+  windowLosses: number;
+  maxLossPerWindow: number;
+  pauseRemainingSec: number;
+}
+
 // ── WebSocket types ──
 
 export type WSMessageType =
@@ -295,6 +311,7 @@ export type WSMessageType =
   | "metrics"
   | "feedHealth"
   | "exchangeStatus"
+  | "risk"
   | "error";
 
 export interface WSMessage {

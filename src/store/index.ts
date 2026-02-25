@@ -8,6 +8,7 @@ import type {
   PnLSummary,
   RegimeState,
   KillSwitchStatus,
+  RiskSnapshot,
   EngineMetrics,
   FeedHealthSnapshot,
 } from "../types/index.js";
@@ -42,6 +43,7 @@ interface AppState {
 
   regime: RegimeState;
   killSwitches: KillSwitchStatus[];
+  risk: RiskSnapshot;
   metrics: EngineMetrics;
   feedHealth: FeedHealthSnapshot;
 
@@ -62,6 +64,7 @@ interface AppState {
   setShadowPnl: (pnl: PnLSummary) => void;
   setRegime: (regime: RegimeState) => void;
   setKillSwitches: (ks: KillSwitchStatus[]) => void;
+  setRisk: (risk: RiskSnapshot) => void;
   setMetrics: (m: EngineMetrics) => void;
   setFeedHealth: (f: FeedHealthSnapshot) => void;
   setInitialState: (data: any) => void;
@@ -149,6 +152,22 @@ const emptyFeedHealth: FeedHealthSnapshot = {
   updatedAt: 0,
 };
 
+const emptyRisk: RiskSnapshot = {
+  openPositions: 0,
+  maxConcurrentPositions: 0,
+  openExposure: 0,
+  maxTotalExposure: 0,
+  dailyPnl: 0,
+  maxDailyLoss: 0,
+  hourlyPnl: 0,
+  maxHourlyLoss: 0,
+  consecutiveLosses: 0,
+  maxConsecutiveLosses: 0,
+  windowLosses: 0,
+  maxLossPerWindow: 0,
+  pauseRemainingSec: 0,
+};
+
 export const useStore = create<AppState>((set) => ({
   connected: false,
   exchangeConnected: false,
@@ -171,6 +190,7 @@ export const useStore = create<AppState>((set) => ({
 
   regime: { ...defaultRegime },
   killSwitches: [],
+  risk: { ...emptyRisk },
   metrics: { ...emptyMetrics },
   feedHealth: { ...emptyFeedHealth },
 
@@ -238,6 +258,14 @@ export const useStore = create<AppState>((set) => ({
 
   setKillSwitches: (killSwitches) => set({ killSwitches }),
 
+  setRisk: (risk) =>
+    set({
+      risk: {
+        ...emptyRisk,
+        ...risk,
+      },
+    }),
+
   setMetrics: (metrics) =>
     set({
       metrics: {
@@ -278,6 +306,12 @@ export const useStore = create<AppState>((set) => ({
           }
         : { ...defaultRegime },
       killSwitches: data.killSwitches ?? [],
+      risk: data.risk
+        ? {
+            ...emptyRisk,
+            ...data.risk,
+          }
+        : { ...emptyRisk },
       metrics: data.metrics
         ? {
             ...emptyMetrics,

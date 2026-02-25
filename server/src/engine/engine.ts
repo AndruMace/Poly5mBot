@@ -38,6 +38,7 @@ import type {
   StrategyDiagnostics,
   EngineMetrics,
   OrderBookSide,
+  RiskSnapshot,
 } from "../types.js";
 
 let tradeCounter = 0;
@@ -535,6 +536,7 @@ export class TradingEngine extends EventEmitter {
       this.emit("shadowPnl", this.tracker.getSummary(true));
       this.emit("regime", this._regime);
       this.emit("killswitch", this.riskManager.getKillSwitchStatus());
+      this.emit("risk", this.getRiskSnapshot());
       this.emit("metrics", this.getMetrics());
       return;
     }
@@ -547,6 +549,7 @@ export class TradingEngine extends EventEmitter {
       this.emit("shadowPnl", this.tracker.getSummary(true));
       this.emit("regime", this._regime);
       this.emit("killswitch", this.riskManager.getKillSwitchStatus());
+      this.emit("risk", this.getRiskSnapshot());
       this.emit("metrics", this.getMetrics());
       return;
     }
@@ -714,6 +717,7 @@ export class TradingEngine extends EventEmitter {
     this.emit("shadowPnl", this.tracker.getSummary(true));
     this.emit("regime", this._regime);
     this.emit("killswitch", this.riskManager.getKillSwitchStatus());
+    this.emit("risk", this.getRiskSnapshot());
     this.emit("metrics", this.getMetrics());
   }
 
@@ -1406,6 +1410,24 @@ export class TradingEngine extends EventEmitter {
 
   getKillSwitchStatus() {
     return this.riskManager.getKillSwitchStatus();
+  }
+
+  getRiskSnapshot(): RiskSnapshot {
+    return {
+      openPositions: this.riskManager.getOpenPositions().length,
+      maxConcurrentPositions: config.risk.maxConcurrentPositions,
+      openExposure: this.riskManager.getOpenExposure(),
+      maxTotalExposure: config.risk.maxTotalExposure,
+      dailyPnl: this.riskManager.getDailyPnl(),
+      maxDailyLoss: config.risk.maxDailyLoss,
+      hourlyPnl: this.riskManager.getHourlyPnl(),
+      maxHourlyLoss: config.risk.maxHourlyLoss,
+      consecutiveLosses: this.riskManager.getConsecutiveLosses(),
+      maxConsecutiveLosses: config.risk.maxConsecutiveLosses,
+      windowLosses: this.riskManager.getWindowLosses(),
+      maxLossPerWindow: config.risk.maxLossPerWindow,
+      pauseRemainingSec: this.riskManager.getPauseRemainingSec(),
+    };
   }
 
   getMetrics(): EngineMetrics {

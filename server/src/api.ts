@@ -45,6 +45,7 @@ export function createRestApi(
       feedHealth: feedManager.getFeedHealth(),
       regime: engine.getRegime(),
       killSwitches: engine.getKillSwitchStatus(),
+      risk: engine.getRiskSnapshot(),
       metrics: engine.getMetrics(),
       redeemer: engine.redeemer.getStatus(),
     });
