@@ -3,11 +3,15 @@ import { computeRSI, buildCandles } from "../indicators/technical.js";
 import type { MarketContext, Signal, PricePoint } from "../types.js";
 
 /**
- * Strategy 4: Mean Reversion & Scalping
+ * Strategy 4: RSI Momentum Confirmation
  *
- * Uses RSI on 1-minute candles to detect overextended moves.
- * If RSI > overbought and price spiked early in the window, bets on
- * reversion (Down). If RSI < oversold and price dropped, bets Up.
+ * Uses RSI on 1-minute candles to confirm strong directional momentum.
+ * In 5-minute binary markets, overextended moves tend to persist through
+ * the window close rather than revert. RSI readings confirm the strength
+ * and conviction of the current move:
+ *
+ *   RSI > overbought + price above reference → bet UP  (momentum carries)
+ *   RSI < oversold   + price below reference → bet DOWN (momentum carries)
  */
 export class MeanReversionStrategy extends BaseStrategy {
   readonly name = "mean-reversion";
@@ -24,6 +28,7 @@ export class MeanReversionStrategy extends BaseStrategy {
       minPriceMovePct: 0.03,
       maxSharePrice: 0.65,
       tradeSize: 8,
+      maxEntriesPerWindow: 2,
     };
     this.regimeFilter = {
       allowedVolatility: ["low", "normal", "high"],
@@ -62,11 +67,11 @@ export class MeanReversionStrategy extends BaseStrategy {
     let reason = "";
 
     if (rsi > this.config["rsiOverbought"]! && priceMove > 0) {
-      side = "DOWN";
-      reason = `RSI=${rsi.toFixed(1)} overbought, price +${absMove.toFixed(3)}% — expecting reversion`;
-    } else if (rsi < this.config["rsiOversold"]! && priceMove < 0) {
       side = "UP";
-      reason = `RSI=${rsi.toFixed(1)} oversold, price -${absMove.toFixed(3)}% — expecting reversion`;
+      reason = `RSI=${rsi.toFixed(1)} confirms upward momentum, price +${absMove.toFixed(3)}%`;
+    } else if (rsi < this.config["rsiOversold"]! && priceMove < 0) {
+      side = "DOWN";
+      reason = `RSI=${rsi.toFixed(1)} confirms downward momentum, price -${absMove.toFixed(3)}%`;
     }
 
     if (!side) return null;

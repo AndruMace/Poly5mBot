@@ -15,6 +15,7 @@ import {
   effectiveFeeRate,
 } from "../polymarket/orders.js";
 import { isConnected } from "../polymarket/client.js";
+import { AutoRedeemer } from "../polymarket/redeemer.js";
 import { ArbStrategy } from "../strategies/arb.js";
 import { EfficiencyStrategy } from "../strategies/efficiency.js";
 import { WhaleHuntStrategy } from "../strategies/whale-hunt.js";
@@ -110,6 +111,7 @@ export class TradingEngine extends EventEmitter {
   private simulator = new FillSimulator();
   private positionSizer: PositionSizer;
   private regimeDetector = new RegimeDetector();
+  readonly redeemer: AutoRedeemer;
 
   readonly strategies = {
     arb: new ArbStrategy(),
@@ -177,6 +179,7 @@ export class TradingEngine extends EventEmitter {
     super();
     this.feedManager = feedManager;
     this._mode = config.trading.mode;
+    this.redeemer = new AutoRedeemer(config.redemption.polygonRpcUrl);
     this.positionSizer = new PositionSizer({
       baseSize: Math.min(10, config.risk.maxTradeSize),
       maxSize: config.risk.maxTradeSize,
@@ -265,6 +268,14 @@ export class TradingEngine extends EventEmitter {
     );
     this.pollMarkets();
 
+    if (config.redemption.enabled && config.poly.privateKey) {
+      this.redeemer
+        .start(config.redemption.intervalMs)
+        .catch((err) =>
+          console.error("[Engine] Redeemer failed to start:", err),
+        );
+    }
+
     console.log(`[Engine] Started in ${this._mode.toUpperCase()} mode`);
   }
 
@@ -272,6 +283,7 @@ export class TradingEngine extends EventEmitter {
     this.running = false;
     if (this.tickInterval) clearInterval(this.tickInterval);
     if (this.marketPollInterval) clearInterval(this.marketPollInterval);
+    this.redeemer.stop();
     console.log("[Engine] Stopped");
   }
 
@@ -432,6 +444,9 @@ export class TradingEngine extends EventEmitter {
       }
       if (trade.outcome === "win") {
         this.bumpDiag(trade.strategy, "wins", 1, tradeShadow);
+        if (!tradeShadow && config.redemption.enabled) {
+          this.redeemer.queueRedemption(trade.conditionId);
+        }
       } else if (trade.outcome === "loss") {
         this.bumpDiag(trade.strategy, "losses", 1, tradeShadow);
       }
@@ -534,10 +549,16 @@ export class TradingEngine extends EventEmitter {
           continue;
         }
         const maxEntries = MAX_ENTRIES_PER_WINDOW[strategy.name] ?? 2;
+        const configuredCap = Math.floor(
+          strategy.config["maxEntriesPerWindow"] ?? NaN,
+        );
+        const maxEntriesPerWindow = Number.isFinite(configuredCap)
+          ? clamp(configuredCap, 1, 20)
+          : maxEntries;
         const entries = this.entriesThisWindow.get(strategy.name) ?? 0;
-        if (entries >= maxEntries) {
+        if (entries >= maxEntriesPerWindow) {
           strategy.status = "idle";
-          strategy.statusReason = `Window entry cap reached (${maxEntries})`;
+          strategy.statusReason = `Window entry cap reached (${maxEntriesPerWindow})`;
           continue;
         }
         const signal = strategy.evaluate(ctx);
@@ -808,7 +829,7 @@ export class TradingEngine extends EventEmitter {
       console.log(
         `[Shadow] ${signal.strategy} ${signal.side} cancelled: ${result.reason}`,
       );
-      return true;
+      return false;
     }
 
     const fillRatio = shares > 0 ? result.filledShares / shares : 0;
@@ -824,7 +845,7 @@ export class TradingEngine extends EventEmitter {
       console.log(
         `[Shadow] ${signal.strategy} cancelled low fill ratio ${(fillRatio * 100).toFixed(1)}%`,
       );
-      return true;
+      return false;
     }
 
     if (result.filledShares < shares) {
@@ -1057,9 +1078,7 @@ export class TradingEngine extends EventEmitter {
       }
     }
 
-    if (created.length === 0) {
-      return true;
-    }
+    if (created.length === 0) return false;
 
     const store = this.tracker.getStore(true);
     if (secondLegFailed && created.length === 1) {

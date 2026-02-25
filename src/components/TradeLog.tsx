@@ -15,6 +15,18 @@ export function TradeLog() {
     return trades.filter((t) => !t.shadow);
   }, [trades, filter]);
 
+  const lossByStrategy = useMemo(() => {
+    const map = new Map<string, { count: number; pnl: number }>();
+    for (const t of filtered) {
+      if (t.status !== "resolved" || t.outcome !== "loss") continue;
+      const prev = map.get(t.strategy) ?? { count: 0, pnl: 0 };
+      map.set(t.strategy, { count: prev.count + 1, pnl: prev.pnl + t.pnl });
+    }
+    return [...map.entries()]
+      .map(([strategy, data]) => ({ strategy, ...data }))
+      .sort((a, b) => a.pnl - b.pnl);
+  }, [filtered]);
+
   function exportCsv() {
     const headers = [
       "ID",
@@ -111,6 +123,27 @@ export function TradeLog() {
           </div>
         </div>
 
+        {lossByStrategy.length > 0 && (
+          <div className="mb-3 rounded-lg border border-[var(--accent-red)]/35 bg-[var(--accent-red)]/8 p-3">
+            <div className="mb-2 text-xs font-medium text-[var(--accent-red)]">
+              Losses By Strategy (Resolved)
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {lossByStrategy.map((row) => (
+                <div
+                  key={`loss-${row.strategy}`}
+                  className="flex items-center justify-between rounded bg-[var(--bg-card)]/70 px-2 py-1.5 text-xs"
+                >
+                  <span className="capitalize">{row.strategy}</span>
+                  <span className="font-mono text-[var(--accent-red)]">
+                    {row.count} loss{row.count === 1 ? "" : "es"} · ${row.pnl.toFixed(2)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {filtered.length === 0 ? (
           <div className="text-sm text-[var(--text-secondary)] text-center py-12">
             No trades recorded yet. Enable strategies and wait for signals.
@@ -139,13 +172,22 @@ export function TradeLog() {
                 {filtered.map((t) => (
                   <tr
                     key={t.id}
-                    className="border-t border-[var(--border)]/50 hover:bg-[var(--bg-secondary)]/30"
+                    className={`border-t border-[var(--border)]/50 hover:bg-[var(--bg-secondary)]/30 ${
+                      t.status === "resolved" && t.outcome === "loss"
+                        ? "bg-[var(--accent-red)]/8"
+                        : ""
+                    }`}
                   >
                     <td className="py-2 px-2 font-mono text-[var(--text-secondary)]">
                       {new Date(t.timestamp).toLocaleTimeString()}
                     </td>
                     <td className="py-2 px-2 capitalize">
                       {t.strategy}
+                      {t.status === "resolved" && t.outcome === "loss" && (
+                        <span className="ml-1 rounded bg-[var(--accent-red)]/15 px-1 py-0.5 text-[10px] text-[var(--accent-red)]">
+                          LOSS
+                        </span>
+                      )}
                       {t.shadow && (
                         <span className="ml-1 text-[10px] text-[var(--accent-yellow)]">S</span>
                       )}

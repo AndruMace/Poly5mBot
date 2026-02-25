@@ -16,6 +16,7 @@ export class EfficiencyStrategy extends BaseStrategy {
     this.config = {
       minProfitBps: 8,
       tradeSize: 20,
+      maxEntriesPerWindow: 2,
     };
     this.regimeFilter = {
       allowedLiquidity: ["thin", "normal", "deep"],

@@ -11,6 +11,9 @@ export const config = {
     apiKey: process.env.POLY_API_KEY ?? "",
     apiSecret: process.env.POLY_API_SECRET ?? "",
     apiPassphrase: process.env.POLY_API_PASSPHRASE ?? "",
+    builderApiKey: process.env.POLY_BUILDER_API_KEY ?? "",
+    builderSecret: process.env.POLY_BUILDER_SECRET ?? "",
+    builderPassphrase: process.env.POLY_BUILDER_PASSPHRASE ?? "",
     clobUrl: "https://clob.polymarket.com",
     chainId: 137,
   },
@@ -31,6 +34,12 @@ export const config = {
   },
   trading: {
     mode: (process.env.TRADING_MODE ?? "shadow") as "live" | "shadow",
+  },
+  redemption: {
+    enabled: (process.env.AUTO_REDEEM ?? "true") !== "false",
+    intervalMs: parseInt(process.env.REDEEM_INTERVAL_MS ?? "45000", 10),
+    polygonRpcUrl:
+      process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com",
   },
   server: {
     port: parseInt(process.env.SERVER_PORT ?? "3001", 10),

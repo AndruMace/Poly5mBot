@@ -20,7 +20,7 @@ const STRATEGY_DESCRIPTIONS: Record<string, string> = {
   "whale-hunt":
     "In the final seconds of a window, buys the near-certain winning side at 94-97\u00A2 for a small but consistent yield.",
   "mean-reversion":
-    "Uses RSI to detect overextended moves early in a window and bets on price reverting toward the mean.",
+    "Uses RSI to confirm strong directional momentum mid-window and bets that the trend will persist through market close.",
 };
 
 const CONFIG_LABELS: Record<string, string> = {
@@ -44,6 +44,7 @@ const CONFIG_LABELS: Record<string, string> = {
   rsiOversold: "RSI Oversold",
   minWindowElapsedSec: "Min Window Elapsed (s)",
   maxWindowElapsedSec: "Max Window Elapsed (s)",
+  maxEntriesPerWindow: "Max Entries / Window",
 };
 
 const CONFIG_HELP: Record<
@@ -149,36 +150,45 @@ const CONFIG_HELP: Record<
     low: "0.65",
   },
   rsiPeriod: {
-    description: "Lookback bars used for RSI calculation in mean-reversion.",
+    description: "Lookback bars used for RSI calculation in momentum confirmation.",
     high: "7",
     medium: "7",
     low: "7",
   },
   rsiOverbought: {
-    description: "RSI ceiling where UP is considered overextended.",
+    description:
+      "RSI threshold confirming strong upward momentum — above this, bet UP.",
     high: "70",
     medium: "62",
     low: "58",
   },
   rsiOversold: {
-    description: "RSI floor where DOWN is considered overextended.",
+    description:
+      "RSI threshold confirming strong downward momentum — below this, bet DOWN.",
     high: "30",
     medium: "38",
     low: "42",
   },
   minWindowElapsedSec: {
     description:
-      "Earliest second in market window where mean-reversion can trade.",
+      "Earliest second in market window where this strategy can trade.",
     high: "90",
     medium: "60",
     low: "45",
   },
   maxWindowElapsedSec: {
     description:
-      "Latest second in market window where mean-reversion can still trade.",
+      "Latest second in market window where this strategy can still trade.",
     high: "240",
     medium: "270",
     low: "285",
+  },
+  maxEntriesPerWindow: {
+    description:
+      "Maximum successful entries this strategy can place in a single 5-minute market window.",
+    high: "1-2",
+    medium: "2-3",
+    low: "3-5",
   },
 };
 
@@ -230,6 +240,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       confidenceMultiplier: 1.6,
       maxSharePrice: 0.55,
       tradeSize: 5,
+      maxEntriesPerWindow: 2,
     },
     medium: {
       minSpreadPct: 0.015,
@@ -237,6 +248,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       confidenceMultiplier: 1.2,
       maxSharePrice: 0.7,
       tradeSize: 5,
+      maxEntriesPerWindow: 3,
     },
     low: {
       minSpreadPct: 0.008,
@@ -244,12 +256,13 @@ const DEFAULT_CONFIG_PRESETS: Record<
       confidenceMultiplier: 1.0,
       maxSharePrice: 0.8,
       tradeSize: 5,
+      maxEntriesPerWindow: 4,
     },
   },
   efficiency: {
-    high: { minProfitBps: 20, tradeSize: 20 },
-    medium: { minProfitBps: 8, tradeSize: 20 },
-    low: { minProfitBps: 3, tradeSize: 20 },
+    high: { minProfitBps: 20, tradeSize: 20, maxEntriesPerWindow: 1 },
+    medium: { minProfitBps: 8, tradeSize: 20, maxEntriesPerWindow: 2 },
+    low: { minProfitBps: 3, tradeSize: 20, maxEntriesPerWindow: 3 },
   },
   "whale-hunt": {
     high: {
@@ -264,6 +277,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       maxSharePrice: 0.97,
       minSharePrice: 0.9,
       tradeSize: 15,
+      maxEntriesPerWindow: 1,
     },
     medium: {
       entryWindowSec: 60,
@@ -277,6 +291,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       maxSharePrice: 0.995,
       minSharePrice: 0.75,
       tradeSize: 15,
+      maxEntriesPerWindow: 2,
     },
     low: {
       entryWindowSec: 60,
@@ -290,6 +305,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       maxSharePrice: 0.995,
       minSharePrice: 0.65,
       tradeSize: 15,
+      maxEntriesPerWindow: 3,
     },
   },
   "mean-reversion": {
@@ -302,6 +318,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       minPriceMovePct: 0.06,
       maxSharePrice: 0.55,
       tradeSize: 8,
+      maxEntriesPerWindow: 1,
     },
     medium: {
       rsiPeriod: 7,
@@ -312,6 +329,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       minPriceMovePct: 0.03,
       maxSharePrice: 0.65,
       tradeSize: 8,
+      maxEntriesPerWindow: 2,
     },
     low: {
       rsiPeriod: 7,
@@ -322,6 +340,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       minPriceMovePct: 0.02,
       maxSharePrice: 0.72,
       tradeSize: 8,
+      maxEntriesPerWindow: 3,
     },
   },
 };

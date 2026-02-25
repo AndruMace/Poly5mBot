@@ -27,6 +27,7 @@ export function createRestApi(
       regime: engine.getRegime(),
       killSwitches: engine.getKillSwitchStatus(),
       metrics: engine.getMetrics(),
+      redeemer: engine.redeemer.getStatus(),
     });
   });
 
@@ -121,6 +122,32 @@ export function createRestApi(
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  app.get("/api/redeemer", async (_req, res) => {
+    const status = engine.redeemer.getStatus();
+    const [usdc, matic] = await Promise.all([
+      engine.redeemer.getUsdcBalance(),
+      engine.redeemer.getMaticBalance(),
+    ]);
+    res.json({ ...status, usdcBalance: usdc, maticBalance: matic });
+  });
+
+  app.post("/api/redeemer/redeem-now", async (_req, res) => {
+    try {
+      await (engine.redeemer as any).checkAndRedeem();
+      res.json({ ok: true, status: engine.redeemer.getStatus() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/redeemer/toggle", (_req, res) => {
+    engine.redeemer.enabled = !engine.redeemer.enabled;
+    if (engine.redeemer.enabled && !engine.redeemer.getStatus().running) {
+      engine.redeemer.start().catch(console.error);
+    }
+    res.json({ enabled: engine.redeemer.enabled });
   });
 
   console.log("[API] REST endpoints registered");

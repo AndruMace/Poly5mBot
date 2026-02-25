@@ -4,9 +4,14 @@ import { History } from "lucide-react";
 export function RecentTrades() {
   const trades = useStore((s) => s.trades);
   const mode = useStore((s) => s.mode);
-  const recent = trades
+  const modeTrades = trades
     .filter((t) => (mode === "shadow" ? t.shadow : !t.shadow))
+    .sort((a, b) => b.timestamp - a.timestamp);
+  const recent = modeTrades
     .slice(0, 10);
+  const recentLosses = modeTrades
+    .filter((t) => t.status === "resolved" && t.outcome === "loss")
+    .slice(0, 3);
 
   return (
     <div className="bg-[var(--bg-card)] rounded-xl p-4 border border-[var(--border)]">
@@ -16,6 +21,25 @@ export function RecentTrades() {
           Recent {mode === "shadow" ? "Shadow" : "Live"} Trades
         </span>
       </div>
+      {recentLosses.length > 0 && (
+        <div className="mb-3 rounded-md border border-[var(--accent-red)]/35 bg-[var(--accent-red)]/10 px-3 py-2 text-xs">
+          <div className="mb-1 font-medium text-[var(--accent-red)]">
+            Recent Losses
+          </div>
+          <div className="space-y-1 text-[var(--text-secondary)]">
+            {recentLosses.map((t) => (
+              <div key={`loss-${t.id}`} className="flex items-center justify-between">
+                <span className="capitalize">
+                  {t.strategy} ({new Date(t.timestamp).toLocaleTimeString()})
+                </span>
+                <span className="font-mono text-[var(--accent-red)]">
+                  ${t.pnl.toFixed(2)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {recent.length === 0 ? (
         <div className="text-sm text-[var(--text-secondary)] text-center py-6">
@@ -41,12 +65,23 @@ export function RecentTrades() {
               {recent.map((t) => (
                 <tr
                   key={t.id}
-                  className="border-t border-[var(--border)] hover:bg-[var(--bg-secondary)]/50"
+                  className={`border-t border-[var(--border)] hover:bg-[var(--bg-secondary)]/50 ${
+                    t.status === "resolved" && t.outcome === "loss"
+                      ? "bg-[var(--accent-red)]/8"
+                      : ""
+                  }`}
                 >
                   <td className="py-1.5 px-2 font-mono text-[var(--text-secondary)]">
                     {new Date(t.timestamp).toLocaleTimeString()}
                   </td>
-                  <td className="py-1.5 px-2 capitalize">{t.strategy}</td>
+                  <td className="py-1.5 px-2 capitalize">
+                    {t.strategy}
+                    {t.status === "resolved" && t.outcome === "loss" && (
+                      <span className="ml-1 rounded bg-[var(--accent-red)]/15 px-1 py-0.5 text-[10px] text-[var(--accent-red)]">
+                        LOSS
+                      </span>
+                    )}
+                  </td>
                   <td className="py-1.5 px-2">
                     <span
                       className={`px-1.5 py-0.5 rounded text-xs font-medium ${

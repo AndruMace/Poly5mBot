@@ -24,6 +24,7 @@ export class WhaleHuntStrategy extends BaseStrategy {
       maxSharePrice: 0.995,
       minSharePrice: 0.75,
       tradeSize: 15,
+      maxEntriesPerWindow: 2,
     };
     this.regimeFilter = {
       allowedVolatility: ["low", "normal", "high", "extreme"],

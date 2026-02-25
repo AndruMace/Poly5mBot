@@ -20,6 +20,7 @@ export class ArbStrategy extends BaseStrategy {
       confidenceMultiplier: 1.2,
       maxSharePrice: 0.7,
       tradeSize: 5,
+      maxEntriesPerWindow: 3,
     };
     this.regimeFilter = {
       allowedVolatility: ["low", "normal", "high", "extreme"],
