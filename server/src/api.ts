@@ -1,7 +1,26 @@
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import type { TradingEngine } from "./engine/engine.js";
 import type { FeedManager } from "./feeds/manager.js";
 import { isConnected, getWalletAddress, getPolymarketClient } from "./polymarket/client.js";
+import { config } from "./config.js";
+import { loadNotes, saveNotes } from "./notes-store.js";
+
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  const token = config.server.operatorToken;
+  if (!token) {
+    next();
+    return;
+  }
+  const header = req.headers.authorization;
+  if (header === `Bearer ${token}`) {
+    next();
+    return;
+  }
+  console.warn(
+    `[API] Unauthorized ${req.method} ${req.path} from ${req.ip}`,
+  );
+  res.status(401).json({ error: "Unauthorized" });
+}
 
 export function createRestApi(
   app: Express,
@@ -31,12 +50,12 @@ export function createRestApi(
     });
   });
 
-  app.post("/api/trading/toggle", (_req, res) => {
+  app.post("/api/trading/toggle", requireAuth, (_req, res) => {
     engine.setTradingActive(!engine.tradingActive);
     res.json({ tradingActive: engine.tradingActive });
   });
 
-  app.post("/api/mode", (req, res) => {
+  app.post("/api/mode", requireAuth, (req, res) => {
     const mode = req.body?.mode;
     if (mode !== "live" && mode !== "shadow") {
       res.status(400).json({ error: 'mode must be "live" or "shadow"' });
@@ -50,13 +69,15 @@ export function createRestApi(
     res.json(engine.getStrategyStates());
   });
 
-  app.post("/api/strategies/:name/toggle", (req, res) => {
-    const enabled = engine.toggleStrategy(req.params.name);
-    res.json({ name: req.params.name, enabled });
+  app.post("/api/strategies/:name/toggle", requireAuth, (req, res) => {
+    const name = req.params.name as string;
+    const enabled = engine.toggleStrategy(name);
+    res.json({ name, enabled });
   });
 
-  app.post("/api/strategies/:name/config", (req, res) => {
-    const result = engine.updateStrategyConfig(req.params.name, req.body);
+  app.post("/api/strategies/:name/config", requireAuth, (req, res) => {
+    const name = req.params.name as string;
+    const result = engine.updateStrategyConfig(name, req.body);
     if (result === "not_found") {
       res.status(404).json({ error: "Strategy not found" });
     } else if (result === "invalid") {
@@ -66,8 +87,9 @@ export function createRestApi(
     }
   });
 
-  app.post("/api/strategies/:name/regime-filter", (req, res) => {
-    const result = engine.updateStrategyRegimeFilter(req.params.name, req.body);
+  app.post("/api/strategies/:name/regime-filter", requireAuth, (req, res) => {
+    const name = req.params.name as string;
+    const result = engine.updateStrategyRegimeFilter(name, req.body);
     if (result === "not_found") {
       res.status(404).json({ error: "Strategy not found" });
     } else {
@@ -96,7 +118,7 @@ export function createRestApi(
     res.json(engine.getKillSwitchStatus());
   });
 
-  app.post("/api/killswitches/reset", (_req, res) => {
+  app.post("/api/killswitches/reset", requireAuth, (_req, res) => {
     engine.resetKillSwitchPause();
     res.json({ ok: true, killSwitches: engine.getKillSwitchStatus() });
   });
@@ -110,6 +132,16 @@ export function createRestApi(
       prices: feedManager.getLatestPrices(),
       oracleEstimate: feedManager.getOracleEstimate(),
     });
+  });
+
+  app.get("/api/notes", (_req, res) => {
+    res.json(loadNotes());
+  });
+
+  app.put("/api/notes", requireAuth, (req, res) => {
+    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    const saved = saveNotes(text);
+    res.json(saved);
   });
 
   app.post("/api/connect", async (_req, res) => {
@@ -133,7 +165,7 @@ export function createRestApi(
     res.json({ ...status, usdcBalance: usdc, maticBalance: matic });
   });
 
-  app.post("/api/redeemer/redeem-now", async (_req, res) => {
+  app.post("/api/redeemer/redeem-now", requireAuth, async (_req, res) => {
     try {
       await (engine.redeemer as any).checkAndRedeem();
       res.json({ ok: true, status: engine.redeemer.getStatus() });
@@ -142,7 +174,7 @@ export function createRestApi(
     }
   });
 
-  app.post("/api/redeemer/toggle", (_req, res) => {
+  app.post("/api/redeemer/toggle", requireAuth, (_req, res) => {
     engine.redeemer.enabled = !engine.redeemer.enabled;
     if (engine.redeemer.enabled && !engine.redeemer.getStatus().running) {
       engine.redeemer.start().catch(console.error);

@@ -19,13 +19,16 @@ const STRATEGY_DESCRIPTIONS: Record<string, string> = {
     "Hunts for moments when Up + Down ask prices sum to less than $1.00 minus fees, locking in risk-free profit.",
   "whale-hunt":
     "In the final seconds of a window, buys the near-certain winning side at 94-97\u00A2 for a small but consistent yield.",
-  "mean-reversion":
+  momentum:
     "Uses RSI to confirm strong directional momentum mid-window and bets that the trend will persist through market close.",
 };
 
 const CONFIG_LABELS: Record<string, string> = {
   minSpreadPct: "Min Spread %",
   maxOracleAgeSec: "Max Oracle Age (s)",
+  persistenceMs: "Spread Persistence (ms)",
+  persistenceCount: "Persistence Ticks",
+  minConfirmingExchanges: "Min Confirming Exchanges",
   confidenceMultiplier: "Confidence Mult",
   tradeSize: "Trade Size ($)",
   minProfitBps: "Min Profit (bps)",
@@ -47,148 +50,94 @@ const CONFIG_LABELS: Record<string, string> = {
   maxEntriesPerWindow: "Max Entries / Window",
 };
 
-const CONFIG_HELP: Record<
-  string,
-  { description: string; high: string; medium: string; low: string }
-> = {
+const CONFIG_HELP: Record<string, { description: string }> = {
   minSpreadPct: {
     description:
       "Minimum oracle-vs-exchange divergence needed before arb can fire.",
-    high: "0.04",
-    medium: "0.015",
-    low: "0.008",
   },
   maxOracleAgeSec: {
     description: "Maximum allowed age of oracle approximation data for entry.",
-    high: "2",
-    medium: "2",
-    low: "3",
+  },
+  persistenceMs: {
+    description:
+      "How long a spread must persist before arb can act on it (higher requires steadier divergence).",
+  },
+  persistenceCount: {
+    description:
+      "How many same-direction spread observations are required inside the persistence window before entry.",
+  },
+  minConfirmingExchanges: {
+    description:
+      "Minimum number of non-Binance exchanges that must agree with direction before entry.",
   },
   confidenceMultiplier: {
     description:
-      "Scales expected edge requirement; higher means stricter signal quality.",
-    high: "1.6",
-    medium: "1.2",
-    low: "1.0",
+      "Scales expected-edge requirement; higher values demand stronger setups.",
   },
   tradeSize: {
-    description: "Dollar budget target per signal before sizing/risk caps.",
-    high: "larger sizing bias",
-    medium: "balanced sizing bias",
-    low: "smaller sizing bias",
+    description:
+      "Target USD notional per entry before depth caps and risk manager adjustments.",
   },
   minProfitBps: {
-    description: "Minimum expected efficiency edge in basis points after costs.",
-    high: "20",
-    medium: "8",
-    low: "3",
+    description:
+      "Minimum expected efficiency edge after fees (in basis points) required to enter.",
   },
   entryWindowSec: {
-    description: "How late in the 5m market whale-hunt is allowed to enter.",
-    high: "45",
-    medium: "60",
-    low: "60",
+    description:
+      "Base latest-entry window for whale-hunt; trades are only allowed when remaining time is below this.",
   },
   maxDynamicEntryWindowSec: {
     description:
-      "Earliest second before expiry whale-hunt may enter when early-entry conditions are strong.",
-    high: "90",
-    medium: "120",
-    low: "120",
+      "Maximum expanded entry window allowed when early-entry quality signals are strong.",
   },
   minPriceMovePct: {
-    description: "Minimum BTC move required before this strategy can trigger.",
-    high: "0.08 / 0.06",
-    medium: "0.03",
-    low: "0.015 / 0.02",
+    description:
+      "Minimum BTC move vs price-to-beat required before the strategy can trigger.",
   },
   minEarlyGapPct: {
     description:
-      "Minimum move needed to unlock entries earlier than the base entry window.",
-    high: "0.20",
-    medium: "0.12",
-    low: "0.08",
+      "Minimum move required before whale-hunt can use dynamic early entries.",
   },
   probabilityFloor: {
     description:
-      "Minimum reversal-improbability score required for dynamic early entries.",
-    high: "0.85",
-    medium: "0.78",
-    low: "0.70",
+      "Minimum reversal-improbability score required for whale-hunt early entries.",
   },
   regimeWeight: {
     description:
-      "How strongly trend/consensus conditions influence dynamic window expansion.",
-    high: "0.30",
-    medium: "0.20",
-    low: "0.10",
+      "Weight of regime/consensus agreement in whale-hunt dynamic entry scoring.",
   },
   liquidityWeight: {
     description:
-      "How strongly top-book depth influences dynamic window expansion.",
-    high: "0.30",
-    medium: "0.20",
-    low: "0.10",
+      "Weight of orderbook depth in whale-hunt dynamic entry scoring.",
   },
   spreadPenaltyWeight: {
     description:
-      "Penalty weight for wide spreads when evaluating early-entry quality.",
-    high: "0.45",
-    medium: "0.30",
-    low: "0.15",
+      "Penalty weight for wide spreads in whale-hunt dynamic entry scoring.",
   },
   maxSharePrice: {
-    description: "Highest contract price allowed for entry to avoid overpaying.",
-    high: "0.55-0.97",
-    medium: "0.65-0.995",
-    low: "0.72-0.995",
+    description: "Highest contract price allowed for entry.",
   },
   minSharePrice: {
-    description: "Lowest contract price allowed (used mainly by whale-hunt).",
-    high: "0.90",
-    medium: "0.75",
-    low: "0.65",
+    description: "Lowest contract price allowed for entry.",
   },
   rsiPeriod: {
-    description: "Lookback bars used for RSI calculation in momentum confirmation.",
-    high: "7",
-    medium: "7",
-    low: "7",
+    description: "RSI lookback length (in 1-minute candles) for momentum signals.",
   },
   rsiOverbought: {
-    description:
-      "RSI threshold confirming strong upward momentum — above this, bet UP.",
-    high: "70",
-    medium: "62",
-    low: "58",
+    description: "RSI threshold for confirming upward momentum before UP entries.",
   },
   rsiOversold: {
-    description:
-      "RSI threshold confirming strong downward momentum — below this, bet DOWN.",
-    high: "30",
-    medium: "38",
-    low: "42",
+    description: "RSI threshold for confirming downward momentum before DOWN entries.",
   },
   minWindowElapsedSec: {
-    description:
-      "Earliest second in market window where this strategy can trade.",
-    high: "90",
-    medium: "60",
-    low: "45",
+    description: "Earliest second in a 5-minute market where entries are allowed.",
   },
   maxWindowElapsedSec: {
-    description:
-      "Latest second in market window where this strategy can still trade.",
-    high: "240",
-    medium: "270",
-    low: "285",
+    description: "Latest second in a 5-minute market where entries are allowed.",
   },
   maxEntriesPerWindow: {
     description:
-      "Maximum successful entries this strategy can place in a single 5-minute market window.",
-    high: "1-2",
-    medium: "2-3",
-    low: "3-5",
+      "Maximum successful entries this strategy can place in a single 5-minute window.",
   },
 };
 
@@ -236,26 +185,41 @@ const DEFAULT_CONFIG_PRESETS: Record<
   arb: {
     high: {
       minSpreadPct: 0.04,
+      persistenceMs: 4000,
+      persistenceCount: 5,
+      minConfirmingExchanges: 2,
+      minWindowElapsedSec: 90,
+      maxWindowElapsedSec: 240,
       maxOracleAgeSec: 2,
       confidenceMultiplier: 1.6,
       maxSharePrice: 0.55,
-      tradeSize: 5,
-      maxEntriesPerWindow: 2,
+      tradeSize: 4,
+      maxEntriesPerWindow: 1,
     },
     medium: {
       minSpreadPct: 0.015,
+      persistenceMs: 3000,
+      persistenceCount: 4,
+      minConfirmingExchanges: 1,
+      minWindowElapsedSec: 60,
+      maxWindowElapsedSec: 270,
       maxOracleAgeSec: 2,
       confidenceMultiplier: 1.2,
-      maxSharePrice: 0.7,
+      maxSharePrice: 0.65,
       tradeSize: 5,
-      maxEntriesPerWindow: 3,
+      maxEntriesPerWindow: 2,
     },
     low: {
       minSpreadPct: 0.008,
+      persistenceMs: 2000,
+      persistenceCount: 3,
+      minConfirmingExchanges: 0,
+      minWindowElapsedSec: 45,
+      maxWindowElapsedSec: 285,
       maxOracleAgeSec: 3,
       confidenceMultiplier: 1.0,
-      maxSharePrice: 0.8,
-      tradeSize: 5,
+      maxSharePrice: 0.75,
+      tradeSize: 7,
       maxEntriesPerWindow: 4,
     },
   },
@@ -308,7 +272,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       maxEntriesPerWindow: 3,
     },
   },
-  "mean-reversion": {
+  momentum: {
     high: {
       rsiPeriod: 7,
       rsiOverbought: 70,
@@ -344,6 +308,19 @@ const DEFAULT_CONFIG_PRESETS: Record<
     },
   },
 };
+
+function formatPresetValue(value: number | undefined, key: string): string {
+  if (value === undefined || !Number.isFinite(value)) return "unchanged";
+  if (
+    key.includes("Pct") ||
+    key.includes("Price") ||
+    key.toLowerCase().includes("probability") ||
+    key.includes("Weight")
+  ) {
+    return value.toFixed(3).replace(/\.?0+$/, "");
+  }
+  return String(value);
+}
 
 function loadPresetStore(): Record<
   string,
@@ -769,9 +746,9 @@ export function StrategyCard({
                 onChange={(e) => handlePresetChange(e.target.value as PresetLevel)}
                 className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]"
               >
-                <option value="high">High</option>
-                <option value="medium">Medium</option>
-                <option value="low">Low</option>
+                <option value="high">Safe</option>
+                <option value="medium">Moderate</option>
+                <option value="low">Risky</option>
               </select>
               <button
                 onClick={handleApplyPreset}
@@ -803,6 +780,9 @@ export function StrategyCard({
           </div>
           {Object.entries(localConfig).map(([key, value]) => {
             const help = CONFIG_HELP[key];
+            const safeValue = formatPresetValue(presets.high?.[key], key);
+            const moderateValue = formatPresetValue(presets.medium?.[key], key);
+            const riskyValue = formatPresetValue(presets.low?.[key], key);
             return (
               <div key={key} className="flex items-center gap-3">
                 <label className="text-xs text-[var(--text-secondary)] w-40 flex items-center gap-1.5">
@@ -814,14 +794,11 @@ export function StrategyCard({
                         <>
                           <span className="block">{help.description}</span>
                           <span className="block mt-1 text-gray-300">
-                            High: {help.high} | Medium: {help.medium} | Low: {help.low}
+                            Safe: {safeValue} | Moderate: {moderateValue} | Risky: {riskyValue}
                           </span>
                         </>
                       ) : (
-                        <span>
-                          Adjusts how strict this strategy is. High is strictest,
-                          medium is balanced, low is loosest.
-                        </span>
+                        <span>{`Controls ${CONFIG_LABELS[key] ?? key} for this strategy.`}</span>
                       )}
                     </span>
                   </span>

@@ -150,12 +150,15 @@ export class RiskManager {
     return { ok: true, reason: "OK" };
   }
 
-  onTradeOpened(trade: TradeRecord): void {
+  onTradeOpened(trade: TradeRecord, shadow = false): void {
+    if (shadow) return;
     this.openPositions.push(trade);
   }
 
-  onTradeClosed(trade: TradeRecord): void {
+  onTradeClosed(trade: TradeRecord, shadow = false): void {
     this.openPositions = this.openPositions.filter((t) => t.id !== trade.id);
+    if (shadow) return;
+
     this.dailyPnl += trade.pnl;
     this.hourlyPnl += trade.pnl;
 

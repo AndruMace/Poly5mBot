@@ -27,6 +27,18 @@ export function TradeLog() {
       .sort((a, b) => a.pnl - b.pnl);
   }, [filtered]);
 
+  function csvCell(value: unknown): string {
+    const s = String(value ?? "");
+    const needsQuote =
+      s.includes(",") ||
+      s.includes('"') ||
+      s.includes("\n") ||
+      /^[=+\-@\t\r]/.test(s);
+    if (!needsQuote) return s;
+    const escaped = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+    return `"${escaped.replace(/"/g, '""')}"`;
+  }
+
   function exportCsv() {
     const headers = [
       "ID",
@@ -64,7 +76,10 @@ export function TradeLog() {
       t.pnl.toFixed(4),
       t.shadow ? "yes" : "no",
     ]);
-    const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+    const csv = [
+      headers.map(csvCell).join(","),
+      ...rows.map((r) => r.map(csvCell).join(",")),
+    ].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

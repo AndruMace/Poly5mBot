@@ -88,6 +88,21 @@ export async function fetchCurrentBtc5mWindow(): Promise<MarketWindow | null> {
   return cachedWindow;
 }
 
+function extractPriceToBeat(
+  title: string | undefined,
+  description: string | undefined,
+): number | null {
+  for (const text of [title, description]) {
+    if (!text) continue;
+    const m = /price\s*(?:to\s*beat|:)\s*\$?([\d,]+(?:\.\d+)?)/i.exec(text);
+    if (m) {
+      const val = parseFloat(m[1]!.replace(/,/g, ""));
+      if (val > 0 && isFinite(val)) return val;
+    }
+  }
+  return null;
+}
+
 function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
   let outcomes: string[] = [];
   let tokenIds: string[] = [];
@@ -107,6 +122,8 @@ function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
   const endTime = new Date(m.endDate).getTime();
   const startTime = endTime - FIVE_MIN_MS;
 
+  const priceToBeat = extractPriceToBeat(evt.title, m.description);
+
   return {
     conditionId: m.conditionId,
     slug: m.slug,
@@ -116,7 +133,7 @@ function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
     downTokenId,
     startTime,
     endTime,
-    priceToBeat: null,
+    priceToBeat,
     resolved: m.closed,
   };
 }

@@ -264,12 +264,42 @@ export class TradeStore {
     }
   }
 
+  private writeBuffer: string[] = [];
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private flushing = false;
+
   private persist(event: TradeEvent): void {
+    this.writeBuffer.push(JSON.stringify(event) + "\n");
+    if (!this.flushTimer) {
+      this.flushTimer = setInterval(() => this.flushBuffer(), 200);
+    }
+  }
+
+  private flushBuffer(): void {
+    if (this.flushing || this.writeBuffer.length === 0) return;
+    this.flushing = true;
+    const batch = this.writeBuffer.splice(0);
+    const data = batch.join("");
     try {
       if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.appendFileSync(this.filePath, JSON.stringify(event) + "\n");
+    } catch { /* directory likely exists */ }
+    fs.promises
+      .appendFile(this.filePath, data)
+      .catch((err) => console.error("[TradeStore] Failed to persist events:", err))
+      .finally(() => {
+        this.flushing = false;
+      });
+  }
+
+  flushSync(): void {
+    if (this.writeBuffer.length === 0) return;
+    const batch = this.writeBuffer.splice(0);
+    const data = batch.join("");
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.appendFileSync(this.filePath, data);
     } catch (err) {
-      console.error("[TradeStore] Failed to persist event:", err);
+      console.error("[TradeStore] Failed to flush events:", err);
     }
   }
 

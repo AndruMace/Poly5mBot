@@ -14,6 +14,7 @@ import type { PricePoint } from "../types.js";
 export class OracleApproximator extends EventEmitter {
   private prices: Map<string, PricePoint> = new Map();
   private estimate = 0;
+  private lastEstimateTs = 0;
   private emitTimer: ReturnType<typeof setInterval> | null = null;
   private sourceCount = 0;
 
@@ -38,6 +39,10 @@ export class OracleApproximator extends EventEmitter {
 
   getSourceCount(): number {
     return this.sourceCount;
+  }
+
+  getLastEstimateTs(): number {
+    return this.lastEstimateTs;
   }
 
   private static extractPrice(p: PricePoint): number {
@@ -91,6 +96,7 @@ export class OracleApproximator extends EventEmitter {
 
     if (result !== this.estimate) {
       this.estimate = result;
+      this.lastEstimateTs = now;
       this.emit("estimate", {
         price: result,
         timestamp: now,

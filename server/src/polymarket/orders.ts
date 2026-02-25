@@ -4,6 +4,7 @@ import type { Signal, TradeRecord } from "../types.js";
 const FEE_RATE = 0.25;
 const FEE_EXPONENT = 2;
 const FOK_SIZE_SCALES = [1, 0.8, 0.6, 0.45];
+const MIN_CLOB_NOTIONAL = 1.0;
 
 function floorTo(value: number, decimals: number): number {
   const factor = 10 ** decimals;
@@ -23,10 +24,12 @@ function gcd(a: number, b: number): number {
 
 /**
  * CLOB BUY precision requirements:
- * - maker amount (quote) max 2 decimals
- * - taker amount (size/shares) max 4 decimals
+ * - maker amount (quote = price * shares) max 2 decimals
+ * - taker amount (shares) max 4 decimals
  *
- * This helper computes a price/size pair that satisfies both constraints.
+ * The CLOB client may internally truncate shares to 2 decimals, so we
+ * must ensure price * floorTo(shares, 2) ALSO has <= 2 decimal places.
+ * We try 4-decimal shares first, then fall back to 2-decimal if needed.
  */
 function quantizeBuyOrder(notional: number, rawPrice: number): {
   price: number;
@@ -44,17 +47,31 @@ function quantizeBuyOrder(notional: number, rawPrice: number): {
     return { price: 0, shares: 0, quote: 0 };
   }
 
-  // shares are represented with up to 4 decimals
-  // shareUnits = shares * 10_000 (integer)
-  // quoteCents = (shareUnits * priceCents) / 10_000 must be integer
   const d = gcd(10_000, priceCents);
   const minShareUnitStep = Math.floor(10_000 / d);
   const quoteCentsPerStep = Math.floor(priceCents / d);
   const maxQuoteCents = Math.floor(maxQuote * 100);
   const stepCount = Math.floor(maxQuoteCents / quoteCentsPerStep);
   const shareUnits = stepCount * minShareUnitStep;
-  const shares = floorTo(shareUnits / 10_000, 4);
-  const quote = floorTo((shareUnits * priceCents) / 1_000_000, 2);
+  let shares = floorTo(shareUnits / 10_000, 4);
+  let quote = floorTo((shareUnits * priceCents) / 1_000_000, 2);
+
+  // Verify the CLOB client won't break the constraint by truncating shares.
+  // If floorTo(shares, 2) * price produces >2 decimal places, use 2-decimal shares.
+  const shares2d = floorTo(shares, 2);
+  const rawQuote2d = shares2d * price;
+  const quoteCents2d = Math.round(rawQuote2d * 100);
+  if (Math.abs(rawQuote2d - quoteCents2d / 100) > 1e-9) {
+    // 2-decimal truncation breaks it; recompute with 2-decimal share grid
+    const d2 = gcd(100, priceCents);
+    const step2 = Math.floor(100 / d2);
+    const qps2 = Math.floor(priceCents / d2);
+    const sc2 = Math.floor(maxQuoteCents / qps2);
+    const su2 = sc2 * step2;
+    shares = floorTo(su2 / 100, 2);
+    quote = floorTo((su2 * priceCents) / 10_000, 2);
+  }
+
   return { price, shares, quote };
 }
 
@@ -171,6 +188,7 @@ export async function executeSignal(
       const price = q.price;
       const shares = q.shares;
       if (price <= 0 || shares <= 0 || notional <= 0) continue;
+      if (notional < MIN_CLOB_NOTIONAL) continue;
 
       try {
         const rawOrder = await (client as any).createAndPostOrder(
@@ -256,24 +274,38 @@ export async function executeDualBuy(
 ): Promise<TradeRecord[]> {
   const trades: TradeRecord[] = [];
 
+  const pxUp = floorTo(upPrice, 2);
+  const pxDown = floorTo(downPrice, 2);
+  if (pxUp <= 0 || pxDown <= 0) return trades;
+
+  // Equal-share hedge: both legs must hold the same share count so the
+  // combined payout is always $1/share regardless of outcome.
+  const rawShares = size / (pxUp + pxDown);
+  const shares = floorTo(rawShares, 2);
+  if (shares <= 0) return trades;
+
   const legs: Array<["UP" | "DOWN", string, number]> = [
-    ["UP", upTokenId, upPrice],
-    ["DOWN", downTokenId, downPrice],
+    ["UP", upTokenId, pxUp],
+    ["DOWN", downTokenId, pxDown],
   ];
 
-  for (const [side, tokenId, price] of legs) {
-    try {
-      const client = await getPolymarketClient();
-      const q = quantizeBuyOrder(size / 2, price);
-      const halfNotional = q.quote;
-      const shares = q.shares;
-      const px = q.price;
-      if (px <= 0 || shares <= 0 || halfNotional <= 0) {
-        throw new Error(
-          `Invalid quantized ${side} leg: size=${size / 2}, price=${price}`,
+  for (const [side, tokenId, px] of legs) {
+    const legNotional = floorTo(shares * px, 2);
+    if (legNotional < MIN_CLOB_NOTIONAL) {
+      console.warn(
+        `[Orders] Efficiency ${side} leg notional $${legNotional.toFixed(2)} < min $${MIN_CLOB_NOTIONAL}, aborting dual buy`,
+      );
+      if (trades.length === 1) {
+        trades[0]!.strategy = "efficiency-partial";
+        console.error(
+          `[Orders] CRITICAL: Efficiency leg 2 skipped — single-leg directional exposure on ${trades[0]!.side}`,
         );
       }
+      break;
+    }
 
+    try {
+      const client = await getPolymarketClient();
       const rawOrder = await (client as any).createAndPostOrder(
         {
           tokenID: tokenId,
@@ -299,7 +331,7 @@ export async function executeDualBuy(
         side,
         tokenId,
         entryPrice: px,
-        size: halfNotional,
+        size: legNotional,
         shares,
         fee,
         status: "filled",

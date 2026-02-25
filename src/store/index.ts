@@ -20,6 +20,7 @@ interface PriceHistory {
 
 interface AppState {
   connected: boolean;
+  exchangeConnected: boolean;
   walletAddress: string | null;
   tradingActive: boolean;
   mode: "live" | "shadow";
@@ -45,6 +46,7 @@ interface AppState {
   feedHealth: FeedHealthSnapshot;
 
   setConnected: (connected: boolean, wallet?: string | null) => void;
+  setExchangeConnected: (connected: boolean, wallet?: string | null) => void;
   setTradingActive: (active: boolean) => void;
   setMode: (mode: "live" | "shadow") => void;
   setPrices: (
@@ -149,6 +151,7 @@ const emptyFeedHealth: FeedHealthSnapshot = {
 
 export const useStore = create<AppState>((set) => ({
   connected: false,
+  exchangeConnected: false,
   walletAddress: null,
   tradingActive: false,
   mode: "shadow",
@@ -173,6 +176,12 @@ export const useStore = create<AppState>((set) => ({
 
   setConnected: (connected, wallet) =>
     set({ connected, walletAddress: wallet ?? null }),
+
+  setExchangeConnected: (exchangeConnected, wallet) =>
+    set((state) => ({
+      exchangeConnected,
+      walletAddress: wallet ?? state.walletAddress,
+    })),
 
   setTradingActive: (active) => set({ tradingActive: active }),
 
@@ -249,6 +258,8 @@ export const useStore = create<AppState>((set) => ({
     set((state) => ({
       tradingActive: data.tradingActive ?? false,
       mode: data.mode ?? "shadow",
+      exchangeConnected: data.exchangeConnected ?? false,
+      walletAddress: data.walletAddress ?? state.walletAddress,
       strategies: data.strategies ?? [],
       currentMarket: data.market ?? null,
       orderBook: data.orderbook ?? emptyOrderBook,

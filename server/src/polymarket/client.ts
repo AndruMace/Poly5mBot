@@ -45,8 +45,9 @@ export async function getPolymarketClient(): Promise<ClobClient> {
 
     console.log("[Polymarket] Deriving API credentials...");
     const creds = await (tempClient as any).createOrDeriveApiKey();
-    console.log("[Polymarket] API Key:", creds.key);
-    console.log("[Polymarket] Save these to .env to skip derivation on restart");
+    console.log(
+      `[Polymarket] API Key: ${creds.key.slice(0, 6)}...${creds.key.slice(-4)} (save to .env as POLY_API_KEY to skip derivation)`,
+    );
 
     clientInstance = new ClobClient(
       config.poly.clobUrl,

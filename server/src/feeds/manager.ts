@@ -107,6 +107,10 @@ export class FeedManager extends EventEmitter {
     return this.oracle.getEstimate();
   }
 
+  getOracleTimestamp(): number {
+    return this.oracle.getLastEstimateTs();
+  }
+
   getCurrentBtcPrice(): number {
     const est = this.oracle.getEstimate();
     if (est > 0) return est;

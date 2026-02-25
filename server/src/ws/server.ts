@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import type { TradingEngine } from "../engine/engine.js";
 import type { FeedManager } from "../feeds/manager.js";
+import { isConnected, getWalletAddress } from "../polymarket/client.js";
 import type { WSMessage } from "../types.js";
 
 export function createWSServer(
@@ -22,6 +23,8 @@ export function createWSServer(
 
   let priceThrottle: ReturnType<typeof setInterval> | null = null;
 
+  let lastExchangeConnected = isConnected();
+
   priceThrottle = setInterval(() => {
     broadcast({
       type: "prices",
@@ -36,6 +39,18 @@ export function createWSServer(
       data: feedManager.getFeedHealth(),
       timestamp: Date.now(),
     });
+    const nowConnected = isConnected();
+    if (nowConnected !== lastExchangeConnected) {
+      lastExchangeConnected = nowConnected;
+      broadcast({
+        type: "exchangeStatus",
+        data: {
+          exchangeConnected: nowConnected,
+          walletAddress: getWalletAddress(),
+        },
+        timestamp: Date.now(),
+      });
+    }
   }, 500);
 
   engine.on("market", (market) => {
@@ -98,6 +113,8 @@ export function createWSServer(
       data: {
         tradingActive: engine.tradingActive,
         mode: engine.mode,
+        exchangeConnected: isConnected(),
+        walletAddress: getWalletAddress(),
         strategies: engine.getStrategyStates(),
         market: engine.getCurrentWindow(),
         orderbook: engine.getOrderBookState(),

@@ -13,8 +13,8 @@ import type { MarketContext, Signal, PricePoint } from "../types.js";
  *   RSI > overbought + price above reference → bet UP  (momentum carries)
  *   RSI < oversold   + price below reference → bet DOWN (momentum carries)
  */
-export class MeanReversionStrategy extends BaseStrategy {
-  readonly name = "mean-reversion";
+export class MomentumStrategy extends BaseStrategy {
+  readonly name = "momentum";
   private priceBuffer: PricePoint[] = [];
 
   constructor() {

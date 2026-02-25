@@ -16,6 +16,7 @@ export function useWebSocket() {
       setShadowPnl,
       setInitialState,
       setConnected,
+      setExchangeConnected,
       setTradingActive,
       setMode,
       setRegime,
@@ -87,6 +88,12 @@ export function useWebSocket() {
               break;
             case "feedHealth":
               setFeedHealth(msg.data);
+              break;
+            case "exchangeStatus":
+              setExchangeConnected(
+                msg.data.exchangeConnected,
+                msg.data.walletAddress,
+              );
               break;
           }
         } catch {

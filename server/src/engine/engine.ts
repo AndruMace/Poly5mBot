@@ -19,7 +19,7 @@ import { AutoRedeemer } from "../polymarket/redeemer.js";
 import { ArbStrategy } from "../strategies/arb.js";
 import { EfficiencyStrategy } from "../strategies/efficiency.js";
 import { WhaleHuntStrategy } from "../strategies/whale-hunt.js";
-import { MeanReversionStrategy } from "../strategies/mean-reversion.js";
+import { MomentumStrategy } from "../strategies/mean-reversion.js";
 import { RiskManager } from "./risk.js";
 import { PnLTracker } from "./tracker.js";
 import { FillSimulator } from "./fill-simulator.js";
@@ -51,21 +51,21 @@ const STRATEGY_COOLDOWN_MS: Record<string, number> = {
   arb: 3000,
   efficiency: 5000,
   "whale-hunt": 6000,
-  "mean-reversion": 4000,
+  momentum: 4000,
 };
 
 const MAX_ENTRIES_PER_WINDOW: Record<string, number> = {
   arb: 3,
   efficiency: 2,
   "whale-hunt": 2,
-  "mean-reversion": 2,
+  momentum: 2,
 };
 
 const MIN_FILL_RATIO_BY_STRATEGY: Record<string, number> = {
   arb: 0.5,
   efficiency: 0.6,
   "whale-hunt": 0.5,
-  "mean-reversion": 0.5,
+  momentum: 0.5,
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -117,7 +117,7 @@ export class TradingEngine extends EventEmitter {
     arb: new ArbStrategy(),
     efficiency: new EfficiencyStrategy(),
     "whale-hunt": new WhaleHuntStrategy(),
-    "mean-reversion": new MeanReversionStrategy(),
+    momentum: new MomentumStrategy(),
   };
 
   private currentWindow: MarketWindow | null = null;
@@ -153,7 +153,10 @@ export class TradingEngine extends EventEmitter {
   private lastSignalFingerprint = new Map<string, string>();
   private lastStrategyExecution = new Map<string, number>();
   private entriesThisWindow = new Map<string, number>();
+  private windowSideByStrategy = new Map<string, "UP" | "DOWN">();
   private lastOrderbookUpdateTs = 0;
+  private windowEndPriceSnapshot: number | null = null;
+  private windowEndSnapshotTs = 0;
   private recentSignalLatencies: number[] = [];
   private windowDiagnostics: Record<string, StrategyDiagnostics> = {};
   private rollingDiagnostics: Record<string, StrategyDiagnostics> = {};
@@ -257,7 +260,7 @@ export class TradingEngine extends EventEmitter {
     this.running = true;
 
     this.feedManager.on("price", (p: PricePoint) => {
-      this.strategies["mean-reversion"].addPrice(p);
+      this.strategies["momentum"].addPrice(p);
       this.regimeDetector.addPrice(p);
     });
 
@@ -311,9 +314,14 @@ export class TradingEngine extends EventEmitter {
         current &&
         current.conditionId !== this.currentWindow?.conditionId
       ) {
-        const openPrice = this.feedManager.getCurrentBtcPrice();
-        if (openPrice > 0 && current.priceToBeat === null) {
-          current.priceToBeat = openPrice;
+        if (current.priceToBeat === null) {
+          const openPrice = this.feedManager.getCurrentBtcPrice();
+          if (openPrice > 0) {
+            current.priceToBeat = openPrice;
+            console.warn(
+              `[Engine] priceToBeat not in market metadata — using local feed $${openPrice.toFixed(2)} (may drift)`,
+            );
+          }
         }
         this.windowTitle = current.title ?? formatWindowTitle(current);
         console.log(
@@ -322,6 +330,9 @@ export class TradingEngine extends EventEmitter {
         this.currentWindow = current;
         this.metrics.windowConditionId = current.conditionId;
         this.entriesThisWindow.clear();
+        this.windowSideByStrategy.clear();
+        this.windowEndPriceSnapshot = null;
+        this.windowEndSnapshotTs = 0;
         this.inFlightByCondition.clear();
         this.retryBackoffUntil.clear();
         this.retryBackoffCount.clear();
@@ -420,12 +431,40 @@ export class TradingEngine extends EventEmitter {
     const isShadow = this._mode === "shadow";
     this.updateLiveLatencyMetrics();
     const now = Date.now();
-    const closingBtcPrice = this.feedManager.getCurrentBtcPrice();
+    const liveBtcPrice = this.feedManager.getCurrentBtcPrice();
+
+    // Capture a price snapshot near window end for resolution accuracy.
+    // Once captured, it won't be overwritten so post-expiry drift doesn't affect results.
+    if (
+      this.currentWindow &&
+      liveBtcPrice > 0 &&
+      now >= this.currentWindow.endTime - 5_000
+    ) {
+      if (
+        this.windowEndPriceSnapshot === null ||
+        (now <= this.currentWindow.endTime + 2_000 && liveBtcPrice > 0)
+      ) {
+        this.windowEndPriceSnapshot = liveBtcPrice;
+        this.windowEndSnapshotTs = now;
+      }
+    }
+
+    const closingBtcPrice =
+      this.windowEndPriceSnapshot && this.windowEndPriceSnapshot > 0
+        ? this.windowEndPriceSnapshot
+        : liveBtcPrice;
+
     this.cleanupStaleUnconfirmedTrades(now);
     this.reconcileExpiredUntrackedOpenTrades(now, closingBtcPrice);
 
     const expired = this.riskManager.resolveExpired(now);
     for (const trade of expired) {
+      if (closingBtcPrice <= 0) {
+        console.warn(
+          `[Engine] Skipping resolution of ${trade.id} — no valid settlement price`,
+        );
+        continue;
+      }
       const tradeShadow = trade.id.startsWith("shadow-");
       this.tracker.expireTrade(trade.id, closingBtcPrice, tradeShadow);
       trade.closingBtcPrice = closingBtcPrice;
@@ -433,9 +472,11 @@ export class TradingEngine extends EventEmitter {
       this.tracker.resolveTrade(trade.id, won, tradeShadow);
       const resolved = this.tracker.getTradeById(trade.id, tradeShadow);
       if (resolved) {
+        trade.status = "resolved";
         trade.outcome = resolved.outcome;
         trade.pnl = resolved.pnl;
       } else {
+        trade.status = "resolved";
         trade.outcome = won ? "win" : "loss";
         trade.pnl = 0;
       }
@@ -450,7 +491,7 @@ export class TradingEngine extends EventEmitter {
       } else if (trade.outcome === "loss") {
         this.bumpDiag(trade.strategy, "losses", 1, tradeShadow);
       }
-      this.riskManager.onTradeClosed(trade);
+      this.riskManager.onTradeClosed(trade, tradeShadow);
       this.emit("trade", trade);
     }
 
@@ -462,13 +503,21 @@ export class TradingEngine extends EventEmitter {
       return;
     }
 
-    if (now >= this.currentWindow.endTime) return;
+    if (now >= this.currentWindow.endTime) {
+      this.setEnabledStrategiesIdleReason("Window ended — awaiting resolution");
+      this.emit("strategies", this.getStrategyStates());
+      this.emit("pnl", this.tracker.getSummary());
+      this.emit("shadowPnl", this.tracker.getSummary(true));
+      this.emit("metrics", this.getMetrics());
+      return;
+    }
 
     const ctx: MarketContext = {
       currentWindow: this.currentWindow,
       orderBook: this.orderBook,
       prices: this.feedManager.getLatestPrices(),
       oracleEstimate: this.feedManager.getOracleEstimate(),
+      oracleTimestamp: this.feedManager.getOracleTimestamp(),
       windowElapsedMs: now - this.currentWindow.startTime,
       windowRemainingMs: this.currentWindow.endTime - now,
       priceToBeat: this.currentWindow.priceToBeat,
@@ -561,7 +610,13 @@ export class TradingEngine extends EventEmitter {
           strategy.statusReason = `Window entry cap reached (${maxEntriesPerWindow})`;
           continue;
         }
+        const lockedSide = this.windowSideByStrategy.get(strategy.name);
         const signal = strategy.evaluate(ctx);
+        if (signal && lockedSide && signal.side !== lockedSide) {
+          strategy.status = "idle";
+          strategy.statusReason = `Opposing side blocked (locked ${lockedSide})`;
+          continue;
+        }
         if (!signal) {
           if (strategy.name === "whale-hunt") {
             const reason =
@@ -594,7 +649,6 @@ export class TradingEngine extends EventEmitter {
           strategy.statusReason = "Duplicate signal suppressed";
           continue;
         }
-        this.lastSignalFingerprint.set(strategy.name, fingerprint);
 
         const recentPrices = this.feedManager.getRecentPrices(
           "binance",
@@ -638,6 +692,8 @@ export class TradingEngine extends EventEmitter {
         this.inFlightByCondition.delete(this.currentWindow.conditionId);
         if (executed) {
           this.entriesThisWindow.set(strategy.name, entries + 1);
+          this.windowSideByStrategy.set(strategy.name, signal.side);
+          this.lastSignalFingerprint.set(strategy.name, fingerprint);
         } else if (!isShadow) {
           this.bumpDiag(strategy.name, "liveRejected", 1, false);
           strategy.status = "idle";
@@ -689,11 +745,15 @@ export class TradingEngine extends EventEmitter {
     closingBtcPrice: number,
   ): void {
     if (closingBtcPrice <= 0) return;
-    if (this.riskManager.getOpenPositions().length > 0) return;
+
+    const riskTrackedIds = new Set(
+      this.riskManager.getOpenPositions().map((t) => t.id),
+    );
 
     for (const shadow of [false, true]) {
       const open = this.tracker.getOpenTrades(shadow);
       for (const t of open) {
+        if (riskTrackedIds.has(t.id)) continue;
         if (t.windowEnd <= 0 || now < t.windowEnd) continue;
         if (
           t.status !== "filled" &&
@@ -866,7 +926,7 @@ export class TradingEngine extends EventEmitter {
 
     const record = store.toTradeRecord(store.getTrade(tradeId)!);
     (record as any).shadow = true;
-    this.riskManager.onTradeOpened(record);
+    this.riskManager.onTradeOpened(record, true);
     this.emit("trade", record);
     this.retryBackoffCount.delete(backoffKey);
     this.retryBackoffUntil.delete(backoffKey);
@@ -951,7 +1011,15 @@ export class TradingEngine extends EventEmitter {
       return false;
     }
 
-    const halfNotional = signal.size / 2;
+    // Equal shares for both legs — same logic as live executeDualBuy
+    const askUp = this.orderBook.bestAskUp;
+    const askDown = this.orderBook.bestAskDown;
+    const equalShares =
+      askUp > 0 && askDown > 0
+        ? Math.floor((signal.size / (askUp + askDown)) * 100) / 100
+        : 0;
+    if (equalShares <= 0) return false;
+
     const legs: Array<{
       side: "UP" | "DOWN";
       tokenId: string;
@@ -961,13 +1029,13 @@ export class TradingEngine extends EventEmitter {
       {
         side: "UP",
         tokenId: this.currentWindow.upTokenId,
-        limitPrice: this.orderBook.bestAskUp,
+        limitPrice: askUp,
         book: this.orderBook.up,
       },
       {
         side: "DOWN",
         tokenId: this.currentWindow.downTokenId,
-        limitPrice: this.orderBook.bestAskDown,
+        limitPrice: askDown,
         book: this.orderBook.down,
       },
     ];
@@ -980,10 +1048,7 @@ export class TradingEngine extends EventEmitter {
 
     for (let i = 0; i < legs.length; i++) {
       const leg = legs[i]!;
-      const requestedShares =
-        leg.limitPrice > 0
-          ? Math.floor((halfNotional / leg.limitPrice) * 100) / 100
-          : 0;
+      const requestedShares = equalShares;
       const simOpts = this.buildAdaptiveSimulatorOpts(
         signal,
         leg.book,
@@ -1038,7 +1103,7 @@ export class TradingEngine extends EventEmitter {
         priceToBeatAtEntry,
         windowEnd: this.currentWindow.endTime,
         shadow: true,
-        size: halfNotional,
+        size: Math.floor(equalShares * leg.limitPrice * 100) / 100,
         requestedShares,
       });
 
@@ -1050,7 +1115,7 @@ export class TradingEngine extends EventEmitter {
         priceToBeatAtEntry,
         windowEnd: this.currentWindow.endTime,
         shadow: true,
-        size: halfNotional,
+        size: Math.floor(equalShares * leg.limitPrice * 100) / 100,
         requestedShares,
       });
       store.appendEvent(tradeId, "order_submitted", {
@@ -1092,7 +1157,7 @@ export class TradingEngine extends EventEmitter {
     for (const { tradeId } of created) {
       const record = store.toTradeRecord(store.getTrade(tradeId)!);
       (record as any).shadow = true;
-      this.riskManager.onTradeOpened(record);
+      this.riskManager.onTradeOpened(record, true);
       this.emit("trade", record);
     }
     this.retryBackoffCount.delete(backoffKey);
@@ -1278,9 +1343,11 @@ export class TradingEngine extends EventEmitter {
 
   private didTradeWin(trade: TradeRecord): boolean {
     const btcPrice =
-      trade.closingBtcPrice ?? this.feedManager.getCurrentBtcPrice();
+      trade.closingBtcPrice ??
+      this.windowEndPriceSnapshot ??
+      this.feedManager.getCurrentBtcPrice();
     const priceToBeat = trade.priceToBeatAtEntry;
-    if (priceToBeat <= 0) return false;
+    if (priceToBeat <= 0 || btcPrice <= 0) return false;
 
     const btcWentUp = btcPrice >= priceToBeat;
     return trade.side === "UP" ? btcWentUp : !btcWentUp;

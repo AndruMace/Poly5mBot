@@ -118,6 +118,7 @@ export interface MarketContext {
   orderBook: OrderBookState;
   prices: Record<string, PricePoint>;
   oracleEstimate: number;
+  oracleTimestamp: number;
   windowElapsedMs: number;
   windowRemainingMs: number;
   priceToBeat: number | null;
@@ -293,6 +294,7 @@ export type WSMessageType =
   | "killswitch"
   | "metrics"
   | "feedHealth"
+  | "exchangeStatus"
   | "error";
 
 export interface WSMessage {

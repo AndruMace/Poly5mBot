@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Header } from "./Header.js";
+import { NotesDrawer } from "./NotesDrawer.js";
 import {
   LayoutDashboard,
   Brain,
@@ -68,6 +69,7 @@ export function Layout({ activeTab, onTabChange, children }: LayoutProps) {
       <div className="flex flex-col flex-1 overflow-hidden">
         <Header />
         <main className="flex-1 overflow-auto p-4">{children}</main>
+        <NotesDrawer />
       </div>
     </div>
   );

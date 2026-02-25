@@ -43,5 +43,6 @@ export const config = {
   },
   server: {
     port: parseInt(process.env.SERVER_PORT ?? "3001", 10),
+    operatorToken: process.env.OPERATOR_TOKEN ?? "",
   },
 } as const;

@@ -3,7 +3,8 @@ import { useStore } from "../store/index.js";
 import { Wifi, WifiOff, Wallet, Play, Square, Loader2, Eye, Radio } from "lucide-react";
 
 export function Header() {
-  const connected = useStore((s) => s.connected);
+  const wsConnected = useStore((s) => s.connected);
+  const exchangeConnected = useStore((s) => s.exchangeConnected);
   const walletAddress = useStore((s) => s.walletAddress);
   const prices = useStore((s) => s.prices);
   const tradingActive = useStore((s) => s.tradingActive);
@@ -107,20 +108,38 @@ export function Header() {
             </span>
           </div>
         )}
-        <div className="flex items-center gap-2">
-          {connected ? (
-            <>
-              <Wifi size={14} className="text-[var(--accent-green)]" />
-              <span className="text-xs text-[var(--accent-green)]">Live</span>
-            </>
-          ) : (
-            <>
-              <WifiOff size={14} className="text-[var(--accent-red)]" />
-              <span className="text-xs text-[var(--accent-red)]">
-                Disconnected
-              </span>
-            </>
-          )}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5" title="WebSocket to server">
+            {wsConnected ? (
+              <>
+                <Wifi size={12} className="text-[var(--accent-green)]" />
+                <span className="text-[10px] text-[var(--accent-green)]">WS</span>
+              </>
+            ) : (
+              <>
+                <WifiOff size={12} className="text-[var(--accent-red)]" />
+                <span className="text-[10px] text-[var(--accent-red)]">WS</span>
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5" title="Polymarket CLOB connection">
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${
+                exchangeConnected
+                  ? "bg-[var(--accent-green)]"
+                  : "bg-[var(--accent-red)]"
+              }`}
+            />
+            <span
+              className={`text-[10px] ${
+                exchangeConnected
+                  ? "text-[var(--accent-green)]"
+                  : "text-[var(--accent-red)]"
+              }`}
+            >
+              {exchangeConnected ? "CLOB" : "CLOB Off"}
+            </span>
+          </div>
         </div>
       </div>
     </header>
