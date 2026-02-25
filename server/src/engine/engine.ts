@@ -31,6 +31,7 @@ import type {
   OrderBookSide,
   RiskSnapshot,
   EngineEvent,
+  EntryContext,
 } from "../types.js";
 
 let tradeCounter = 0;
@@ -56,15 +57,39 @@ const MIN_FILL_RATIO_BY_STRATEGY: Record<string, number> = {
   momentum: 0.5,
 };
 
+const SHADOW_SIM_OPTS_BY_STRATEGY: Record<string, SimulatorOpts> = {
+  arb: { slippageBps: 4, fillProbability: 0.78, minLiquidityPct: 0.08 },
+  efficiency: { slippageBps: 3, fillProbability: 0.82, minLiquidityPct: 0.1 },
+  "whale-hunt": { slippageBps: 6, fillProbability: 0.75, minLiquidityPct: 0.08 },
+  momentum: { slippageBps: 7, fillProbability: 0.86, minLiquidityPct: 0.05 },
+};
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function adjustMomentumMaxPrice(signal: Signal, regime: RegimeState, ctx: MarketContext): number {
+  const base = signal.maxPrice;
+  if (signal.strategy !== "momentum") return base;
+
+  let allowance = 0;
+  if (regime.trendRegime === "strong_up" || regime.trendRegime === "strong_down") allowance += 0.05;
+  else if (regime.trendRegime === "up" || regime.trendRegime === "down") allowance += 0.03;
+
+  if (signal.confidence >= 0.75) allowance += 0.02;
+  if (ctx.windowRemainingMs <= 120_000) allowance += 0.02;
+
+  if (regime.liquidityRegime === "thin") allowance -= 0.02;
+  if (regime.spreadRegime === "blowout") allowance -= 0.03;
+
+  return Math.round(clamp(base + allowance, 0.5, 0.78) * 1000) / 1000;
 }
 
 function zeroDiagnostics(): StrategyDiagnostics {
   return {
     signals: 0, riskRejected: 0, liveRejected: 0, dynamicWindowUsed: 0,
     earlyEntryAccepted: 0, earlyEntryRejected: 0, probabilityRejected: 0,
-    submitted: 0, queueMiss: 0, liquidityFail: 0, partialFill: 0, fullFill: 0,
+    submitted: 0, queueMiss: 0, liquidityFail: 0, lowFillCancel: 0, partialFill: 0, fullFill: 0,
     wins: 0, losses: 0,
   };
 }
@@ -421,11 +446,16 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const signal = yield* strategy.evaluate(ctx);
         if (!signal) continue;
 
+        if (signal.strategy === "momentum") {
+          signal.maxPrice = adjustMomentumMaxPrice(signal, regime, ctx);
+        }
+
         yield* Ref.update(stateRef, (stUpd) => {
           bumpDiag(stUpd, strategy.name, "signals", 1, isShadow);
           return stUpd;
         });
 
+        const configuredTradeSize = signal.size;
         const recentPrices = yield* feedService.getRecentPrices(300_000, "binance");
         signal.size = positionSizer.computeSize(signal, recentPrices);
 
@@ -440,12 +470,55 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           continue;
         }
 
+        const riskSnap = yield* riskManager.getSnapshot;
+        const entryContext: EntryContext = {
+          strategyName: strategy.name,
+          mode: isShadow ? "shadow" : "live",
+          regime: { ...regime },
+          strategyConfig: { ...sState.config },
+          regimeFilter: { ...sState.regimeFilter },
+          signal: {
+            side: signal.side,
+            confidence: signal.confidence,
+            reason: signal.reason,
+            maxPrice: signal.maxPrice,
+            timestamp: signal.timestamp,
+            telemetry: signal.telemetry ? { ...signal.telemetry } : undefined,
+          },
+          window: {
+            conditionId: ctx.currentWindow?.conditionId ?? "",
+            windowStart: ctx.currentWindow?.startTime ?? 0,
+            windowEnd: ctx.currentWindow?.endTime ?? 0,
+            priceToBeat: ctx.priceToBeat,
+          },
+          microstructure: {
+            bestAskUp: ctx.orderBook.bestAskUp,
+            bestAskDown: ctx.orderBook.bestAskDown,
+            bestBidUp: ctx.orderBook.bestBidUp,
+            bestBidDown: ctx.orderBook.bestBidDown,
+            oracleEstimate: ctx.oracleEstimate,
+            currentBtcPrice: ctx.currentBtcPrice,
+          },
+          riskAtEntry: {
+            openPositions: riskSnap.openPositions,
+            openExposure: riskSnap.openExposure,
+            dailyPnl: riskSnap.dailyPnl,
+            hourlyPnl: riskSnap.hourlyPnl,
+            consecutiveLosses: riskSnap.consecutiveLosses,
+          },
+          sizing: {
+            configuredTradeSize,
+            computedSize: signal.size,
+            finalNotional: signal.size,
+          },
+        };
+
         yield* Ref.update(stateRef, (s) => {
           s.lastStrategyExecution.set(strategy.name, now);
           return s;
         });
 
-        const executed = yield* executeStrategy(signal, isShadow, ctx);
+        const executed = yield* executeStrategy(signal, isShadow, ctx, entryContext);
         if (executed) {
           yield* Ref.update(stateRef, (s) => {
             s.entriesThisWindow.set(strategy.name, (s.entriesThisWindow.get(strategy.name) ?? 0) + 1);
@@ -476,7 +549,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* emit({ _tag: "Metrics", data: { ...st.metrics, rolling: st.rollingDiagnostics, window: st.windowDiagnostics } });
       });
 
-    const executeStrategy = (signal: Signal, shadow: boolean, ctx: MarketContext) =>
+    const executeStrategy = (signal: Signal, shadow: boolean, ctx: MarketContext, entryCtx: EntryContext) =>
       Effect.gen(function* () {
         const st = yield* Ref.get(stateRef);
         if (!st.currentWindow) return false;
@@ -484,12 +557,12 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const ptb = st.currentWindow.priceToBeat ?? 0;
 
         if (shadow) {
-          return yield* executeShadow(signal, conditionId, ptb, ctx);
+          return yield* executeShadow(signal, conditionId, ptb, ctx, entryCtx);
         }
-        return yield* executeLive(signal, conditionId, ptb);
+        return yield* executeLive(signal, conditionId, ptb, entryCtx);
       });
 
-    const executeShadow = (signal: Signal, conditionId: string, ptb: number, ctx: MarketContext) =>
+    const executeShadow = (signal: Signal, conditionId: string, ptb: number, ctx: MarketContext, entryCtx: EntryContext) =>
       Effect.gen(function* () {
         const st = yield* Ref.get(stateRef);
         if (!st.currentWindow) return false;
@@ -499,7 +572,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const shares = Math.floor((notional / signal.maxPrice) * 100) / 100;
         const book = signal.side === "UP" ? st.orderBook.up : st.orderBook.down;
 
-        const result = fillSimulator.simulate("BUY", tokenId, shares, signal.maxPrice, book);
+        const simOpts = SHADOW_SIM_OPTS_BY_STRATEGY[signal.strategy];
+        const result = fillSimulator.simulate("BUY", tokenId, shares, signal.maxPrice, book, simOpts);
 
         const tradeId = `shadow-${++tradeCounter}-${Date.now()}`;
         const signalToSubmitMs = Math.max(0, Date.now() - signal.timestamp);
@@ -508,13 +582,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           id: tradeId, conditionId, strategy: signal.strategy, side: signal.side,
           tokenId, priceToBeatAtEntry: ptb, windowEnd: st.currentWindow.endTime,
           shadow: true, size: notional, requestedShares: shares,
+          entryContext: entryCtx,
         });
         yield* tracker.shadowStore.appendEvent(tradeId, "signal_generated", {
           conditionId, strategy: signal.strategy, side: signal.side, tokenId,
           priceToBeatAtEntry: ptb, windowEnd: st.currentWindow.endTime,
           shadow: true, size: notional, requestedShares: shares,
+          entryContext: entryCtx,
         });
         yield* tracker.shadowStore.appendEvent(tradeId, "order_submitted", { shares, price: signal.maxPrice });
+        const submittedRecord = yield* tracker.getTradeRecordById(tradeId, true);
+        if (submittedRecord) {
+          (submittedRecord as any).shadow = true;
+          yield* emit({ _tag: "Trade", data: submittedRecord });
+        }
 
         yield* Ref.update(stateRef, (s) => {
           bumpDiag(s, signal.strategy, "submitted", 1, true);
@@ -524,6 +605,19 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
         if (!result.filled) {
           yield* tracker.shadowStore.appendEvent(tradeId, "cancel", { reason: result.reason });
+          yield* Ref.update(stateRef, (s) => {
+            if (result.reason === "queue_position_miss") {
+              bumpDiag(s, signal.strategy, "queueMiss", 1, true);
+            } else if (result.reason === "insufficient_liquidity" || result.reason === "no_liquidity") {
+              bumpDiag(s, signal.strategy, "liquidityFail", 1, true);
+            }
+            return s;
+          });
+          const cancelledRecord = yield* tracker.getTradeRecordById(tradeId, true);
+          if (cancelledRecord) {
+            (cancelledRecord as any).shadow = true;
+            yield* emit({ _tag: "Trade", data: cancelledRecord });
+          }
           yield* Effect.log(`[Shadow] ${signal.strategy} ${signal.side} cancelled: ${result.reason}`);
           return false;
         }
@@ -532,6 +626,15 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const minFill = MIN_FILL_RATIO_BY_STRATEGY[signal.strategy] ?? 0.5;
         if (fillRatio < minFill) {
           yield* tracker.shadowStore.appendEvent(tradeId, "cancel", { reason: "low_fill_ratio", fillRatio, minFillRatio: minFill });
+          yield* Ref.update(stateRef, (s) => {
+            bumpDiag(s, signal.strategy, "lowFillCancel", 1, true);
+            return s;
+          });
+          const cancelledRecord = yield* tracker.getTradeRecordById(tradeId, true);
+          if (cancelledRecord) {
+            (cancelledRecord as any).shadow = true;
+            yield* emit({ _tag: "Trade", data: cancelledRecord });
+          }
           return false;
         }
 
@@ -554,7 +657,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         return true;
       });
 
-    const executeLive = (signal: Signal, conditionId: string, ptb: number) =>
+    const executeLive = (signal: Signal, conditionId: string, ptb: number, entryCtx: EntryContext) =>
       Effect.gen(function* () {
         const st = yield* Ref.get(stateRef);
         if (!st.currentWindow) return false;
@@ -569,6 +672,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
             signal.size, st.currentWindow.endTime, conditionId, ptb,
           );
           for (const trade of trades) {
+            trade.entryContext = entryCtx;
             yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
             yield* tracker.addTrade(trade);
             yield* riskManager.onTradeOpened(trade);
@@ -583,6 +687,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           st.currentWindow.endTime, conditionId, ptb,
         );
         if (trade) {
+          trade.entryContext = entryCtx;
           yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
           yield* tracker.addTrade(trade);
           if (trade.status === "filled") {

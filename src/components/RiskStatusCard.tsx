@@ -1,6 +1,6 @@
 import { ShieldAlert } from "lucide-react";
 import { useRxValue } from "@effect-rx/rx-react";
-import { riskRx, killSwitchesRx } from "../store/index.js";
+import { riskRx, killSwitchesRx, metricsRx } from "../store/index.js";
 
 function fmtMoney(v: number): string {
   return `${v >= 0 ? "+" : ""}$${v.toFixed(2)}`;
@@ -17,7 +17,18 @@ function ratioColor(current: number, limit: number): string {
 export function RiskStatusCard() {
   const risk = useRxValue(riskRx);
   const killSwitches = useRxValue(killSwitchesRx);
+  const metrics = useRxValue(metricsRx);
   const activeCount = killSwitches.filter((k) => k.active).length;
+  const rollingDiag = Object.values(metrics.rolling ?? {});
+  const cancelSummary = rollingDiag.reduce(
+    (acc, row) => {
+      acc.queueMiss += row.queueMiss ?? 0;
+      acc.liquidityFail += row.liquidityFail ?? 0;
+      acc.lowFillCancel += row.lowFillCancel ?? 0;
+      return acc;
+    },
+    { queueMiss: 0, liquidityFail: 0, lowFillCancel: 0 },
+  );
 
   const rows = [
     {
@@ -103,6 +114,21 @@ export function RiskStatusCard() {
         ) : (
           <span className="text-[var(--accent-green)] font-medium">inactive</span>
         )}
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2">
+        <div className="rounded-md border border-[var(--border)]/70 bg-[var(--bg-secondary)]/40 px-3 py-2">
+          <div className="text-[11px] text-[var(--text-secondary)]">Queue Miss Cancels</div>
+          <div className="text-sm font-mono text-[var(--text-primary)]">{cancelSummary.queueMiss}</div>
+        </div>
+        <div className="rounded-md border border-[var(--border)]/70 bg-[var(--bg-secondary)]/40 px-3 py-2">
+          <div className="text-[11px] text-[var(--text-secondary)]">Liquidity Fail Cancels</div>
+          <div className="text-sm font-mono text-[var(--text-primary)]">{cancelSummary.liquidityFail}</div>
+        </div>
+        <div className="rounded-md border border-[var(--border)]/70 bg-[var(--bg-secondary)]/40 px-3 py-2">
+          <div className="text-[11px] text-[var(--text-secondary)]">Low Fill Cancels</div>
+          <div className="text-sm font-mono text-[var(--text-primary)]">{cancelSummary.lowFillCancel}</div>
+        </div>
       </div>
     </div>
   );

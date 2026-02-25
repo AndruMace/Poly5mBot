@@ -7,6 +7,7 @@ import type {
   TradeEventType,
   TradeRecord,
   PnLSummary,
+  EntryContext,
 } from "../types.js";
 
 const DATA_DIR = "data";
@@ -92,6 +93,7 @@ function makeTrade(init: {
   clobOrderId?: string;
   clobResult?: string;
   clobReason?: string;
+  entryContext?: EntryContext;
 }): Trade {
   return {
     ...init,
@@ -105,6 +107,7 @@ function makeTrade(init: {
     clobOrderId: init.clobOrderId,
     clobResult: init.clobResult,
     clobReason: init.clobReason,
+    entryContext: init.entryContext,
   } as Trade;
 }
 
@@ -131,6 +134,7 @@ export function toTradeRecord(t: Trade): TradeRecord {
     clobOrderId: t.clobOrderId,
     clobResult: t.clobResult,
     clobReason: t.clobReason,
+    entryContext: t.entryContext,
   } as TradeRecord;
 }
 
@@ -191,6 +195,7 @@ export interface TradeStoreService {
     clobOrderId?: string;
     clobResult?: string;
     clobReason?: string;
+    entryContext?: EntryContext;
   }) => Effect.Effect<Trade>;
   readonly getTrade: (id: string) => Effect.Effect<Trade | undefined>;
   readonly getOpenTrades: Effect.Effect<ReadonlyArray<Trade>>;
@@ -239,6 +244,7 @@ export const makeTradeStore = (shadow: boolean) =>
         for (const id of tradeIds) {
           const first = initEvents.find((e) => e.tradeId === id && e.type === "signal_generated");
           if (first?.data) {
+            const ec = first.data.entryContext as EntryContext | undefined;
             const t = makeTrade({
               id,
               conditionId: String(first.data.conditionId ?? ""),
@@ -250,6 +256,7 @@ export const makeTradeStore = (shadow: boolean) =>
               shadow: Boolean(first.data.shadow),
               size: Number(first.data.size ?? 0),
               requestedShares: Number(first.data.requestedShares ?? 0),
+              entryContext: ec,
             });
             trades.set(id, t);
           }

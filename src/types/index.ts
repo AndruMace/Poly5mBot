@@ -98,6 +98,57 @@ export interface TradeRecord {
   clobOrderId?: string;
   clobResult?: string;
   clobReason?: string;
+  entryContext?: EntryContext;
+}
+
+// ── Trade entry context (captured at signal acceptance for analysis) ──
+
+export interface EntryContext {
+  strategyName: string;
+  mode: TradingMode;
+
+  regime: RegimeState;
+  strategyConfig: Record<string, number>;
+  regimeFilter: RegimeFilter;
+
+  signal: {
+    side: Side;
+    confidence: number;
+    reason: string;
+    maxPrice: number;
+    timestamp: number;
+    telemetry?: SignalTelemetry;
+  };
+
+  window: {
+    conditionId: string;
+    windowStart: number;
+    windowEnd: number;
+    priceToBeat: number | null;
+  };
+
+  microstructure: {
+    bestAskUp: number | null;
+    bestAskDown: number | null;
+    bestBidUp: number | null;
+    bestBidDown: number | null;
+    oracleEstimate: number;
+    currentBtcPrice: number;
+  };
+
+  riskAtEntry: {
+    openPositions: number;
+    openExposure: number;
+    dailyPnl: number;
+    hourlyPnl: number;
+    consecutiveLosses: number;
+  };
+
+  sizing: {
+    configuredTradeSize: number;
+    computedSize: number;
+    finalNotional: number;
+  };
 }
 
 // ── Regime types ──
@@ -160,6 +211,7 @@ export interface StrategyDiagnostics {
   submitted: number;
   queueMiss: number;
   liquidityFail: number;
+  lowFillCancel: number;
   partialFill: number;
   fullFill: number;
   wins: number;

@@ -68,6 +68,7 @@ export function ExecutionMetricsCard() {
               <th className="text-right py-1">Prob Rej</th>
               <th className="text-right py-1">Queue Miss</th>
               <th className="text-right py-1">Liq Fail</th>
+              <th className="text-right py-1">Low Fill</th>
               <th className="text-right py-1">Partial</th>
               <th className="text-right py-1">Full</th>
             </tr>
@@ -87,6 +88,7 @@ export function ExecutionMetricsCard() {
                   <td className="py-1 text-right font-mono">{row?.probabilityRejected ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.queueMiss ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.liquidityFail ?? 0}</td>
+                  <td className="py-1 text-right font-mono">{row?.lowFillCancel ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.partialFill ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.fullFill ?? 0}</td>
                 </tr>

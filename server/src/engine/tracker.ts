@@ -30,6 +30,7 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
           clobOrderId: trade.clobOrderId,
           clobResult: trade.clobResult,
           clobReason: trade.clobReason,
+          entryContext: trade.entryContext,
         });
 
         yield* s.appendEvent(trade.id, "signal_generated", {
@@ -42,6 +43,7 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
           shadow,
           size: trade.size,
           requestedShares: trade.shares,
+          entryContext: trade.entryContext,
         });
 
         if (trade.status === "filled") {
