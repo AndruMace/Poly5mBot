@@ -478,37 +478,56 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       const closingBtcPrice = sNow.windowEndPriceSnapshot && sNow.windowEndPriceSnapshot > 0
         ? sNow.windowEndPriceSnapshot : liveBtcPrice;
 
-      // Resolve expired trades
-      const expired = yield* riskManager.resolveExpired(now);
+      // Resolve expired trades for both live and shadow books.
+      // Risk manager only tracks live exposure, so shadow expiries must
+      // come from the tracker directly to avoid stuck "active" shadow trades.
+      const [openLiveTrades, openShadowTrades] = yield* Effect.all([
+        tracker.getOpenTrades(false),
+        tracker.getOpenTrades(true),
+      ]);
+      const expired = [...openLiveTrades, ...openShadowTrades].filter(
+        (trade) =>
+          (trade.status === "filled" || trade.status === "partial") &&
+          now >= trade.windowEnd,
+      );
       for (const trade of expired) {
         if (closingBtcPrice <= 0) {
           yield* Effect.logWarning(`[Engine] Skipping resolution of ${trade.id} — no valid settlement price`);
           continue;
         }
-        const tradeShadow = trade.id.startsWith("shadow-");
+        const tradeShadow = trade.shadow === true;
+        const tradeRecord = yield* tracker.getTradeRecordById(trade.id, tradeShadow);
+        if (!tradeRecord) continue;
         yield* tracker.expireTrade(trade.id, closingBtcPrice, tradeShadow);
-        trade.closingBtcPrice = closingBtcPrice;
-        const won = didTradeWin(trade, sNow, liveBtcPrice);
+        const won = didTradeWin(
+          { ...tradeRecord, closingBtcPrice },
+          sNow,
+          liveBtcPrice,
+        );
         yield* tracker.resolveTrade(trade.id, won, tradeShadow);
-        const resolved = yield* tracker.getTradeRecordById(trade.id, tradeShadow);
-        if (resolved) {
-          trade.status = "resolved";
-          trade.outcome = resolved.outcome;
-          trade.pnl = resolved.pnl;
-        } else {
-          trade.status = "resolved";
-          trade.outcome = won ? "win" : "loss";
-          trade.pnl = 0;
-        }
+        const resolved =
+          (yield* tracker.getTradeRecordById(trade.id, tradeShadow)) ?? {
+            ...tradeRecord,
+            status: "resolved" as const,
+            outcome: won ? ("win" as const) : ("loss" as const),
+            pnl: 0,
+            closingBtcPrice,
+          };
         for (const s of strategies) {
-          yield* s.onTrade(trade);
+          yield* s.onTrade(resolved);
         }
         yield* Ref.update(stateRef, (stUpd) => {
-          bumpDiag(stUpd, trade.strategy, trade.outcome === "win" ? "wins" : "losses", 1, tradeShadow);
+          bumpDiag(
+            stUpd,
+            resolved.strategy,
+            resolved.outcome === "win" ? "wins" : "losses",
+            1,
+            tradeShadow,
+          );
           return stUpd;
         });
-        yield* riskManager.onTradeClosed(trade, tradeShadow);
-        yield* emit({ _tag: "Trade", data: trade });
+        yield* riskManager.onTradeClosed(resolved, tradeShadow);
+        yield* emit({ _tag: "Trade", data: resolved });
       }
 
       if (!isShadow && connected) {

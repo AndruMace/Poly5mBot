@@ -2,13 +2,15 @@
 
 ## Test Matrix
 
-| Scope | Location | Runner/Config | Command |
-|---|---|---|---|
-| Server unit | `server/test/unit/**` | Vitest (`server/vitest.config.ts`) | `npm --prefix server run test:unit` |
-| Server integration | `server/test/integration/**` | Vitest (`server/vitest.config.ts`) | `npm --prefix server run test:integration` |
-| Server live smoke | `server/test/live/**` | Vitest (`server/vitest.config.ts`) | `npm --prefix server run test:live` |
-| Client unit | `src/**/*.test.ts(x)` | Vitest (`vitest.config.ts`, jsdom + RTL) | `npm run test:unit:client` |
-| E2E | `test/e2e/**` | Playwright (`playwright.config.ts`) | `npm run test:e2e` |
+
+| Scope              | Location                     | Runner/Config                            | Command                                    |
+| ------------------ | ---------------------------- | ---------------------------------------- | ------------------------------------------ |
+| Server unit        | `server/test/unit/**`        | Vitest (`server/vitest.config.ts`)       | `npm --prefix server run test:unit`        |
+| Server integration | `server/test/integration/**` | Vitest (`server/vitest.config.ts`)       | `npm --prefix server run test:integration` |
+| Server live smoke  | `server/test/live/**`        | Vitest (`server/vitest.config.ts`)       | `npm --prefix server run test:live`        |
+| Client unit        | `src/**/*.test.ts(x)`        | Vitest (`vitest.config.ts`, jsdom + RTL) | `npm run test:unit:client`                 |
+| E2E                | `test/e2e/**`                | Playwright (`playwright.config.ts`)      | `npm run test:e2e`                         |
+
 
 ## Primary Commands
 
@@ -34,4 +36,5 @@ Use `npm run ...`, not raw `npx vitest`.
 - Missing tools: run `npm install`
 - Peer dependency issues: use lockfile + `npm ci`
 - E2E failure diagnostics:  
-  `npx playwright show-trace test-results/playwright/<trace.zip>`
+`npx playwright show-trace test-results/playwright/<trace.zip>`
+
