@@ -11,6 +11,7 @@ import { PnLTracker } from "./tracker.js";
 import { FillSimulator, type SimulatorOpts } from "./fill-simulator.js";
 import { PositionSizer } from "./position-sizer.js";
 import { RegimeDetector } from "./regime-detector.js";
+import { preflightShadowBuy } from "./shadow-preflight.js";
 import { EventBus } from "./event-bus.js";
 import { makeArbStrategy } from "../strategies/arb.js";
 import { makeEfficiencyStrategy } from "../strategies/efficiency.js";
@@ -609,7 +610,9 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
         const configuredTradeSize = signal.size;
         const recentPrices = yield* feedService.getRecentPrices(300_000, "binance");
-        signal.size = positionSizer.computeSize(signal, recentPrices);
+        const computedSize = positionSizer.computeSize(signal, recentPrices);
+        const alignedSize = Math.min(computedSize, config.risk.maxTradeSize);
+        signal.size = Math.round(alignedSize * 100) / 100;
 
         const posSlots = signal.strategy === "efficiency" ? 2 : 1;
         const check = yield* riskManager.approve(signal, ctx, posSlots);
@@ -660,7 +663,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           },
           sizing: {
             configuredTradeSize,
-            computedSize: signal.size,
+            computedSize,
             finalNotional: signal.size,
           },
         };
@@ -729,8 +732,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
         const tokenId = signal.side === "UP" ? st.currentWindow.upTokenId : st.currentWindow.downTokenId;
         const notional = signal.size;
-        const shares = Math.floor((notional / signal.maxPrice) * 100) / 100;
         const book = signal.side === "UP" ? st.orderBook.up : st.orderBook.down;
+        const preflight = preflightShadowBuy(notional, signal.maxPrice, book);
+        if (!preflight.allowed) {
+          yield* Ref.update(stateRef, (s) => {
+            bumpDiag(s, signal.strategy, "liquidityFail", 1, true);
+            return s;
+          });
+          yield* Effect.log(
+            `[Shadow] ${signal.strategy} ${signal.side} skipped: ${preflight.reason}`,
+          );
+          return false;
+        }
+
+        const shares = Math.floor(preflight.requestedShares * 100) / 100;
 
         const simOpts = SHADOW_SIM_OPTS_BY_STRATEGY[signal.strategy];
         const result = fillSimulator.simulate("BUY", tokenId, shares, signal.maxPrice, book, simOpts);
