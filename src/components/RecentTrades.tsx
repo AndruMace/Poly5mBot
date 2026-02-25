@@ -176,6 +176,13 @@ function StatusBadge({
       </span>
     );
   }
+  if (status === "rejected") {
+    return (
+      <span className="px-1.5 py-0.5 rounded text-xs bg-[var(--accent-red)]/15 text-[var(--accent-red)]">
+        Rejected
+      </span>
+    );
+  }
   return (
     <span className="px-1.5 py-0.5 rounded text-xs bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]">
       {status}

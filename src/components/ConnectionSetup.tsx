@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useRxValue } from "@effect-rx/rx-react";
 import {
   connectedRx,
+  exchangeConnectedRx,
   walletAddressRx,
   killSwitchesRx,
 } from "../store/index.js";
@@ -18,6 +19,7 @@ import {
 
 export function ConnectionSetup() {
   const connected = useRxValue(connectedRx);
+  const exchangeConnected = useRxValue(exchangeConnectedRx);
   const walletAddress = useRxValue(walletAddressRx);
   const killSwitches = useRxValue(killSwitchesRx);
 
@@ -43,16 +45,21 @@ export function ConnectionSetup() {
   async function loadStatus() {
     try {
       const res = await fetch("/api/status");
+      if (!res.ok) throw new Error("Status request failed");
       const data = await res.json();
       setStatus(data);
-    } catch {
-      setError("Could not reach backend");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reach backend");
     }
   }
 
   async function resetKillSwitches() {
     try {
-      await fetch("/api/killswitches/reset", { method: "POST" });
+      const res = await fetch("/api/killswitches/reset", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Could not reset kill switches");
+      }
     } catch {
       setError("Could not reset kill switches");
     }
@@ -164,6 +171,17 @@ export function ConnectionSetup() {
             >
               <Wifi size={14} />
               {connected ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between py-2 border-t border-[var(--border)]">
+            <span className="text-sm text-[var(--text-secondary)]">Exchange (CLOB)</span>
+            <span
+              className={`text-sm ${
+                exchangeConnected ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"
+              }`}
+            >
+              {exchangeConnected ? "Connected" : "Disconnected"}
             </span>
           </div>
 

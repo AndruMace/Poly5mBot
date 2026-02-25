@@ -128,6 +128,7 @@ interface EngineState {
   shadowModeDiagnostics: Record<string, StrategyDiagnostics>;
   metrics: EngineMetrics;
   lastPoll: number;
+  efficiencyIncidentBlocked: boolean;
 }
 
 function initialEngineState(mode: "live" | "shadow"): EngineState {
@@ -171,6 +172,7 @@ function initialEngineState(mode: "live" | "shadow"): EngineState {
       reconciliation: emptyReconciliation(),
     },
     lastPoll: 0,
+    efficiencyIncidentBlocked: false,
   };
 }
 
@@ -235,6 +237,132 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       if (st.recentSignalLatencies.length > 20) st.recentSignalLatencies = st.recentSignalLatencies.slice(-20);
       lat.avgRecentSignalToSubmitMs = st.recentSignalLatencies.reduce((s, v) => s + v, 0) / st.recentSignalLatencies.length;
     };
+
+    const recomputeReconciliation = Effect.gen(function* () {
+      const [liveTrades, shadowTrades] = yield* Effect.all([
+        tracker.getAllTradeRecords(false),
+        tracker.getAllTradeRecords(true),
+      ]);
+      const liveResolved = liveTrades.filter((t) => t.status === "resolved");
+      const shadowResolved = shadowTrades.filter((t) => t.status === "resolved");
+      const liveWins = liveResolved.filter((t) => t.outcome === "win").length;
+      const shadowWins = shadowResolved.filter((t) => t.outcome === "win").length;
+      const strategyNames = strategies.map((s) => s.name);
+      const byStrategy = strategyNames.map((strategy) => {
+        const ls = liveTrades.filter((t) => t.strategy === strategy);
+        const ss = shadowTrades.filter((t) => t.strategy === strategy);
+        const lsResolved = ls.filter((t) => t.status === "resolved");
+        const ssResolved = ss.filter((t) => t.status === "resolved");
+        const liveSubmitted = ls.filter((t) => t.status !== "pending").length;
+        const shadowSubmitted = ss.filter((t) => t.status !== "pending").length;
+        const liveFilled = ls.filter((t) => t.status === "filled" || t.status === "partial" || t.status === "resolved").length;
+        const shadowFilled = ss.filter((t) => t.status === "filled" || t.status === "partial" || t.status === "resolved").length;
+        const liveRejected = ls.filter((t) => t.status === "cancelled" || t.status === "rejected").length;
+        const shadowRejected = ss.filter((t) => t.status === "cancelled" || t.status === "rejected").length;
+        const livePnl = lsResolved.reduce((acc, t) => acc + t.pnl, 0);
+        const shadowPnl = ssResolved.reduce((acc, t) => acc + t.pnl, 0);
+        const liveFillRate = liveSubmitted > 0 ? liveFilled / liveSubmitted : 0;
+        const shadowFillRate = shadowSubmitted > 0 ? shadowFilled / shadowSubmitted : 0;
+        const liveRejectRate = liveSubmitted > 0 ? liveRejected / liveSubmitted : 0;
+        const shadowRejectRate = shadowSubmitted > 0 ? shadowRejected / shadowSubmitted : 0;
+        return {
+          strategy,
+          liveSignals: ls.length,
+          shadowSignals: ss.length,
+          liveSubmitted,
+          shadowSubmitted,
+          liveFillRate,
+          shadowFillRate,
+          liveRejectRate,
+          shadowRejectRate,
+          livePnl,
+          shadowPnl,
+          signalDelta: ls.length - ss.length,
+          fillRateDelta: liveFillRate - shadowFillRate,
+          pnlDelta: livePnl - shadowPnl,
+        };
+      });
+
+      yield* Ref.update(stateRef, (s) => ({
+        ...s,
+        metrics: {
+          ...s.metrics,
+          reconciliation: {
+            updatedAt: Date.now(),
+            liveTotalTrades: liveResolved.length,
+            shadowTotalTrades: shadowResolved.length,
+            liveWinRate: liveResolved.length > 0 ? (liveWins / liveResolved.length) * 100 : 0,
+            shadowWinRate: shadowResolved.length > 0 ? (shadowWins / shadowResolved.length) * 100 : 0,
+            liveTotalPnl: liveResolved.reduce((acc, t) => acc + t.pnl, 0),
+            shadowTotalPnl: shadowResolved.reduce((acc, t) => acc + t.pnl, 0),
+            strategies: byStrategy,
+          },
+        },
+      }));
+    });
+
+    const reconcileSubmittedLiveOrders = Effect.gen(function* () {
+      const openTrades = yield* tracker.getOpenTrades(false);
+      for (const trade of openTrades) {
+        if (trade.status !== "submitted" || !trade.clobOrderId) continue;
+        const status = yield* orderService.getOrderStatusById(trade.clobOrderId);
+        if (!status.mappedStatus || status.mappedStatus === "submitted") continue;
+
+        if (status.mappedStatus === "cancelled" || status.mappedStatus === "rejected") {
+          const eventType = status.mappedStatus === "rejected" ? "order_rejected" : "cancel";
+          yield* tracker.liveStore.appendEvent(trade.id, eventType, {
+            orderId: trade.clobOrderId,
+            result: status.rawStatus ?? status.mappedStatus,
+            reason: status.reason ?? `Order ${status.mappedStatus}`,
+          });
+          const updated = yield* tracker.getTradeRecordById(trade.id, false);
+          if (updated) {
+            yield* emit({ _tag: "Trade", data: updated });
+            yield* Ref.update(stateRef, (s) => {
+              bumpDiag(s, updated.strategy, "liveRejected", 1, false);
+              return s;
+            });
+          }
+          continue;
+        }
+
+        const fullTrade = yield* tracker.getTradeById(trade.id, false);
+        if (!fullTrade) continue;
+        const cumulativeFilled = status.filledShares ?? fullTrade.requestedShares;
+        const deltaShares = Math.max(0, cumulativeFilled - fullTrade.filledShares);
+        const price = (status.avgPrice ?? fullTrade.avgFillPrice) || trade.avgFillPrice || 0;
+        const fee = deltaShares > 0 ? calculateFeeStatic(deltaShares, price) : 0;
+
+        if (status.mappedStatus === "partial") {
+          if (deltaShares <= 0) continue;
+          yield* tracker.liveStore.appendEvent(trade.id, "partial_fill", {
+            shares: deltaShares,
+            price,
+            fee,
+            orderId: trade.clobOrderId,
+            result: status.rawStatus ?? "partial",
+            reason: status.reason ?? undefined,
+          });
+        } else if (status.mappedStatus === "filled") {
+          yield* tracker.liveStore.appendEvent(trade.id, "fill", {
+            shares: deltaShares,
+            price,
+            fee,
+            orderId: trade.clobOrderId,
+            result: status.rawStatus ?? "filled",
+            reason: status.reason ?? undefined,
+          });
+        }
+
+        const updated = yield* tracker.getTradeRecordById(trade.id, false);
+        if (updated) {
+          if (trade.status === "submitted" && (updated.status === "partial" || updated.status === "filled")) {
+            yield* riskManager.onTradeOpened(updated);
+          }
+          yield* emit({ _tag: "Trade", data: updated });
+        }
+      }
+    });
 
     const didTradeWin = (trade: TradeRecord, st: EngineState, currentBtcPrice: number) => {
       const btcPrice = trade.closingBtcPrice ?? st.windowEndPriceSnapshot ?? currentBtcPrice;
@@ -337,6 +465,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       const isShadow = st.mode === "shadow";
       const now = Date.now();
       const liveBtcPrice = yield* feedService.getCurrentBtcPrice;
+      const connected = yield* polyClient.isConnected;
 
       if (st.currentWindow && liveBtcPrice > 0 && now >= st.currentWindow.endTime - 5_000) {
         if (st.windowEndPriceSnapshot === null || (now <= st.currentWindow.endTime + 2_000 && liveBtcPrice > 0)) {
@@ -381,6 +510,10 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* emit({ _tag: "Trade", data: trade });
       }
 
+      if (!isShadow && connected) {
+        yield* reconcileSubmittedLiveOrders;
+      }
+
       if (!sNow.currentWindow) {
         yield* emitTick(isShadow);
         return;
@@ -396,6 +529,18 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       const oracleTs = yield* feedService.getOracleTimestamp;
       const currentBtc = yield* feedService.getCurrentBtcPrice;
       const currentOB = (yield* Ref.get(stateRef)).orderBook;
+      const latestPriceTs = Object.values(prices).reduce((max, p) => Math.max(max, p.timestamp), 0);
+      yield* Ref.update(stateRef, (s) => ({
+        ...s,
+        metrics: {
+          ...s.metrics,
+          latency: {
+            ...s.metrics.latency,
+            priceDataAgeMs: latestPriceTs > 0 ? now - latestPriceTs : -1,
+            orderbookAgeMs: s.lastOrderbookUpdateTs > 0 ? now - s.lastOrderbookUpdateTs : -1,
+          },
+        },
+      }));
 
       const ctx: MarketContext = {
         currentWindow: sNow.currentWindow,
@@ -413,7 +558,6 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       const regime = yield* regimeDetector.getRegime;
       yield* Ref.update(stateRef, (s) => ({ ...s, regime }));
 
-      const connected = yield* polyClient.isConnected;
       if (!isShadow && !connected) {
         yield* emitTick(isShadow);
         return;
@@ -426,6 +570,14 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
         const sCurrent = yield* Ref.get(stateRef);
         if (!sCurrent.tradingActive) continue;
+        if (strategy.name === "efficiency" && sCurrent.efficiencyIncidentBlocked) {
+          yield* Ref.update(strategy.stateRef, (s) => ({
+            ...s,
+            status: "regime_blocked" as const,
+            statusReason: "Blocked: unresolved efficiency dual-leg incident",
+          }));
+          continue;
+        }
 
         const regimeCheck = shouldRunInRegime(sState.regimeFilter, regime);
         if (!regimeCheck.allowed) {
@@ -533,6 +685,11 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
     const emitTick = (isShadow: boolean) =>
       Effect.gen(function* () {
+        const now = Date.now();
+        const stBefore = yield* Ref.get(stateRef);
+        if (now - stBefore.metrics.reconciliation.updatedAt > 5_000) {
+          yield* recomputeReconciliation;
+        }
         const stratStates = yield* Effect.all(strategies.map((s) => s.getState));
         yield* emit({ _tag: "Strategies", data: stratStates });
         const livePnl = yield* tracker.getSummary(false);
@@ -546,7 +703,10 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const risk = yield* riskManager.getSnapshot;
         yield* emit({ _tag: "Risk", data: risk });
         const st = yield* Ref.get(stateRef);
-        yield* emit({ _tag: "Metrics", data: { ...st.metrics, rolling: st.rollingDiagnostics, window: st.windowDiagnostics } });
+        yield* emit({
+          _tag: "Metrics",
+          data: { ...st.metrics, rolling: st.rollingDiagnostics, window: st.windowDiagnostics },
+        });
       });
 
     const executeStrategy = (signal: Signal, shadow: boolean, ctx: MarketContext, entryCtx: EntryContext) =>
@@ -671,15 +831,43 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
             st.orderBook.bestAskUp!, st.orderBook.bestAskDown!,
             signal.size, st.currentWindow.endTime, conditionId, ptb,
           );
+          let incident = false;
           for (const trade of trades) {
             trade.entryContext = entryCtx;
+            if (trade.strategy === "efficiency-partial") {
+              incident = true;
+            }
             yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
             yield* tracker.addTrade(trade);
-            yield* riskManager.onTradeOpened(trade);
-            yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "fullFill", 1, false); return s; });
+            if (trade.status === "filled" || trade.status === "partial") {
+              yield* riskManager.onTradeOpened(trade);
+              yield* Ref.update(stateRef, (s) => {
+                bumpDiag(s, signal.strategy, trade.status === "partial" ? "partialFill" : "fullFill", 1, false);
+                return s;
+              });
+            } else if (trade.status === "cancelled" || trade.status === "rejected") {
+              yield* Ref.update(stateRef, (s) => {
+                bumpDiag(s, signal.strategy, "liveRejected", 1, false);
+                return s;
+              });
+            }
             yield* emit({ _tag: "Trade", data: trade });
           }
-          return trades.length > 0;
+          if (incident) {
+            yield* Ref.update(stateRef, (s) => ({
+              ...s,
+              efficiencyIncidentBlocked: true,
+              tradingActive: false,
+            }));
+            yield* emit({ _tag: "TradingActive", data: { tradingActive: false } });
+            yield* Effect.logError(
+              "[Engine] Efficiency dual-leg incident detected. Trading paused and efficiency strategy blocked until manual restart.",
+            );
+            return false;
+          }
+          return trades.some(
+            (t) => t.status === "submitted" || t.status === "partial" || t.status === "filled",
+          );
         }
 
         const trade = yield* orderService.executeSignal(
@@ -690,13 +878,19 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           trade.entryContext = entryCtx;
           yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
           yield* tracker.addTrade(trade);
-          if (trade.status === "filled") {
+          if (trade.status === "filled" || trade.status === "partial") {
             yield* riskManager.onTradeOpened(trade);
-            yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "fullFill", 1, false); return s; });
+            yield* Ref.update(stateRef, (s) => {
+              bumpDiag(s, signal.strategy, trade.status === "partial" ? "partialFill" : "fullFill", 1, false);
+              return s;
+            });
+          } else if (trade.status === "cancelled" || trade.status === "rejected") {
+            yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "liveRejected", 1, false); return s; });
           }
           yield* emit({ _tag: "Trade", data: trade });
-          return true;
+          return trade.status === "submitted" || trade.status === "partial" || trade.status === "filled";
         }
+        yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "liveRejected", 1, false); return s; });
         return false;
       });
 
@@ -717,6 +911,16 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     );
 
     yield* pollMarkets;
+
+    yield* Effect.gen(function* () {
+      const windowId = (yield* Ref.get(stateRef)).currentWindow?.conditionId ?? "";
+      const liveTrades = yield* tracker.getAllTradeRecords(false);
+      yield* riskManager.rehydrate(liveTrades, windowId);
+      const snap = yield* riskManager.getSnapshot;
+      yield* Effect.log(
+        `[Engine] Risk rehydrated: open=${snap.openPositions}, exposure=$${snap.openExposure.toFixed(2)}, dailyPnl=$${snap.dailyPnl.toFixed(2)}, hourlyPnl=$${snap.hourlyPnl.toFixed(2)}`,
+      );
+    });
 
     yield* tick.pipe(
       Effect.repeat(Schedule.fixed("500 millis")),
@@ -742,7 +946,11 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const isTradingActive = Ref.get(stateRef).pipe(Effect.map((s) => s.tradingActive));
     const setTradingActive = (active: boolean) =>
       Effect.gen(function* () {
-        yield* Ref.update(stateRef, (s) => ({ ...s, tradingActive: active }));
+        yield* Ref.update(stateRef, (s) => ({
+          ...s,
+          tradingActive: active,
+          efficiencyIncidentBlocked: active ? false : s.efficiencyIncidentBlocked,
+        }));
         yield* Effect.log(`[Engine] Trading ${active ? "STARTED" : "STOPPED"}`);
         yield* emit({ _tag: "TradingActive", data: { tradingActive: active } });
       });
@@ -767,7 +975,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         rolling: s.rollingDiagnostics,
         window: s.windowDiagnostics,
         latency: s.metrics.latency,
-        reconciliation: emptyReconciliation(),
+        reconciliation: s.metrics.reconciliation,
       })),
     );
 
@@ -785,13 +993,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const updateStrategyConfig = (name: string, cfg: Record<string, unknown>) =>
       Effect.gen(function* () {
         const s = strategyMap.get(name);
-        if (!s) return "not_found" as const;
-        const valid = yield* s.updateConfig(cfg);
-        if (valid) {
+        if (!s) return { status: "not_found" as const };
+        const result = yield* s.updateConfig(cfg);
+        if (result.ok) {
           const states = yield* getStrategyStates;
           yield* emit({ _tag: "Strategies", data: states });
         }
-        return valid ? ("ok" as const) : ("invalid" as const);
+        return result.ok
+          ? { status: "ok" as const }
+          : {
+              status: "invalid" as const,
+              error: result.error ?? "Invalid config values",
+              appliedKeys: result.appliedKeys,
+              rejectedKeys: result.rejectedKeys,
+            };
       });
 
     const updateStrategyRegimeFilter = (name: string, filter: Record<string, unknown>) =>

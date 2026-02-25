@@ -32,6 +32,10 @@ function applyEventToTrade(trade: Trade, event: TradeEvent): void {
       if (typeof event.data.reason === "string") trade.clobReason = event.data.reason;
       break;
     case "order_rejected":
+      trade.status = "rejected";
+      if (typeof event.data.reason === "string") trade.clobReason = event.data.reason;
+      if (typeof event.data.result === "string") trade.clobResult = event.data.result;
+      break;
     case "cancel":
       trade.status = "cancelled";
       break;
@@ -302,7 +306,9 @@ export const makeTradeStore = (shadow: boolean) =>
 
     const getOpenTrades = Ref.get(tradesRef).pipe(
       Effect.map((trades) =>
-        [...trades.values()].filter((t) => t.status !== "resolved" && t.status !== "cancelled"),
+        [...trades.values()].filter(
+          (t) => t.status !== "resolved" && t.status !== "cancelled" && t.status !== "rejected",
+        ),
       ),
     );
 

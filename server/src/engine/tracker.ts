@@ -55,6 +55,23 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
             result: trade.clobResult,
             reason: trade.clobReason,
           });
+        } else if (trade.status === "partial") {
+          yield* s.appendEvent(trade.id, "partial_fill", {
+            shares: trade.shares,
+            price: trade.entryPrice,
+            fee: trade.fee,
+            orderId: trade.clobOrderId,
+            result: trade.clobResult ?? "partial",
+            reason: trade.clobReason,
+          });
+        } else if (trade.status === "rejected") {
+          yield* s.appendEvent(trade.id, "order_rejected", {
+            shares: trade.shares,
+            price: trade.entryPrice,
+            orderId: trade.clobOrderId,
+            result: trade.clobResult ?? "rejected",
+            reason: trade.clobReason ?? "Order rejected by venue",
+          });
         } else {
           yield* s.appendEvent(trade.id, "order_submitted", {
             shares: trade.shares,
@@ -102,6 +119,12 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
 
     const getOpenTrades = (shadow = false) => getStore(shadow).getOpenTrades;
 
+    const getAllTradeRecords = (shadow = false) =>
+      Effect.gen(function* () {
+        const all = yield* getStore(shadow).getAllTrades;
+        return all.map(toTradeRecord);
+      });
+
     return {
       liveStore,
       shadowStore,
@@ -114,6 +137,7 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
       getTradeById,
       getTradeRecordById,
       getOpenTrades,
+      getAllTradeRecords,
     } as const;
   }),
 }) {}

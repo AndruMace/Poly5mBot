@@ -19,10 +19,17 @@ export interface Strategy {
   readonly evaluate: (ctx: MarketContext) => Effect.Effect<Signal | null>;
   readonly getState: Effect.Effect<StrategyState>;
   readonly onTrade: (trade: TradeRecord) => Effect.Effect<void>;
-  readonly updateConfig: (newConfig: Record<string, unknown>) => Effect.Effect<boolean>;
+  readonly updateConfig: (newConfig: Record<string, unknown>) => Effect.Effect<StrategyConfigUpdateResult>;
   readonly updateRegimeFilter: (filter: RegimeFilter) => Effect.Effect<void>;
   readonly setEnabled: (enabled: boolean) => Effect.Effect<void>;
   readonly stateRef: Ref.Ref<StrategyInternalState>;
+}
+
+export interface StrategyConfigUpdateResult {
+  ok: boolean;
+  appliedKeys: string[];
+  rejectedKeys: string[];
+  error?: string;
 }
 
 export function shouldRunInRegime(filter: RegimeFilter, regime: RegimeState): { allowed: boolean; reason: string | null } {
@@ -80,15 +87,42 @@ export function makeStrategyBase(
     });
 
   const updateConfig = (newConfig: Record<string, unknown>) =>
-    Ref.modify(ref, (s) => {
-      const validated: Record<string, number> = {};
-      for (const [key, value] of Object.entries(newConfig)) {
-        if (!(key in s.config)) continue;
-        const num = Number(value);
-        if (!Number.isFinite(num) || num < 0 || num > 1_000_000) return [false, s] as const;
-        validated[key] = num;
+    Ref.modify(ref, (s): readonly [StrategyConfigUpdateResult, StrategyInternalState] => {
+      const keys = Object.keys(newConfig);
+      if (keys.length === 0) {
+        return [{ ok: false, appliedKeys: [], rejectedKeys: [], error: "Empty config payload" }, s] as const;
       }
-      return [true, { ...s, config: { ...s.config, ...validated } }] as const;
+      const validated: Record<string, number> = {};
+      const appliedKeys: string[] = [];
+      const rejectedKeys: string[] = [];
+      for (const [key, value] of Object.entries(newConfig)) {
+        if (!(key in s.config)) {
+          rejectedKeys.push(key);
+          continue;
+        }
+        const num = Number(value);
+        if (!Number.isFinite(num) || num < 0 || num > 1_000_000) {
+          rejectedKeys.push(key);
+          continue;
+        }
+        validated[key] = num;
+        appliedKeys.push(key);
+      }
+      if (appliedKeys.length === 0) {
+        return [
+          {
+            ok: false,
+            appliedKeys: [],
+            rejectedKeys,
+            error: rejectedKeys.length > 0 ? "No valid config keys were applied" : "Empty config payload",
+          },
+          s,
+        ] as const;
+      }
+      return [
+        { ok: true, appliedKeys, rejectedKeys },
+        { ...s, config: { ...s.config, ...validated } },
+      ] as const;
     });
 
   const updateRegimeFilter = (filter: RegimeFilter) =>

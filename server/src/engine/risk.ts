@@ -153,6 +153,57 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
 
     const resetPause = Ref.update(stateRef, (s) => ({ ...s, pauseUntil: 0, consecutiveLosses: 0 }));
 
+    const rehydrate = (trades: TradeRecord[], currentWindowId = "") =>
+      Ref.update(stateRef, (s) => {
+        const now = Date.now();
+        const dayCutoff = startOfDay();
+        const hourCutoff = startOfHour();
+        const liveTrades = trades.filter((t) => !t.shadow);
+        const openPositions = liveTrades.filter(
+          (t) =>
+            (t.status === "filled" || t.status === "partial") &&
+            t.windowEnd > now &&
+            t.outcome === null,
+        );
+        const resolved = liveTrades
+          .filter((t) => t.status === "resolved")
+          .sort((a, b) => a.timestamp - b.timestamp);
+
+        const dailyPnl = resolved
+          .filter((t) => t.timestamp >= dayCutoff)
+          .reduce((acc, t) => acc + t.pnl, 0);
+        const hourlyPnl = resolved
+          .filter((t) => t.timestamp >= hourCutoff)
+          .reduce((acc, t) => acc + t.pnl, 0);
+
+        let consecutiveLosses = 0;
+        for (let i = resolved.length - 1; i >= 0; i--) {
+          const t = resolved[i]!;
+          if (t.outcome === "loss") {
+            consecutiveLosses += 1;
+          } else if (t.outcome === "win") {
+            break;
+          }
+        }
+
+        const windowLosses = resolved.filter(
+          (t) => t.conditionId === currentWindowId && t.outcome === "loss",
+        ).length;
+
+        return {
+          ...s,
+          openPositions,
+          dailyPnl,
+          dailyReset: dayCutoff,
+          hourlyPnl,
+          hourlyReset: hourCutoff,
+          windowLosses,
+          currentWindowId: currentWindowId || s.currentWindowId,
+          consecutiveLosses,
+          pauseUntil: 0,
+        };
+      });
+
     const getSnapshot: Effect.Effect<RiskSnapshot> = Ref.get(stateRef).pipe(
       Effect.map((s) => ({
         openPositions: s.openPositions.length,
@@ -190,6 +241,7 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
       onNewWindow,
       resolveExpired,
       resetPause,
+      rehydrate,
       getSnapshot,
       getKillSwitchStatus,
       getOpenPositions,

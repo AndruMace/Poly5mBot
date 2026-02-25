@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import { PolymarketClient } from "./client.js";
 import { OrderError } from "../errors.js";
-import type { Signal, TradeRecord } from "../types.js";
+import type { Signal, TradeRecord, TradeStatus } from "../types.js";
 
 const FEE_RATE = 0.25;
 const FEE_EXPONENT = 2;
@@ -80,9 +80,25 @@ export function effectiveFeeRate(price: number): number {
   return FEE_RATE * Math.pow(price * (1 - price), FEE_EXPONENT);
 }
 
+function mapClobStatusToTradeStatus(status: string | null | undefined): TradeStatus {
+  const normalized = (status ?? "").toLowerCase();
+  if (normalized === "filled" || normalized === "matched") return "filled";
+  if (normalized === "partial" || normalized === "partially_filled") return "partial";
+  if (normalized === "rejected" || normalized === "failed") return "rejected";
+  if (normalized === "cancelled" || normalized === "canceled") return "cancelled";
+  if (normalized === "accepted" || normalized === "live" || normalized === "open") return "submitted";
+  return "submitted";
+}
+
 function inspectPostedOrder(order: unknown) {
   if (!order || typeof order !== "object") {
-    return { accepted: false, orderId: null as string | null, status: null as string | null, reason: "Empty order response" as string | null };
+    return {
+      accepted: false,
+      orderId: null as string | null,
+      status: null as string | null,
+      mappedStatus: "rejected" as TradeStatus,
+      reason: "Empty order response" as string | null,
+    };
   }
   const data = order as Record<string, unknown>;
   const orderIdRaw = data["orderID"] ?? data["orderId"] ?? data["id"];
@@ -94,13 +110,64 @@ function inspectPostedOrder(order: unknown) {
   const success = data["success"] === true || data["ok"] === true;
   const rejectedByStatus = status === "rejected" || status === "cancelled" || status === "canceled" || status === "failed";
 
+  const mappedStatus = mapClobStatusToTradeStatus(status ?? null);
+
   if (errorMsg || rejectedByStatus) {
-    return { accepted: false, orderId, status: status ?? null, reason: errorMsg ?? `Order status: ${status}` };
+    return {
+      accepted: false,
+      orderId,
+      status: status ?? null,
+      mappedStatus,
+      reason: errorMsg ?? `Order status: ${status}`,
+    };
   }
 
   const acceptedByStatus = status === "filled" || status === "matched" || status === "live" || status === "accepted";
   const accepted = success || acceptedByStatus || orderId !== null;
-  return { accepted, orderId, status: status ?? null, reason: accepted ? null : "Order was not accepted by CLOB" };
+  return {
+    accepted,
+    orderId,
+    status: status ?? null,
+    mappedStatus,
+    reason: accepted ? null : "Order was not accepted by CLOB",
+  };
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function normalizeOrderStatus(order: unknown): {
+  mappedStatus: TradeStatus | null;
+  rawStatus: string | null;
+  avgPrice: number | null;
+  filledShares: number | null;
+  reason: string | null;
+} {
+  if (!order || typeof order !== "object") {
+    return { mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null };
+  }
+  const data = order as Record<string, unknown>;
+  const statusRaw = data["status"] ?? data["state"];
+  const rawStatus = typeof statusRaw === "string" ? statusRaw.toLowerCase() : null;
+  const mappedStatus = rawStatus ? mapClobStatusToTradeStatus(rawStatus) : null;
+  const avgPrice =
+    toNumber(data["avgPrice"]) ??
+    toNumber(data["averagePrice"]) ??
+    toNumber(data["price"]);
+  const filledShares =
+    toNumber(data["sizeMatched"]) ??
+    toNumber(data["filledSize"]) ??
+    toNumber(data["sizeFilled"]) ??
+    toNumber(data["matchedSize"]);
+  const reasonRaw = data["reason"] ?? data["error"] ?? data["message"];
+  const reason = typeof reasonRaw === "string" && reasonRaw.trim().length > 0 ? reasonRaw : null;
+  return { mappedStatus, rawStatus, avgPrice, filledShares, reason };
 }
 
 let tradeCounter = 0;
@@ -144,19 +211,59 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             const reason = result.left;
             lastReason = reason;
             if (isFokLiquidityReject(reason)) continue;
+            const record: TradeRecord = {
+              id: `trade-${++tradeCounter}-${Date.now()}`,
+              strategy: signal.strategy,
+              side: signal.side,
+              tokenId,
+              entryPrice: price,
+              size: notional,
+              shares,
+              fee: 0,
+              status: "rejected",
+              outcome: null,
+              pnl: 0,
+              timestamp: Date.now(),
+              windowEnd,
+              conditionId,
+              priceToBeatAtEntry,
+              clobResult: "rejected",
+              clobReason: reason,
+            };
             yield* Effect.logWarning(`[Orders] Live order rejected for ${signal.strategy} ${signal.side}: ${reason}`);
-            return null;
+            return record;
           }
 
           const parsed = inspectPostedOrder(result.right);
           if (!parsed.accepted) {
             lastReason = parsed.reason ?? "Order was not accepted by CLOB";
             if (isFokLiquidityReject(lastReason)) continue;
+            const record: TradeRecord = {
+              id: `trade-${++tradeCounter}-${Date.now()}`,
+              strategy: signal.strategy,
+              side: signal.side,
+              tokenId,
+              entryPrice: price,
+              size: notional,
+              shares,
+              fee: 0,
+              status: parsed.mappedStatus === "rejected" ? "rejected" : "cancelled",
+              outcome: null,
+              pnl: 0,
+              timestamp: Date.now(),
+              windowEnd,
+              conditionId,
+              priceToBeatAtEntry,
+              clobOrderId: parsed.orderId ?? undefined,
+              clobResult: parsed.status ?? "rejected",
+              clobReason: parsed.reason ?? undefined,
+            };
             yield* Effect.logWarning(`[Orders] Live order rejected for ${signal.strategy} ${signal.side}: ${lastReason}`);
-            return null;
+            return record;
           }
 
-          const fee = calculateFee(shares, price);
+          const mappedStatus = parsed.mappedStatus;
+          const fee = mappedStatus === "filled" || mappedStatus === "partial" ? calculateFee(shares, price) : 0;
           const record: TradeRecord = {
             id: `trade-${++tradeCounter}-${Date.now()}`,
             strategy: signal.strategy,
@@ -166,9 +273,9 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             size: notional,
             shares,
             fee,
-            status: "filled",
+            status: mappedStatus,
             outcome: null,
-            pnl: -fee,
+            pnl: fee > 0 ? -fee : 0,
             timestamp: Date.now(),
             windowEnd,
             conditionId,
@@ -179,7 +286,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           };
 
           yield* Effect.log(
-            `[Orders] Executed ${signal.strategy} ${signal.side} @ $${price} for $${notional} (${shares} shares, fee: $${fee.toFixed(4)}) [scale=${scale}]`,
+            `[Orders] Submitted ${signal.strategy} ${signal.side} @ $${price} for $${notional} (${shares} shares, status=${mappedStatus}, fee: $${fee.toFixed(4)}) [scale=${scale}]`,
           );
           return record as TradeRecord | null;
         }
@@ -271,7 +378,8 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             break;
           }
 
-          const fee = calculateFee(shares, px);
+          const mappedStatus = parsed.mappedStatus;
+          const fee = mappedStatus === "filled" || mappedStatus === "partial" ? calculateFee(shares, px) : 0;
           trades.push({
             id: `trade-${++tradeCounter}-${Date.now()}`,
             strategy: "efficiency",
@@ -281,9 +389,9 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             size: legNotional,
             shares,
             fee,
-            status: "filled",
+            status: mappedStatus,
             outcome: null,
-            pnl: -fee,
+            pnl: fee > 0 ? -fee : 0,
             timestamp: Date.now(),
             windowEnd,
             conditionId,
@@ -316,7 +424,28 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         return typeof mid === "number" ? mid : typeof mid === "string" ? parseFloat(mid) : null;
       }).pipe(Effect.catchAll(() => Effect.succeed(null as number | null)));
 
-    return { executeSignal, executeDualBuy, getOrderBook, getMidpoint, calculateFee, effectiveFeeRate } as const;
+    const getOrderStatusById = (orderId: string) =>
+      Effect.gen(function* () {
+        const client = yield* polyClient.getClient;
+        const c = client as any;
+        const candidates = [
+          () => c.getOrder?.(orderId),
+          () => c.getOrderById?.(orderId),
+          () => c.getOrderStatus?.(orderId),
+          () => c.getOrder?.({ id: orderId }),
+        ].filter((fn) => typeof fn === "function");
+
+        for (const call of candidates) {
+          const result = yield* Effect.tryPromise({
+            try: () => Promise.resolve(call()),
+            catch: () => null,
+          });
+          if (result) return normalizeOrderStatus(result);
+        }
+        return { mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null };
+      }).pipe(Effect.catchAll(() => Effect.succeed({ mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null })));
+
+    return { executeSignal, executeDualBuy, getOrderBook, getMidpoint, getOrderStatusById, calculateFee, effectiveFeeRate } as const;
   }),
 }) {}
 

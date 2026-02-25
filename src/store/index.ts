@@ -132,3 +132,4 @@ export const killSwitchesRx = Rx.make<KillSwitchStatus[]>([]);
 export const riskRx = Rx.make<RiskSnapshot>({ ...emptyRisk });
 export const metricsRx = Rx.make<EngineMetrics>({ ...emptyMetrics });
 export const feedHealthRx = Rx.make<FeedHealthSnapshot>({ ...emptyFeedHealth });
+export const wsLastMessageTsRx = Rx.make(0);

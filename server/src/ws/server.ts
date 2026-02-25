@@ -24,6 +24,8 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
     const eventBus = yield* EventBus;
 
     let wss: WebSocketServer | null = null;
+    let lastExchangeConnected: boolean | null = null;
+    let lastWalletAddress: string | null = null;
 
     const attach = (server: http.Server) =>
       Effect.gen(function* () {
@@ -125,6 +127,15 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
             data: feedHealth,
             timestamp: Date.now(),
           });
+          if (connected !== lastExchangeConnected || walletAddr !== lastWalletAddress) {
+            lastExchangeConnected = connected;
+            lastWalletAddress = walletAddr;
+            broadcast(wss, {
+              type: "exchangeStatus",
+              data: { exchangeConnected: connected, walletAddress: walletAddr },
+              timestamp: Date.now(),
+            });
+          }
         }).pipe(
           Effect.repeat(Schedule.fixed("500 millis")),
           Effect.catchAll(() => Effect.void),

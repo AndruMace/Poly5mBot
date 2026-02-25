@@ -15,6 +15,7 @@ export const handleRequest = (
   url: string,
   method: string,
   body: any,
+  bodyParseError: boolean,
   headers: http.IncomingHttpHeaders,
 ): Effect.Effect<
   RouteResult,
@@ -37,6 +38,10 @@ export const handleRequest = (
     };
 
     const path = url.split("?")[0]!;
+
+    if ((method === "POST" || method === "PUT") && bodyParseError) {
+      return { status: 400, body: { error: "Invalid JSON body" } };
+    }
 
     if (method === "GET") {
       if (path === "/api/status") {
@@ -137,9 +142,21 @@ export const handleRequest = (
       if (stratConfig) {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
         const name = decodeURIComponent(stratConfig[1]!);
+        if (!body || typeof body !== "object" || Object.keys(body).length === 0) {
+          return { status: 400, body: { error: "Empty config payload", rejectedKeys: [] } };
+        }
         const result = yield* engine.updateStrategyConfig(name, body ?? {});
-        if (result === "not_found") return { status: 404, body: { error: "Strategy not found" } };
-        if (result === "invalid") return { status: 400, body: { error: "Invalid config values" } };
+        if (result.status === "not_found") return { status: 404, body: { error: "Strategy not found" } };
+        if (result.status === "invalid") {
+          return {
+            status: 400,
+            body: {
+              error: result.error,
+              appliedKeys: result.appliedKeys,
+              rejectedKeys: result.rejectedKeys,
+            },
+          };
+        }
         return { status: 200, body: { ok: true } };
       }
 

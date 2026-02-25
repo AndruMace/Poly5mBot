@@ -73,12 +73,17 @@ const program = Effect.gen(function* () {
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", () => {
       let parsed: any = undefined;
+      let parseError = false;
       if (body) {
-        try { parsed = JSON.parse(body); } catch { parsed = {}; }
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          parseError = true;
+        }
       }
 
       const fiber = runFork(
-        handleRequest(url, method, parsed, req.headers).pipe(
+        handleRequest(url, method, parsed, parseError, req.headers).pipe(
           Effect.tap((result) =>
             Effect.sync(() => {
               res.writeHead(result.status, {

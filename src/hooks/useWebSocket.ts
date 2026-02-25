@@ -21,6 +21,7 @@ import {
   riskRx,
   metricsRx,
   feedHealthRx,
+  wsLastMessageTsRx,
   MAX_PRICE_HISTORY,
   emptyOrderBook,
   emptyPnl,
@@ -39,6 +40,9 @@ import type {
 
 const PRICE_HISTORY_FLUSH_MS = 1000;
 const TRADE_FLUSH_MS = 120;
+const STALE_WS_MS = 8000;
+const RESUME_RECONNECT_COOLDOWN_MS = 2000;
+const STATUS_REHYDRATE_COOLDOWN_MS = 5000;
 
 function shallowEqualPrices(
   a: Record<string, PricePoint>,
@@ -73,6 +77,12 @@ export function useWebSocket() {
     let lastPriceHistoryFlush = 0;
     let pendingPriceHistoryFlush: ReturnType<typeof setTimeout> | undefined;
     let tradeFlushTimer: ReturnType<typeof setTimeout> | undefined;
+    let statusRehydrateTimer: ReturnType<typeof setInterval> | undefined;
+    let activeSocket: WebSocket | null = null;
+    let forceReconnectPending = false;
+    let lastResumeReconnectAt = 0;
+    let rehydrateInFlight = false;
+    let lastStatusRehydrateAt = 0;
     const pendingTrades = new Map<string, TradeRecord>();
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -120,6 +130,37 @@ export function useWebSocket() {
       tradeFlushTimer = setTimeout(flushTrades, TRADE_FLUSH_MS);
     };
 
+    const rehydrateFromHttpStatus = () => {
+      if (destroyed || rehydrateInFlight) return;
+      const now = Date.now();
+      if (now - lastStatusRehydrateAt < STATUS_REHYDRATE_COOLDOWN_MS) return;
+      lastStatusRehydrateAt = now;
+      rehydrateInFlight = true;
+      void fetch("/api/status")
+        .then(async (res) => {
+          if (!res.ok) return null;
+          return (await res.json()) as { currentWindow?: any; tradingActive?: boolean; mode?: "live" | "shadow" };
+        })
+        .then((data) => {
+          if (!data || destroyed) return;
+          if (data.currentWindow) {
+            registry.set(currentMarketRx, data.currentWindow);
+          }
+          if (typeof data.tradingActive === "boolean") {
+            registry.set(tradingActiveRx, data.tradingActive);
+          }
+          if (data.mode === "live" || data.mode === "shadow") {
+            registry.set(modeRx, data.mode);
+          }
+        })
+        .catch(() => {
+          /* best effort */
+        })
+        .finally(() => {
+          rehydrateInFlight = false;
+        });
+    };
+
     function handlePrices(data: any) {
       const prices = data.prices as Record<string, PricePoint>;
       const oracleEstimate = data.oracleEstimate as number;
@@ -162,7 +203,12 @@ export function useWebSocket() {
       if (data.walletAddress)
         registry.set(walletAddressRx, data.walletAddress);
       registry.set(strategiesRx, [...(data.strategies ?? [])]);
-      registry.set(currentMarketRx, data.market ?? null);
+      if (data.market) {
+        registry.set(currentMarketRx, data.market);
+      } else if (registry.get(currentMarketRx) === null) {
+        registry.set(currentMarketRx, null);
+        rehydrateFromHttpStatus();
+      }
       registry.set(
         orderBookRx,
         data.orderbook ?? { ...emptyOrderBook },
@@ -202,15 +248,19 @@ export function useWebSocket() {
       if (destroyed) return;
 
       const ws = new WebSocket(url);
+      activeSocket = ws;
 
       ws.onopen = () => {
+        if (destroyed || activeSocket !== ws) return;
         registry.set(connectedRx, true);
+        registry.set(wsLastMessageTsRx, Date.now());
       };
 
       ws.onmessage = (event) => {
         if (destroyed) return;
         try {
           const msg = JSON.parse(event.data) as WSMessage;
+          registry.set(wsLastMessageTsRx, Date.now());
           Rx.batch(() => {
             switch (msg.type) {
               case "status":
@@ -294,9 +344,16 @@ export function useWebSocket() {
 
       ws.onclose = () => {
         if (destroyed) return;
+        if (activeSocket === ws) activeSocket = null;
         flushTrades();
         flushPriceHistory();
         registry.set(connectedRx, false);
+        registry.set(exchangeConnectedRx, false);
+        if (forceReconnectPending) {
+          forceReconnectPending = false;
+          connect();
+          return;
+        }
         reconnectTimer = setTimeout(connect, 3000);
       };
 
@@ -305,13 +362,51 @@ export function useWebSocket() {
       };
     }
 
+    const forceReconnect = () => {
+      if (destroyed) return;
+      const ws = activeSocket;
+      if (ws && ws.readyState !== WebSocket.CLOSED) {
+        forceReconnectPending = true;
+        ws.close();
+        return;
+      }
+      connect();
+    };
+
+    const onResume = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      const wsAgeMs = now - registry.get(wsLastMessageTsRx);
+      const connected = registry.get(connectedRx);
+      const hasMarket = registry.get(currentMarketRx) !== null;
+      const wsStale = !connected || wsAgeMs > STALE_WS_MS;
+      if (!wsStale && hasMarket) return;
+      if (now - lastResumeReconnectAt < RESUME_RECONNECT_COOLDOWN_MS) return;
+      lastResumeReconnectAt = now;
+      forceReconnect();
+      rehydrateFromHttpStatus();
+    };
+
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("focus", onResume);
+    statusRehydrateTimer = setInterval(() => {
+      if (registry.get(currentMarketRx) === null) {
+        rehydrateFromHttpStatus();
+      }
+    }, STATUS_REHYDRATE_COOLDOWN_MS);
     connect();
 
     return () => {
       destroyed = true;
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("focus", onResume);
       if (pendingPriceHistoryFlush) clearTimeout(pendingPriceHistoryFlush);
       if (tradeFlushTimer) clearTimeout(tradeFlushTimer);
+      if (statusRehydrateTimer) clearInterval(statusRehydrateTimer);
       clearTimeout(reconnectTimer);
+      if (activeSocket && activeSocket.readyState !== WebSocket.CLOSED) {
+        activeSocket.close();
+      }
     };
   }, [registry]);
 }

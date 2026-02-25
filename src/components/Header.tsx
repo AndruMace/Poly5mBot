@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useRxValue } from "@effect-rx/rx-react";
 import {
   connectedRx,
@@ -7,6 +7,7 @@ import {
   pricesRx,
   tradingActiveRx,
   modeRx,
+  wsLastMessageTsRx,
 } from "../store/index.js";
 import { Wifi, WifiOff, Wallet, Play, Square, Loader2, Eye, Radio } from "lucide-react";
 
@@ -17,8 +18,11 @@ export function Header() {
   const prices = useRxValue(pricesRx);
   const tradingActive = useRxValue(tradingActiveRx);
   const mode = useRxValue(modeRx);
+  const wsLastMessageTs = useRxValue(wsLastMessageTsRx);
   const [toggling, setToggling] = useState(false);
   const [switchingMode, setSwitchingMode] = useState(false);
+  const [controlError, setControlError] = useState<string | null>(null);
+  const [nowTs, setNowTs] = useState(Date.now());
 
   const latestPrice = useMemo(() => {
     let best: number | null = null;
@@ -32,11 +36,26 @@ export function Header() {
     return best;
   }, [prices]);
 
+  useEffect(() => {
+    const timer = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const wsAgeMs = wsLastMessageTs > 0 ? nowTs - wsLastMessageTs : Infinity;
+  const isStale = !wsConnected || wsAgeMs > 8000;
+
   async function handleTradingToggle() {
     setToggling(true);
+    setControlError(null);
     try {
-      await fetch("/api/trading/toggle", { method: "POST" });
+      const res = await fetch("/api/trading/toggle", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Failed to toggle trading");
+      }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to toggle trading";
+      setControlError(msg);
       console.error("Failed to toggle trading:", err);
     } finally {
       setToggling(false);
@@ -45,14 +64,21 @@ export function Header() {
 
   async function handleModeToggle() {
     setSwitchingMode(true);
+    setControlError(null);
     try {
       const newMode = mode === "live" ? "shadow" : "live";
-      await fetch("/api/mode", {
+      const res = await fetch("/api/mode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: newMode }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Failed to switch mode");
+      }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to switch mode";
+      setControlError(msg);
       console.error("Failed to switch mode:", err);
     } finally {
       setSwitchingMode(false);
@@ -117,6 +143,11 @@ export function Header() {
           </div>
         )}
         <div className="flex items-center gap-3">
+          {isStale && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]">
+              STALE
+            </span>
+          )}
           <div className="flex items-center gap-1.5" title="WebSocket to server">
             {wsConnected ? (
               <>
@@ -150,6 +181,11 @@ export function Header() {
           </div>
         </div>
       </div>
+      {controlError && (
+        <div className="ml-4 text-xs text-[var(--accent-red)] max-w-[360px] truncate" title={controlError}>
+          {controlError}
+        </div>
+      )}
     </header>
   );
 }

@@ -2,7 +2,7 @@
 
 export type Side = "UP" | "DOWN";
 export type TradingMode = "live" | "shadow";
-export type TradeStatus = "pending" | "submitted" | "partial" | "filled" | "cancelled" | "expired" | "resolved";
+export type TradeStatus = "pending" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "resolved";
 export type TradeOutcome = "win" | "loss";
 export type TradeEventType =
   | "signal_generated"

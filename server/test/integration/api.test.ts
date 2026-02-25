@@ -118,7 +118,7 @@ const fakeEngine = {
   resetKillSwitchPause: Effect.void,
   toggleStrategy: (_name: string) => Effect.succeed(true),
   updateStrategyConfig: (_name: string, _cfg: Record<string, unknown>) =>
-    Effect.succeed("ok" as const),
+    Effect.succeed({ status: "ok" as const }),
   updateStrategyRegimeFilter: (_name: string, _filter: Record<string, unknown>) =>
     Effect.succeed("ok" as const),
   tracker: {
@@ -172,7 +172,7 @@ const testLayer = Layer.mergeAll(
 describe("API handler integration", () => {
   it("returns status payload", async () => {
     const res = await Effect.runPromise(
-      handleRequest("/api/status", "GET", undefined, {}).pipe(
+      handleRequest("/api/status", "GET", undefined, false, {}).pipe(
         Effect.provide(testLayer),
       ),
     );
@@ -182,7 +182,7 @@ describe("API handler integration", () => {
 
   it("rejects unauthenticated control routes", async () => {
     const res = await Effect.runPromise(
-      handleRequest("/api/trading/toggle", "POST", {}, {}).pipe(
+      handleRequest("/api/trading/toggle", "POST", {}, false, {}).pipe(
         Effect.provide(testLayer),
       ),
     );
@@ -195,6 +195,7 @@ describe("API handler integration", () => {
         "/api/mode",
         "POST",
         { mode: "live" },
+        false,
         { authorization: "Bearer secret" },
       ).pipe(Effect.provide(testLayer)),
     );
@@ -208,6 +209,7 @@ describe("API handler integration", () => {
         "/api/mode",
         "POST",
         { mode: "bad" },
+        false,
         { authorization: "Bearer secret" },
       ).pipe(Effect.provide(testLayer)),
     );
