@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useEffect, useRef } from "react";
 import { useRxValue } from "@effect-rx/rx-react";
 import {
   priceHistoryRx,
@@ -41,6 +41,23 @@ export function PriceChart() {
   const oracleEstimate = useRxValue(oracleEstimateRx);
   const currentMarket = useRxValue(currentMarketRx);
   const priceToBeat = currentMarket?.priceToBeat ?? 0;
+  const chartRef = useRef<HTMLDivElement>(null);
+
+  // Cleanup for ResizeObserver instances created by ResponsiveContainer
+  useEffect(() => {
+    const chartElement = chartRef.current;
+    if (!chartElement) return;
+
+    // Force cleanup of any ResizeObserver instances on unmount
+    const resizeObserver = chartElement.querySelector('[data-resize-observer]');
+    
+    return () => {
+      // Help GC by clearing references
+      if (resizeObserver) {
+        (resizeObserver as any).disconnect = null;
+      }
+    };
+  }, []);
 
   const latestPrice = useMemo(() => {
     let best: number | null = null;
@@ -146,7 +163,7 @@ export function PriceChart() {
         </div>
       </div>
 
-      <div className="h-56 min-w-0">
+      <div className="h-56 min-w-0" ref={chartRef}>
         <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1}>
           <LineChart data={data}>
             <XAxis

@@ -45,8 +45,14 @@ export function LiveMarket() {
         setRemaining(0);
         return;
       }
-      setRemaining(Math.max(0, currentMarket.endTime - Date.now()));
-    }, 100);
+      const left = Math.max(0, currentMarket.endTime - Date.now());
+      setRemaining(left);
+      
+      // Clear timer if market has ended to prevent unnecessary updates
+      if (left === 0) {
+        clearInterval(timer);
+      }
+    }, 1000); // Reduced from 100ms to 1000ms (1 second)
     return () => clearInterval(timer);
   }, [currentMarket]);
 

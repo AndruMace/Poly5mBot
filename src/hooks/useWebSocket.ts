@@ -90,6 +90,11 @@ export function useWebSocket() {
     let tradeBackfillInFlight = false;
     let lastTradeBackfillAt = 0;
     const pendingTrades = new Map<string, TradeRecord>();
+    
+    // Cleanup function for pendingTrades to prevent closure retention
+    const clearPendingTrades = () => {
+      pendingTrades.clear();
+    };
 
     const mergeTrades = (
       current: TradeRecord[],
@@ -458,6 +463,10 @@ export function useWebSocket() {
       if (activeSocket && activeSocket.readyState !== WebSocket.CLOSED) {
         activeSocket.close();
       }
+      // Clear pending trades to prevent memory retention
+      clearPendingTrades();
+      // Clear price history buffer
+      priceHistoryBuffer.length = 0;
     };
   }, [registry]);
 }
