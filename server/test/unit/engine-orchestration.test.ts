@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Effect, Layer, TestClock, TestContext } from "effect";
-import { NodeContext } from "@effect/platform-node";
-import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import { FileSystem } from "@effect/platform";
 import { TradingEngine } from "../../src/engine/engine.js";
 import { FeedService } from "../../src/feeds/manager.js";
 import { MarketService } from "../../src/polymarket/markets.js";
@@ -65,9 +64,19 @@ vi.mock("../../src/strategies/arb.js", async () => {
         }),
       getState: Ref.get(stateRef),
       onTrade: () => Effect.void,
-      updateConfig: () => Effect.succeed({ ok: true, appliedKeys: [], rejectedKeys: [] }),
-      updateRegimeFilter: () => Effect.void,
-      setEnabled: () => Effect.void,
+      updateConfig: (cfg: Record<string, unknown>) =>
+        Ref.modify(stateRef, (s) => {
+          const normalized = Object.fromEntries(
+            Object.entries(cfg).map(([k, v]) => [k, Number(v)]),
+          ) as Record<string, number>;
+          return [
+            { ok: true, appliedKeys: Object.keys(cfg), rejectedKeys: [] },
+            { ...s, config: { ...s.config, ...normalized } },
+          ] as const;
+        }),
+      updateRegimeFilter: (filter: Record<string, unknown>) =>
+        Ref.update(stateRef, (s) => ({ ...s, regimeFilter: filter as any })),
+      setEnabled: (enabled: boolean) => Ref.update(stateRef, (s) => ({ ...s, enabled })),
     };
   });
   return { makeArbStrategy };
@@ -96,9 +105,19 @@ vi.mock("../../src/strategies/efficiency.js", async () => {
         }),
       getState: Ref.get(stateRef),
       onTrade: () => Effect.void,
-      updateConfig: () => Effect.succeed({ ok: true, appliedKeys: [], rejectedKeys: [] }),
-      updateRegimeFilter: () => Effect.void,
-      setEnabled: () => Effect.void,
+      updateConfig: (cfg: Record<string, unknown>) =>
+        Ref.modify(stateRef, (s) => {
+          const normalized = Object.fromEntries(
+            Object.entries(cfg).map(([k, v]) => [k, Number(v)]),
+          ) as Record<string, number>;
+          return [
+            { ok: true, appliedKeys: Object.keys(cfg), rejectedKeys: [] },
+            { ...s, config: { ...s.config, ...normalized } },
+          ] as const;
+        }),
+      updateRegimeFilter: (filter: Record<string, unknown>) =>
+        Ref.update(stateRef, (s) => ({ ...s, regimeFilter: filter as any })),
+      setEnabled: (enabled: boolean) => Ref.update(stateRef, (s) => ({ ...s, enabled })),
     };
   });
   return { makeEfficiencyStrategy };
@@ -127,9 +146,19 @@ vi.mock("../../src/strategies/whale-hunt.js", async () => {
         }),
       getState: Ref.get(stateRef),
       onTrade: () => Effect.void,
-      updateConfig: () => Effect.succeed({ ok: true, appliedKeys: [], rejectedKeys: [] }),
-      updateRegimeFilter: () => Effect.void,
-      setEnabled: () => Effect.void,
+      updateConfig: (cfg: Record<string, unknown>) =>
+        Ref.modify(stateRef, (s) => {
+          const normalized = Object.fromEntries(
+            Object.entries(cfg).map(([k, v]) => [k, Number(v)]),
+          ) as Record<string, number>;
+          return [
+            { ok: true, appliedKeys: Object.keys(cfg), rejectedKeys: [] },
+            { ...s, config: { ...s.config, ...normalized } },
+          ] as const;
+        }),
+      updateRegimeFilter: (filter: Record<string, unknown>) =>
+        Ref.update(stateRef, (s) => ({ ...s, regimeFilter: filter as any })),
+      setEnabled: (enabled: boolean) => Ref.update(stateRef, (s) => ({ ...s, enabled })),
     };
   });
   return { makeWhaleHuntStrategy };
@@ -159,9 +188,19 @@ vi.mock("../../src/strategies/momentum.js", async () => {
       addPrice: () => Effect.void,
       getState: Ref.get(stateRef),
       onTrade: () => Effect.void,
-      updateConfig: () => Effect.succeed({ ok: true, appliedKeys: [], rejectedKeys: [] }),
-      updateRegimeFilter: () => Effect.void,
-      setEnabled: () => Effect.void,
+      updateConfig: (cfg: Record<string, unknown>) =>
+        Ref.modify(stateRef, (s) => {
+          const normalized = Object.fromEntries(
+            Object.entries(cfg).map(([k, v]) => [k, Number(v)]),
+          ) as Record<string, number>;
+          return [
+            { ok: true, appliedKeys: Object.keys(cfg), rejectedKeys: [] },
+            { ...s, config: { ...s.config, ...normalized } },
+          ] as const;
+        }),
+      updateRegimeFilter: (filter: Record<string, unknown>) =>
+        Ref.update(stateRef, (s) => ({ ...s, regimeFilter: filter as any })),
+      setEnabled: (enabled: boolean) => Ref.update(stateRef, (s) => ({ ...s, enabled })),
     };
   });
   return { makeMomentumStrategy };
@@ -179,11 +218,13 @@ function makeHarness(opts: {
   window2?: string;
   switchWindowAtMarketCall?: number;
   dualBuyIncident?: boolean;
+  files?: Map<string, string>;
 }): EngineHarness {
   let marketCalls = 0;
   let executeSignalCalls = 0;
   let executeDualCalls = 0;
   const seenConditionIds: string[] = [];
+  const files = opts.files ?? new Map<string, string>();
 
   const mkWindow = (conditionId: string): MarketWindow => {
     const now = Date.now();
@@ -363,6 +404,23 @@ function makeHarness(opts: {
 
   const configLayer = makeTestConfigLayer({ trading: { mode: "live" } });
 
+  const fsLayer = Layer.succeed(FileSystem.FileSystem, {
+    exists: (path: string) => Effect.succeed(files.has(path)),
+    readFileString: (path: string) =>
+      files.has(path)
+        ? Effect.succeed(files.get(path)!)
+        : Effect.fail(new Error(`missing ${path}`)),
+    writeFileString: (path: string, content: string, options?: { flag?: string }) =>
+      Effect.sync(() => {
+        if (options?.flag === "a") {
+          files.set(path, (files.get(path) ?? "") + content);
+          return;
+        }
+        files.set(path, content);
+      }),
+    makeDirectory: (_path: string, _options?: unknown) => Effect.void,
+  } as any);
+
   const layer = TradingEngine.Default.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(feedLayer),
@@ -377,8 +435,7 @@ function makeHarness(opts: {
     Layer.provideMerge(PnLTracker.Default),
     Layer.provideMerge(TradeStore.Default),
     Layer.provideMerge(ShadowTradeStore.Default),
-    Layer.provideMerge(NodeContext.layer),
-    Layer.provideMerge(NodeFileSystem.layer),
+    Layer.provideMerge(fsLayer),
     Layer.provideMerge(TestContext.TestContext),
   );
 
@@ -447,6 +504,38 @@ describe("TradingEngine orchestration", () => {
         const active = yield* engine.isTradingActive;
         expect(active).toBe(false);
       }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("persists strategy config changes across engine restart", async () => {
+    const files = new Map<string, string>();
+    const first = makeHarness({ window1: "cond-persist-a", files });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const result = yield* engine.updateStrategyConfig("arb", { tradeSize: 42 });
+        expect(result.status).toBe("ok");
+
+        const states = yield* engine.getStrategyStates;
+        const arb = states.find((s) => s.name === "arb");
+        expect(arb?.config.tradeSize).toBe(42);
+      }).pipe(Effect.scoped, Effect.provide(first.layer)),
+    );
+
+    const persistedRaw = files.get("data/strategy-state.json");
+    expect(persistedRaw).toBeTruthy();
+    const persisted = JSON.parse(persistedRaw!);
+    expect(persisted.arb?.config?.tradeSize).toBe(42);
+
+    const second = makeHarness({ window1: "cond-persist-b", files });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const states = yield* engine.getStrategyStates;
+        const arb = states.find((s) => s.name === "arb");
+        expect(arb?.config.tradeSize).toBe(42);
+      }).pipe(Effect.scoped, Effect.provide(second.layer)),
     );
   });
 });

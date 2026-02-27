@@ -275,6 +275,8 @@ export interface ReconciliationStrategyMetrics {
   shadowFillRate: number;
   liveRejectRate: number;
   shadowRejectRate: number;
+  liveWinRate: number;
+  shadowWinRate: number;
   livePnl: number;
   shadowPnl: number;
   signalDelta: number;

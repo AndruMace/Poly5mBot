@@ -65,6 +65,17 @@ const SHADOW_SIM_OPTS_BY_STRATEGY: Record<string, SimulatorOpts> = {
   momentum: { slippageBps: 7, fillProbability: 0.86, minLiquidityPct: 0.05 },
 };
 
+const STRATEGY_STATE_DIR = "data";
+const STRATEGY_STATE_FILE = "data/strategy-state.json";
+
+interface PersistedStrategyStateEntry {
+  enabled?: boolean;
+  config?: Record<string, unknown>;
+  regimeFilter?: Record<string, unknown>;
+}
+
+type PersistedStrategyState = Record<string, PersistedStrategyStateEntry>;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -201,6 +212,77 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const strategies: Strategy[] = [arb, efficiency, whaleHunt, momentum];
     const strategyMap = new Map<string, Strategy>(strategies.map((s) => [s.name, s]));
 
+    const readPersistedStrategyState = Effect.gen(function* () {
+      const exists = yield* fs.exists(STRATEGY_STATE_FILE);
+      if (!exists) return {} as PersistedStrategyState;
+
+      const raw = yield* fs.readFileString(STRATEGY_STATE_FILE);
+      const parsed = yield* Effect.try({
+        try: () => JSON.parse(raw),
+        catch: (err) => new Error(String(err)),
+      });
+      if (!parsed || typeof parsed !== "object") {
+        return {} as PersistedStrategyState;
+      }
+      return parsed as PersistedStrategyState;
+    }).pipe(
+      Effect.catchAll((err) =>
+        Effect.logError(`[Engine] Failed to load strategy state from ${STRATEGY_STATE_FILE}: ${String(err)}`).pipe(
+          Effect.as({} as PersistedStrategyState),
+        ),
+      ),
+    );
+
+    const persistStrategyStates = Effect.gen(function* () {
+      const entries = yield* Effect.forEach(strategies, (strategy) =>
+        Ref.get(strategy.stateRef).pipe(
+          Effect.map((state) => [
+            strategy.name,
+            {
+              enabled: state.enabled,
+              config: { ...state.config },
+              regimeFilter: { ...state.regimeFilter },
+            } satisfies PersistedStrategyStateEntry,
+          ] as const),
+        ),
+      );
+
+      const payload = Object.fromEntries(entries) as PersistedStrategyState;
+      yield* fs.makeDirectory(STRATEGY_STATE_DIR, { recursive: true }).pipe(
+        Effect.catchAll(() => Effect.void),
+      );
+      yield* fs.writeFileString(STRATEGY_STATE_FILE, JSON.stringify(payload, null, 2));
+    });
+
+    const applyPersistedStrategyState = (persisted: PersistedStrategyState) =>
+      Effect.forEach(strategies, (strategy) =>
+        Effect.gen(function* () {
+          const entry = persisted[strategy.name];
+          if (!entry || typeof entry !== "object") return;
+
+          if (typeof entry.enabled === "boolean") {
+            yield* strategy.setEnabled(entry.enabled);
+          }
+
+          if (entry.config && typeof entry.config === "object") {
+            const result = yield* strategy.updateConfig(entry.config);
+            if (!result.ok) {
+              yield* Effect.logWarning(
+                `[Engine] Persisted config for ${strategy.name} was invalid: ${result.error ?? "Invalid config values"}`,
+              );
+            }
+          }
+
+          if (entry.regimeFilter && typeof entry.regimeFilter === "object") {
+            yield* strategy.updateRegimeFilter(entry.regimeFilter as any);
+          }
+        }),
+      ).pipe(Effect.asVoid);
+
+    const persistedStrategyState = yield* readPersistedStrategyState;
+    yield* applyPersistedStrategyState(persistedStrategyState);
+    yield* persistStrategyStates;
+
     const stateRef = yield* Ref.make<EngineState>(initialEngineState(config.trading.mode));
 
     for (const s of strategies) {
@@ -254,6 +336,10 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const ss = shadowTrades.filter((t) => t.strategy === strategy);
         const lsResolved = ls.filter((t) => t.status === "resolved");
         const ssResolved = ss.filter((t) => t.status === "resolved");
+        const liveWins = lsResolved.filter((t) => t.outcome === "win").length;
+        const shadowWins = ssResolved.filter((t) => t.outcome === "win").length;
+        const liveWinRate = lsResolved.length > 0 ? (liveWins / lsResolved.length) * 100 : 0;
+        const shadowWinRate = ssResolved.length > 0 ? (shadowWins / ssResolved.length) * 100 : 0;
         const liveSubmitted = ls.filter((t) => t.status !== "pending").length;
         const shadowSubmitted = ss.filter((t) => t.status !== "pending").length;
         const liveFilled = ls.filter((t) => t.status === "filled" || t.status === "partial" || t.status === "resolved").length;
@@ -276,6 +362,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           shadowFillRate,
           liveRejectRate,
           shadowRejectRate,
+          liveWinRate,
+          shadowWinRate,
           livePnl,
           shadowPnl,
           signalDelta: ls.length - ss.length,
@@ -629,7 +717,10 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
         const configuredTradeSize = signal.size;
         const recentPrices = yield* feedService.getRecentPrices(300_000, "binance");
-        const computedSize = positionSizer.computeSize(signal, recentPrices);
+        
+        const strategyMetrics = sCurrent.metrics.reconciliation.strategies.find((m) => m.strategy === strategy.name);
+        const winRate = isShadow ? strategyMetrics?.shadowWinRate : strategyMetrics?.liveWinRate;
+        const computedSize = positionSizer.computeSize(signal, recentPrices, winRate);
         const alignedSize = Math.min(computedSize, config.risk.maxTradeSize);
         signal.size = Math.round(alignedSize * 100) / 100;
 
@@ -1019,6 +1110,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         if (!s) return false;
         const current = yield* Ref.get(s.stateRef);
         yield* s.setEnabled(!current.enabled);
+        yield* persistStrategyStates;
         const states = yield* getStrategyStates;
         yield* emit({ _tag: "Strategies", data: states });
         return !current.enabled;
@@ -1030,6 +1122,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         if (!s) return { status: "not_found" as const };
         const result = yield* s.updateConfig(cfg);
         if (result.ok) {
+          yield* persistStrategyStates;
           const states = yield* getStrategyStates;
           yield* emit({ _tag: "Strategies", data: states });
         }
@@ -1048,6 +1141,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const s = strategyMap.get(name);
         if (!s) return "not_found" as const;
         yield* s.updateRegimeFilter(filter as any);
+        yield* persistStrategyStates;
         const states = yield* getStrategyStates;
         yield* emit({ _tag: "Strategies", data: states });
         return "ok" as const;
