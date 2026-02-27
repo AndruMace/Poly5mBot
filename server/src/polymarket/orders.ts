@@ -11,12 +11,6 @@ const FOK_BACKOFF_SIZE_SCALES = [0.45, 0.35, 0.25, 0.15];
 const MIN_CLOB_NOTIONAL = 1.0;
 const FOK_LIQUIDITY_BACKOFF_BASE_MS = 8_000;
 const FOK_LIQUIDITY_BACKOFF_MAX_MS = 120_000;
-const MIN_IOC_FILL_RATIO_BY_STRATEGY: Record<string, number> = {
-  arb: 0.45,
-  momentum: 0.4,
-  "whale-hunt": 0.5,
-};
-
 interface FokBackoffState {
   consecutiveFailures: number;
   blockedUntil: number;
@@ -318,6 +312,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
               shares,
               fee: 0,
               status: "rejected",
+              shadow: false,
               outcome: null,
               pnl: 0,
               timestamp: Date.now(),
@@ -354,6 +349,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
               shares,
               fee: 0,
               status: parsed.mappedStatus === "rejected" ? "rejected" : "cancelled",
+              shadow: false,
               outcome: null,
               pnl: 0,
               timestamp: Date.now(),
@@ -380,6 +376,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             shares,
             fee,
             status: mappedStatus,
+            shadow: false,
             outcome: null,
             pnl: fee > 0 ? -fee : 0,
             timestamp: Date.now(),
@@ -433,6 +430,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
               shares,
               fee: 0,
               status: "rejected",
+              shadow: false,
               outcome: null,
               pnl: 0,
               timestamp: Date.now(),
@@ -466,10 +464,6 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             observedShares > 0
           ) {
             const fillRatio = shares > 0 ? observedShares / shares : 0;
-            const minFillRatio =
-              MIN_IOC_FILL_RATIO_BY_STRATEGY[signal.strategy] ?? 0.45;
-            if (fillRatio < minFillRatio) continue;
-
             const avgPrice = observed.avgPrice ?? price;
             const filledNotional = floorTo(observedShares * avgPrice, 2);
             const fee = calculateFee(observedShares, avgPrice);
@@ -487,6 +481,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
               shares: observedShares,
               fee,
               status,
+              shadow: false,
               outcome: null,
               pnl: fee > 0 ? -fee : 0,
               timestamp: Date.now(),
@@ -607,6 +602,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             shares,
             fee,
             status: mappedStatus,
+            shadow: false,
             outcome: null,
             pnl: fee > 0 ? -fee : 0,
             timestamp: Date.now(),
