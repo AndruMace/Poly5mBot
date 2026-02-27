@@ -143,6 +143,11 @@ function isFokLiquidityReject(reason: string | null | undefined): boolean {
   return r.includes("couldn't be fully filled") || r.includes("fully filled or killed");
 }
 
+function isSizeBelowMinimum(reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  return reason.toLowerCase().includes("lower than the minimum");
+}
+
 function toFokBackoffMs(consecutiveFailures: number): number {
   const exponent = Math.max(0, consecutiveFailures - 1);
   return Math.min(FOK_LIQUIDITY_BACKOFF_MAX_MS, FOK_LIQUIDITY_BACKOFF_BASE_MS * 2 ** exponent);
@@ -504,6 +509,14 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             lastReason = reason;
             continue;
           }
+          if (isSizeBelowMinimum(reason)) {
+            // Smaller scales will also fail minimum — stop now
+            lastReason = reason;
+            break;
+          }
+          // For balance errors and other non-fill responses: let the loop
+          // try smaller scales (a smaller amount may fit within available balance).
+          lastReason = reason;
         }
 
         yield* Effect.logWarning(
