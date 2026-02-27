@@ -23,6 +23,7 @@ import {
   feedHealthRx,
   wsLastMessageTsRx,
   MAX_PRICE_HISTORY,
+  MAX_PNL_HISTORY,
   emptyOrderBook,
   emptyPnl,
   defaultRegime,
@@ -35,6 +36,7 @@ import type {
   WSMessage,
   PricePoint,
   TradeRecord,
+  PnLSummary,
   WSStatusSnapshot,
   TradesPageResponse,
 } from "../types/index.js";
@@ -71,17 +73,70 @@ function shallowEqualPrices(
   return true;
 }
 
+function normalizePnlSummary(summary: PnLSummary | null | undefined): PnLSummary {
+  const source = summary ?? emptyPnl;
+  return {
+    ...source,
+    byStrategy: source.byStrategy ?? {},
+    history: Array.isArray(source.history)
+      ? source.history.slice(-MAX_PNL_HISTORY)
+      : [],
+  };
+}
+
+function equalPnlSummary(a: PnLSummary, b: PnLSummary): boolean {
+  if (
+    a.totalPnl !== b.totalPnl ||
+    a.todayPnl !== b.todayPnl ||
+    a.totalTrades !== b.totalTrades ||
+    a.winRate !== b.winRate
+  ) {
+    return false;
+  }
+
+  const aHistory = a.history;
+  const bHistory = b.history;
+  if (aHistory.length !== bHistory.length) return false;
+  if (aHistory.length > 0) {
+    const aLast = aHistory[aHistory.length - 1]!;
+    const bLast = bHistory[bHistory.length - 1]!;
+    if (
+      aLast.timestamp !== bLast.timestamp ||
+      aLast.cumulativePnl !== bLast.cumulativePnl
+    ) {
+      return false;
+    }
+  }
+
+  const aKeys = Object.keys(a.byStrategy);
+  const bKeys = Object.keys(b.byStrategy);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    const sa = a.byStrategy[key];
+    const sb = b.byStrategy[key];
+    if (!sb) return false;
+    if (
+      sa.pnl !== sb.pnl ||
+      sa.trades !== sb.trades ||
+      sa.winRate !== sb.winRate
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export function useWebSocket() {
   const registry = useContext(RegistryContext);
 
   useEffect(() => {
     let destroyed = false;
-    let reconnectTimer: ReturnType<typeof setTimeout>;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let priceHistoryBuffer: PriceHistory[] = [];
     let lastPriceHistoryFlush = 0;
     let pendingPriceHistoryFlush: ReturnType<typeof setTimeout> | undefined;
     let tradeFlushTimer: ReturnType<typeof setTimeout> | undefined;
-    let statusRehydrateTimer: ReturnType<typeof setInterval> | undefined;
     let activeSocket: WebSocket | null = null;
     let forceReconnectPending = false;
     let lastResumeReconnectAt = 0;
@@ -90,6 +145,12 @@ export function useWebSocket() {
     let tradeBackfillInFlight = false;
     let lastTradeBackfillAt = 0;
     const pendingTrades = new Map<string, TradeRecord>();
+
+    const clearReconnectTimer = () => {
+      if (!reconnectTimer) return;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    };
     
     // Cleanup function for pendingTrades to prevent closure retention
     const clearPendingTrades = () => {
@@ -267,8 +328,8 @@ export function useWebSocket() {
         orderBookRx,
         data.orderbook ?? { ...emptyOrderBook },
       );
-      registry.set(pnlRx, data.pnl ?? { ...emptyPnl });
-      registry.set(shadowPnlRx, data.shadowPnl ?? { ...emptyPnl });
+      registry.set(pnlRx, normalizePnlSummary(data.pnl));
+      registry.set(shadowPnlRx, normalizePnlSummary(data.shadowPnl));
       registry.update(tradesRx, (prev) => mergeTrades(prev, [...(data.trades ?? [])]));
       backfillTrades();
       if (data.prices) registry.set(pricesRx, data.prices);
@@ -301,6 +362,15 @@ export function useWebSocket() {
 
     function connect() {
       if (destroyed) return;
+      if (
+        activeSocket &&
+        (activeSocket.readyState === WebSocket.OPEN ||
+          activeSocket.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
+
+      clearReconnectTimer();
 
       const ws = new WebSocket(url);
       activeSocket = ws;
@@ -338,10 +408,22 @@ export function useWebSocket() {
                 scheduleTradeFlush();
                 break;
               case "pnl":
-                registry.set(pnlRx, msg.data as any);
+                {
+                  const next = normalizePnlSummary(msg.data as PnLSummary);
+                  const prev = registry.get(pnlRx);
+                  if (!equalPnlSummary(prev, next)) {
+                    registry.set(pnlRx, next);
+                  }
+                }
                 break;
               case "shadowPnl":
-                registry.set(shadowPnlRx, msg.data as any);
+                {
+                  const next = normalizePnlSummary(msg.data as PnLSummary);
+                  const prev = registry.get(shadowPnlRx);
+                  if (!equalPnlSummary(prev, next)) {
+                    registry.set(shadowPnlRx, next);
+                  }
+                }
                 break;
               case "tradingActive":
                 registry.set(
@@ -409,7 +491,12 @@ export function useWebSocket() {
           connect();
           return;
         }
-        reconnectTimer = setTimeout(connect, 3000);
+        if (!reconnectTimer) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = undefined;
+            connect();
+          }, 3000);
+        }
       };
 
       ws.onerror = () => {
@@ -421,10 +508,12 @@ export function useWebSocket() {
       if (destroyed) return;
       const ws = activeSocket;
       if (ws && ws.readyState !== WebSocket.CLOSED) {
+        clearReconnectTimer();
         forceReconnectPending = true;
         ws.close();
         return;
       }
+      clearReconnectTimer();
       connect();
     };
 
@@ -445,7 +534,7 @@ export function useWebSocket() {
 
     document.addEventListener("visibilitychange", onResume);
     window.addEventListener("focus", onResume);
-    statusRehydrateTimer = setInterval(() => {
+    const statusRehydrateTimer = setInterval(() => {
       if (registry.get(currentMarketRx) === null) {
         rehydrateFromHttpStatus();
       }
@@ -458,8 +547,8 @@ export function useWebSocket() {
       window.removeEventListener("focus", onResume);
       if (pendingPriceHistoryFlush) clearTimeout(pendingPriceHistoryFlush);
       if (tradeFlushTimer) clearTimeout(tradeFlushTimer);
-      if (statusRehydrateTimer) clearInterval(statusRehydrateTimer);
-      clearTimeout(reconnectTimer);
+      clearInterval(statusRehydrateTimer);
+      clearReconnectTimer();
       if (activeSocket && activeSocket.readyState !== WebSocket.CLOSED) {
         activeSocket.close();
       }

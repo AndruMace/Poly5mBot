@@ -1,13 +1,26 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type http from "http";
-import { Effect, Queue, Chunk, Schedule, PubSub } from "effect";
+import { Effect, Queue, Chunk, Schedule } from "effect";
 import { TradingEngine } from "../engine/engine.js";
 import { FeedService } from "../feeds/manager.js";
 import { PolymarketClient } from "../polymarket/client.js";
 import { EventBus } from "../engine/event-bus.js";
 import type { WSMessage, EngineEvent, WSStatusSnapshot } from "../types.js";
+import type { PnLSummary } from "../types.js";
 
 const WS_BOOTSTRAP_TRADES = 200;
+
+function pnlSignature(summary: PnLSummary): string {
+  const last = summary.history[summary.history.length - 1];
+  return [
+    summary.totalPnl,
+    summary.todayPnl,
+    summary.totalTrades,
+    summary.winRate,
+    last?.timestamp ?? 0,
+    last?.cumulativePnl ?? 0,
+  ].join("|");
+}
 
 function broadcast(wss: WebSocketServer, msg: WSMessage): void {
   const data = JSON.stringify(msg);
@@ -28,6 +41,8 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
     let wss: WebSocketServer | null = null;
     let lastExchangeConnected: boolean | null = null;
     let lastWalletAddress: string | null = null;
+    let lastLivePnlSig: string | null = null;
+    let lastShadowPnlSig: string | null = null;
 
     const attach = (server: http.Server) =>
       Effect.gen(function* () {
@@ -100,6 +115,16 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
             if (!wss) continue;
             const type = eventTagToWSType(event._tag);
             if (type) {
+              if (type === "pnl") {
+                const sig = pnlSignature(event.data as PnLSummary);
+                if (sig === lastLivePnlSig) continue;
+                lastLivePnlSig = sig;
+              }
+              if (type === "shadowPnl") {
+                const sig = pnlSignature(event.data as PnLSummary);
+                if (sig === lastShadowPnlSig) continue;
+                lastShadowPnlSig = sig;
+              }
               broadcast(wss, { type, data: event.data, timestamp: Date.now() });
             }
           }

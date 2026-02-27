@@ -13,6 +13,7 @@ import type {
 const DATA_DIR = "data";
 const LIVE_FILE = "data/events.jsonl";
 const SHADOW_FILE = "data/shadow-events.jsonl";
+const PNL_HISTORY_MAX_POINTS = 300;
 
 function uid(): string {
   return crypto.randomBytes(8).toString("hex");
@@ -143,40 +144,67 @@ export function toTradeRecord(t: Trade): TradeRecord {
 }
 
 function computeSummary(trades: Map<string, Trade>): PnLSummary {
-  const resolved = [...trades.values()].filter((t) => t.status === "resolved");
-  const totalPnl = resolved.reduce((s, t) => s + t.pnl, 0);
-
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const todayTrades = resolved.filter(
-    (t) => (t.events[0]?.timestamp ?? 0) >= todayStart.getTime(),
-  );
-  const todayPnl = todayTrades.reduce((s, t) => s + t.pnl, 0);
+  const todayStartMs = todayStart.getTime();
 
-  const wins = resolved.filter((t) => t.outcome === "win").length;
-  const winRate = resolved.length > 0 ? (wins / resolved.length) * 100 : 0;
+  let totalPnl = 0;
+  let todayPnl = 0;
+  let totalTrades = 0;
+  let totalWins = 0;
+  let cumulativePnl = 0;
+
+  const history: Array<{ timestamp: number; cumulativePnl: number }> = [];
+  const strategyAgg: Record<string, { pnl: number; trades: number; wins: number }> = {};
+
+  for (const trade of trades.values()) {
+    if (trade.status !== "resolved") continue;
+
+    totalTrades += 1;
+    totalPnl += trade.pnl;
+
+    const ts = trade.events[0]?.timestamp ?? 0;
+    if (ts >= todayStartMs) {
+      todayPnl += trade.pnl;
+    }
+
+    const won = trade.outcome === "win";
+    if (won) totalWins += 1;
+
+    if (!strategyAgg[trade.strategy]) {
+      strategyAgg[trade.strategy] = { pnl: 0, trades: 0, wins: 0 };
+    }
+    const strat = strategyAgg[trade.strategy]!;
+    strat.pnl += trade.pnl;
+    strat.trades += 1;
+    if (won) strat.wins += 1;
+
+    cumulativePnl += trade.pnl;
+    history.push({ timestamp: ts, cumulativePnl });
+    if (history.length > PNL_HISTORY_MAX_POINTS) {
+      history.shift();
+    }
+  }
 
   const byStrategy: PnLSummary["byStrategy"] = {};
-  for (const t of resolved) {
-    if (!byStrategy[t.strategy]) {
-      byStrategy[t.strategy] = { pnl: 0, trades: 0, winRate: 0 };
-    }
-    const s = byStrategy[t.strategy]!;
-    s.pnl += t.pnl;
-    s.trades++;
-  }
-  for (const [strat, s] of Object.entries(byStrategy)) {
-    const stratWins = resolved.filter((t) => t.strategy === strat && t.outcome === "win").length;
-    s.winRate = s.trades > 0 ? (stratWins / s.trades) * 100 : 0;
+  for (const [strategy, agg] of Object.entries(strategyAgg)) {
+    byStrategy[strategy] = {
+      pnl: agg.pnl,
+      trades: agg.trades,
+      winRate: agg.trades > 0 ? (agg.wins / agg.trades) * 100 : 0,
+    };
   }
 
-  let cumPnl = 0;
-  const history = resolved.map((t) => {
-    cumPnl += t.pnl;
-    return { timestamp: t.events[0]?.timestamp ?? 0, cumulativePnl: cumPnl };
-  });
+  const winRate = totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0;
 
-  return { totalPnl, todayPnl, totalTrades: resolved.length, winRate, byStrategy, history } as PnLSummary;
+  return {
+    totalPnl,
+    todayPnl,
+    totalTrades,
+    winRate,
+    byStrategy,
+    history,
+  } satisfies PnLSummary;
 }
 
 export interface TradeStoreService {

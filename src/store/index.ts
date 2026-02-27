@@ -20,6 +20,7 @@ export interface PriceHistory {
 }
 
 export const MAX_PRICE_HISTORY = 600;
+export const MAX_PNL_HISTORY = 300;
 
 export const emptyPnl: PnLSummary = {
   totalPnl: 0,
