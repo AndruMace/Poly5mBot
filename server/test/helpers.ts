@@ -11,6 +11,7 @@ import { TradeStore, ShadowTradeStore } from "../src/engine/trade-store.js";
 import { PnLTracker } from "../src/engine/tracker.js";
 import { AccountActivityStore } from "../src/activity/store.js";
 import { CriticalIncidentStore } from "../src/incident/store.js";
+import { ObservabilityStore } from "../src/observability/store.js";
 import type { AppConfigShape } from "../src/config.js";
 
 export const TestAppConfig = Layer.succeed(AppConfig, {
@@ -68,6 +69,7 @@ export const CoreTestLayer = Layer.mergeAll(
   Layer.provideMerge(PnLTracker.Default),
   Layer.provideMerge(AccountActivityStore.Default),
   Layer.provideMerge(CriticalIncidentStore.Default),
+  Layer.provideMerge(ObservabilityStore.Default),
   Layer.provideMerge(TradeStore.Default),
   Layer.provideMerge(ShadowTradeStore.Default),
   Layer.provideMerge(TestAppConfig),

@@ -4,6 +4,7 @@ import crypto from "crypto";
 import type { CriticalIncident } from "../types.js";
 import { AppConfig } from "../config.js";
 import { PostgresStorage } from "../storage/postgres.js";
+import { ObservabilityStore } from "../observability/store.js";
 
 const DATA_DIR = "data";
 const INCIDENTS_FILE = "data/incidents.jsonl";
@@ -31,11 +32,13 @@ export class CriticalIncidentStore extends Effect.Service<CriticalIncidentStore>
   scoped: Effect.gen(function* () {
     const configOpt = yield* Effect.serviceOption(AppConfig);
     const postgresOpt = yield* Effect.serviceOption(PostgresStorage);
+    const observabilityOpt = yield* Effect.serviceOption(ObservabilityStore);
     const backend = Option.match(configOpt, {
       onNone: () => "file" as const,
       onSome: (cfg) => cfg.storage.backend,
     });
     const postgres = Option.getOrUndefined(postgresOpt);
+    const observability = Option.getOrUndefined(observabilityOpt);
     const fs = yield* FileSystem.FileSystem;
     const useFile = backend === "file" || backend === "dual";
     const usePostgres = !!postgres && (backend === "postgres" || backend === "dual");
@@ -163,6 +166,25 @@ export class CriticalIncidentStore extends Effect.Service<CriticalIncidentStore>
             ],
           ).pipe(Effect.catchAll(() => Effect.void));
         }
+        if (observability) {
+          yield* observability.append({
+            category: "incident",
+            source: "incident_store",
+            action: "critical_incident_created",
+            entityType: "incident",
+            entityId: incident.id,
+            status: incident.resolvedAt === null ? "active" : "resolved",
+            mode: null,
+            payload: {
+              kind: incident.kind,
+              severity: incident.severity,
+              message: incident.message,
+              fingerprint: incident.fingerprint,
+              details: incident.details,
+              createdAt: incident.createdAt,
+            },
+          }).pipe(Effect.catchAll(() => Effect.void));
+        }
         return incident;
       });
 
@@ -184,6 +206,21 @@ export class CriticalIncidentStore extends Effect.Service<CriticalIncidentStore>
               "update critical_incidents set resolved_at_ms = $1 where id = $2",
               [now, id],
             ).pipe(Effect.catchAll(() => Effect.void));
+          }
+          if (observability) {
+            yield* observability.append({
+              category: "incident",
+              source: "incident_store",
+              action: "critical_incident_resolved",
+              entityType: "incident",
+              entityId: id,
+              status: "resolved",
+              mode: null,
+              payload: {
+                incidentId: id,
+                resolvedAt: now,
+              },
+            }).pipe(Effect.catchAll(() => Effect.void));
           }
         }
         return updated;

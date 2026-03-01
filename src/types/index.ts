@@ -333,6 +333,52 @@ export interface CriticalIncident {
   resolvedAt: number | null;
 }
 
+// ── Observability ──
+
+export type ObservabilityCategory =
+  | "trade_lifecycle"
+  | "signal"
+  | "risk"
+  | "engine"
+  | "operator"
+  | "incident"
+  | "activity"
+  | "api";
+
+export type ObservabilitySource =
+  | "trade_store"
+  | "engine"
+  | "reconciler"
+  | "risk_manager"
+  | "api"
+  | "incident_store"
+  | "activity_store"
+  | "system";
+
+export type ObservabilityEntityType =
+  | "trade"
+  | "signal"
+  | "strategy"
+  | "incident"
+  | "activity"
+  | "window"
+  | "system";
+
+export interface ObservabilityEvent {
+  eventId: string;
+  timestamp: number;
+  category: ObservabilityCategory;
+  source: ObservabilitySource;
+  action: string;
+  entityType: ObservabilityEntityType;
+  entityId: string | null;
+  status: string | null;
+  strategy: string | null;
+  mode: TradingMode | null;
+  searchText: string;
+  payload: Record<string, unknown>;
+}
+
 // ── WebSocket types ──
 
 export type WSMessageType =
@@ -353,6 +399,7 @@ export type WSMessageType =
   | "exchangeStatus"
   | "risk"
   | "criticalIncident"
+  | "observabilityEvent"
   | "error";
 
 export interface WSMessage {
@@ -379,6 +426,7 @@ export interface WSStatusSnapshot {
   killSwitches: ReadonlyArray<KillSwitchStatus>;
   risk: RiskSnapshot;
   metrics: EngineMetrics;
+  observabilityEvents?: ReadonlyArray<ObservabilityEvent>;
 }
 
 export type TradeFilterMode = "all" | "live" | "shadow";
@@ -414,6 +462,19 @@ export interface AccountActivityPageResponse {
   hasMore: boolean;
   limit: number;
   timeframe: TradeTimeframe;
+}
+
+export interface ObservabilityEventsPageResponse {
+  items: ReadonlyArray<ObservabilityEvent>;
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
+}
+
+export interface ObservabilityMetricsResponse {
+  total: number;
+  byCategory: Array<{ category: ObservabilityCategory; count: number }>;
+  byStatus: Array<{ status: string; count: number }>;
 }
 
 // ── Notes ──

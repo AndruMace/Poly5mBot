@@ -6,6 +6,7 @@ import { StrategyPanel } from "./components/StrategyPanel.js";
 import { TradeLog } from "./components/TradeLog.js";
 import { ConnectionSetup } from "./components/ConnectionSetup.js";
 import { CriticalIncidentBanner } from "./components/CriticalIncidentBanner.js";
+import { Observability } from "./components/Observability.js";
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
@@ -18,6 +19,7 @@ function App() {
         {activeTab === "dashboard" && <Dashboard />}
         {activeTab === "strategies" && <StrategyPanel />}
         {activeTab === "trades" && <TradeLog />}
+        {activeTab === "observability" && <Observability />}
         {activeTab === "settings" && <ConnectionSetup />}
       </Layout>
     </>

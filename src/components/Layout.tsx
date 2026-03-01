@@ -5,17 +5,19 @@ import {
   LayoutDashboard,
   Brain,
   History,
+  Activity,
   Settings,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
 
-type Tab = "dashboard" | "strategies" | "trades" | "settings";
+type Tab = "dashboard" | "strategies" | "trades" | "observability" | "settings";
 
 const navItems: Array<{ id: Tab; label: string; icon: typeof LayoutDashboard }> = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "strategies", label: "Strategies", icon: Brain },
   { id: "trades", label: "Trades", icon: History },
+  { id: "observability", label: "Observability", icon: Activity },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

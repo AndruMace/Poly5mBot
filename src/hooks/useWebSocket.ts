@@ -23,6 +23,7 @@ import {
   feedHealthRx,
   wsLastMessageTsRx,
   incidentsRx,
+  observabilityEventsRx,
   MAX_PRICE_HISTORY,
   MAX_PNL_HISTORY,
   emptyOrderBook,
@@ -41,6 +42,7 @@ import type {
   WSStatusSnapshot,
   TradesPageResponse,
   CriticalIncident,
+  ObservabilityEvent,
 } from "../types/index.js";
 
 const PRICE_HISTORY_FLUSH_MS = 1000;
@@ -51,6 +53,7 @@ const STATUS_REHYDRATE_COOLDOWN_MS = 5000;
 const TRADE_BACKFILL_COOLDOWN_MS = 5000;
 const TRADE_BACKFILL_MAX_PAGES = 6;
 const TRADE_BUFFER_LIMIT = 2000;
+const OBSERVABILITY_BUFFER_LIMIT = 5000;
 
 function shallowEqualPrices(
   a: Record<string, PricePoint>,
@@ -157,6 +160,18 @@ export function useWebSocket() {
       for (const i of incoming) merged.set(i.id, i);
       return Array.from(merged.values())
         .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, limit);
+    };
+    const mergeObservability = (
+      current: ObservabilityEvent[],
+      incoming: ObservabilityEvent[],
+      limit = OBSERVABILITY_BUFFER_LIMIT,
+    ): ObservabilityEvent[] => {
+      const merged = new Map<string, ObservabilityEvent>();
+      for (const e of current) merged.set(e.eventId, e);
+      for (const e of incoming) merged.set(e.eventId, e);
+      return Array.from(merged.values())
+        .sort((a, b) => b.timestamp - a.timestamp)
         .slice(0, limit);
     };
 
@@ -388,6 +403,10 @@ export function useWebSocket() {
           ? { ...emptyFeedHealth, ...data.feedHealth }
           : { ...emptyFeedHealth },
       );
+      registry.update(
+        observabilityEventsRx,
+        (prev) => mergeObservability(prev, [...(data.observabilityEvents ?? [])]),
+      );
       fetchIncidents();
     }
 
@@ -489,6 +508,12 @@ export function useWebSocket() {
                 break;
               case "criticalIncident":
                 registry.update(incidentsRx, (prev) => mergeIncidents(prev, [msg.data as CriticalIncident]));
+                break;
+              case "observabilityEvent":
+                registry.update(
+                  observabilityEventsRx,
+                  (prev) => mergeObservability(prev, [msg.data as ObservabilityEvent]),
+                );
                 break;
               case "feedHealth":
                 registry.set(feedHealthRx, {

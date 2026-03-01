@@ -3,6 +3,7 @@ import { FileSystem } from "@effect/platform";
 import crypto from "crypto";
 import { AppConfig } from "../config.js";
 import { PostgresStorage } from "../storage/postgres.js";
+import { ObservabilityStore } from "../observability/store.js";
 import type {
   Trade,
   TradeEvent,
@@ -251,17 +252,43 @@ export const makeTradeStore = (shadow: boolean) =>
   Effect.gen(function* () {
     const configOpt = yield* Effect.serviceOption(AppConfig);
     const postgresOpt = yield* Effect.serviceOption(PostgresStorage);
+    const observabilityOpt = yield* Effect.serviceOption(ObservabilityStore);
     const backend = Option.match(configOpt, {
       onNone: () => "file" as const,
       onSome: (cfg) => cfg.storage.backend,
     });
     const postgres = Option.getOrUndefined(postgresOpt);
+    const observability = Option.getOrUndefined(observabilityOpt);
     const fs = yield* FileSystem.FileSystem;
     const filePath = shadow ? SHADOW_FILE : LIVE_FILE;
     const stream = shadow ? "shadow" : "live";
     const useFile = backend === "file" || backend === "dual";
     const usePostgres = !!postgres && (backend === "postgres" || backend === "dual");
     const tradesRef = yield* Ref.make(new Map<string, Trade>());
+    const logTradeObservability = (trade: Trade, type: TradeEventType, data: Record<string, unknown>) =>
+      observability
+        ? observability.append({
+            category: "trade_lifecycle",
+            source: "trade_store",
+            action: `trade_event:${type}`,
+            entityType: "trade",
+            entityId: trade.id,
+            status: trade.status,
+            strategy: trade.strategy,
+            mode: trade.shadow ? "shadow" : "live",
+            payload: {
+              tradeId: trade.id,
+              eventType: type,
+              status: trade.status,
+              strategy: trade.strategy,
+              side: trade.side,
+              conditionId: trade.conditionId,
+              clobOrderId: trade.clobOrderId ?? null,
+              data,
+            },
+          }).pipe(Effect.catchAll(() => Effect.void))
+        : Effect.void;
+
     const writeQueue = yield* Queue.unbounded<string>();
 
     const flushLoop = Effect.gen(function* () {
@@ -373,12 +400,15 @@ export const makeTradeStore = (shadow: boolean) =>
         if (useFile) {
           yield* Queue.offer(writeQueue, JSON.stringify(event) + "\n");
         }
+        const updatedTrade = yield* Ref.get(tradesRef).pipe(Effect.map((m) => m.get(event.tradeId)));
+        if (updatedTrade) {
+          yield* logTradeObservability(updatedTrade, type, data);
+        }
         if (usePostgres) {
           yield* postgres!.execute(
             "insert into trade_events (id, trade_id, stream, event_type, event_ts, data) values ($1, $2, $3, $4, $5, $6::jsonb) on conflict (id) do nothing",
             [event.id, event.tradeId, stream, event.type, event.timestamp, JSON.stringify(event.data ?? {})],
           ).pipe(Effect.catchAll(() => Effect.void));
-          const updatedTrade = yield* Ref.get(tradesRef).pipe(Effect.map((m) => m.get(event.tradeId)));
           if (updatedTrade) {
             const record = toTradeRecord(updatedTrade);
             yield* postgres!.execute(
@@ -431,10 +461,33 @@ export const makeTradeStore = (shadow: boolean) =>
       });
 
     const createTrade = (init: Parameters<TradeStoreService["createTrade"]>[0]) =>
-      Ref.modify(tradesRef, (trades) => {
-        const trade = makeTrade(init);
-        trades.set(trade.id, trade);
-        return [trade, trades] as const;
+      Effect.gen(function* () {
+        const trade = yield* Ref.modify(tradesRef, (trades) => {
+          const t = makeTrade(init);
+          trades.set(t.id, t);
+          return [t, trades] as const;
+        });
+        if (observability) {
+          yield* observability.append({
+            category: "trade_lifecycle",
+            source: "trade_store",
+            action: "trade_created",
+            entityType: "trade",
+            entityId: trade.id,
+            status: trade.status,
+            strategy: trade.strategy,
+            mode: trade.shadow ? "shadow" : "live",
+            payload: {
+              tradeId: trade.id,
+              conditionId: trade.conditionId,
+              strategy: trade.strategy,
+              side: trade.side,
+              size: trade.size,
+              requestedShares: trade.requestedShares,
+            },
+          }).pipe(Effect.catchAll(() => Effect.void));
+        }
+        return trade;
       });
 
     const getTrade = (id: string) =>

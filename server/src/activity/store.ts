@@ -2,6 +2,7 @@ import { Effect, Ref, Option } from "effect";
 import { FileSystem } from "@effect/platform";
 import { AppConfig } from "../config.js";
 import { PostgresStorage } from "../storage/postgres.js";
+import { ObservabilityStore } from "../observability/store.js";
 
 export type AccountActivityAction = "Buy" | "Sell" | "Redeem" | "Deposit";
 
@@ -147,11 +148,13 @@ export class AccountActivityStore extends Effect.Service<AccountActivityStore>()
   scoped: Effect.gen(function* () {
     const configOpt = yield* Effect.serviceOption(AppConfig);
     const postgresOpt = yield* Effect.serviceOption(PostgresStorage);
+    const observabilityOpt = yield* Effect.serviceOption(ObservabilityStore);
     const backend = Option.match(configOpt, {
       onNone: () => "file" as const,
       onSome: (cfg) => cfg.storage.backend,
     });
     const postgres = Option.getOrUndefined(postgresOpt);
+    const observability = Option.getOrUndefined(observabilityOpt);
     const fs = yield* FileSystem.FileSystem;
     const useFile = backend === "file" || backend === "dual";
     const usePostgres = !!postgres && (backend === "postgres" || backend === "dual");
@@ -269,6 +272,47 @@ export class AccountActivityStore extends Effect.Service<AccountActivityStore>()
               { discard: true },
             );
           }
+          if (observability) {
+            yield* Effect.forEach(
+              toWrite,
+              (r) =>
+                observability.append({
+                  category: "activity",
+                  source: "activity_store",
+                  action: "activity_imported",
+                  entityType: "activity",
+                  entityId: r.id,
+                  status: r.action,
+                  mode: null,
+                  payload: {
+                    marketName: r.marketName,
+                    action: r.action,
+                    usdcAmount: r.usdcAmount,
+                    tokenAmount: r.tokenAmount,
+                    tokenName: r.tokenName,
+                    timestamp: r.timestamp,
+                    hash: r.hash,
+                  },
+                }).pipe(Effect.catchAll(() => Effect.void)),
+              { discard: true },
+            );
+          }
+        }
+        if (observability) {
+          yield* observability.append({
+            category: "activity",
+            source: "activity_store",
+            action: "activity_import_summary",
+            entityType: "system",
+            entityId: null,
+            status: null,
+            mode: null,
+            payload: {
+              imported: toWrite.length,
+              skipped,
+              parsed: parsed.length,
+            },
+          }).pipe(Effect.catchAll(() => Effect.void));
         }
         return { imported: toWrite.length, skipped };
       });

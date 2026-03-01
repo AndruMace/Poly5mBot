@@ -374,6 +374,52 @@ export interface CriticalIncident {
   resolvedAt: number | null;
 }
 
+// ── Observability ──
+
+export type ObservabilityCategory =
+  | "trade_lifecycle"
+  | "signal"
+  | "risk"
+  | "engine"
+  | "operator"
+  | "incident"
+  | "activity"
+  | "api";
+
+export type ObservabilitySource =
+  | "trade_store"
+  | "engine"
+  | "reconciler"
+  | "risk_manager"
+  | "api"
+  | "incident_store"
+  | "activity_store"
+  | "system";
+
+export type ObservabilityEntityType =
+  | "trade"
+  | "signal"
+  | "strategy"
+  | "incident"
+  | "activity"
+  | "window"
+  | "system";
+
+export interface ObservabilityEvent {
+  eventId: string;
+  timestamp: number;
+  category: ObservabilityCategory;
+  source: ObservabilitySource;
+  action: string;
+  entityType: ObservabilityEntityType;
+  entityId: string | null;
+  status: string | null;
+  strategy: string | null;
+  mode: TradingMode | null;
+  searchText: string;
+  payload: Record<string, unknown>;
+}
+
 // ── Market context ──
 
 export interface MarketContext {
@@ -408,6 +454,7 @@ export type WSMessageType =
   | "exchangeStatus"
   | "risk"
   | "criticalIncident"
+  | "observabilityEvent"
   | "error";
 
 export interface WSMessage {
@@ -434,6 +481,7 @@ export interface WSStatusSnapshot {
   killSwitches: ReadonlyArray<KillSwitchStatus>;
   risk: RiskSnapshot;
   metrics: EngineMetrics;
+  observabilityEvents?: ReadonlyArray<ObservabilityEvent>;
 }
 
 // ── Notes ──
@@ -465,7 +513,8 @@ export type EngineEvent =
   | { readonly _tag: "Mode"; readonly data: { readonly mode: TradingMode } }
   | { readonly _tag: "Regime"; readonly data: RegimeState }
   | { readonly _tag: "Metrics"; readonly data: EngineMetrics }
-  | { readonly _tag: "CriticalIncident"; readonly data: CriticalIncident };
+  | { readonly _tag: "CriticalIncident"; readonly data: CriticalIncident }
+  | { readonly _tag: "Observability"; readonly data: ObservabilityEvent };
 
 // ── Schema definitions for serialization boundaries ──
 

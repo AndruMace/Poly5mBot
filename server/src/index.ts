@@ -21,6 +21,7 @@ import { NotesStore } from "./notes-store.js";
 import { AccountActivityStore } from "./activity/store.js";
 import { CriticalIncidentStore } from "./incident/store.js";
 import { PostgresStorage } from "./storage/postgres.js";
+import { ObservabilityStore } from "./observability/store.js";
 import { WebSocketService } from "./ws/server.js";
 import { handleRequest } from "./api.js";
 
@@ -43,10 +44,12 @@ const AppLive = WebSocketService.Default.pipe(
   Layer.provideMerge(EventBus.Default),
   Layer.provideMerge(OrderService.Default),
   Layer.provideMerge(MarketService.Default),
+).pipe(
   Layer.provideMerge(PolymarketClient.Default),
   Layer.provideMerge(NotesStore.Default),
   Layer.provideMerge(AccountActivityStore.Default),
   Layer.provideMerge(CriticalIncidentStore.Default),
+  Layer.provideMerge(ObservabilityStore.Default),
   Layer.provideMerge(PostgresStorage.Default),
   Layer.provideMerge(AppConfig.Default),
   Layer.provideMerge(NodeContext.layer),
@@ -57,7 +60,7 @@ const program = Effect.gen(function* () {
   const wsService = yield* WebSocketService;
   const polyClient = yield* PolymarketClient;
   const runtime = yield* Effect.runtime<
-    TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | PostgresStorage | AppConfig
+    TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | ObservabilityStore | PostgresStorage | AppConfig
   >();
   const runFork = Runtime.runFork(runtime);
 

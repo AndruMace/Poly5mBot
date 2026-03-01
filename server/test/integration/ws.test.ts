@@ -5,6 +5,7 @@ import { TradingEngine } from "../../src/engine/engine.js";
 import { FeedService } from "../../src/feeds/manager.js";
 import { PolymarketClient } from "../../src/polymarket/client.js";
 import { EventBus } from "../../src/engine/event-bus.js";
+import { ObservabilityStore } from "../../src/observability/store.js";
 import type { TradeRecord } from "../../src/types.js";
 
 const wsMockState = {
@@ -136,12 +137,16 @@ describe("WebSocketService integration", () => {
       isConnected: Effect.succeed(false),
       getWalletAddress: Effect.succeed(null),
     } as any);
+    const observabilityLayer = Layer.succeed(ObservabilityStore, {
+      latest: (_limit = 200) => Effect.succeed([]),
+    } as any);
 
     const layer = WebSocketService.Default.pipe(
       Layer.provideMerge(engineLayer),
       Layer.provideMerge(feedLayer),
       Layer.provideMerge(polyLayer),
       Layer.provideMerge(busLayer),
+      Layer.provideMerge(observabilityLayer),
     );
 
     const messages = await Effect.runPromise(
@@ -186,6 +191,23 @@ describe("WebSocketService integration", () => {
         };
 
         yield* eventBus.publish({ _tag: "Trade", data: trade });
+        yield* eventBus.publish({
+          _tag: "Observability",
+          data: {
+            eventId: "obs-ws-1",
+            timestamp: Date.now(),
+            category: "signal",
+            source: "engine",
+            action: "signal_generated",
+            entityType: "signal",
+            entityId: "arb:1",
+            status: "generated",
+            strategy: "arb",
+            mode: "live",
+            searchText: "signal_generated",
+            payload: {},
+          },
+        });
         yield* Effect.sleep("120 millis");
 
         return send.mock.calls.map(([arg]) => JSON.parse(arg));
@@ -194,5 +216,6 @@ describe("WebSocketService integration", () => {
 
     expect(messages.some((m: any) => m.type === "status")).toBe(true);
     expect(messages.some((m: any) => m.type === "trade" && m.data.id === "t-1")).toBe(true);
+    expect(messages.some((m: any) => m.type === "observabilityEvent" && m.data.eventId === "obs-ws-1")).toBe(true);
   });
 });

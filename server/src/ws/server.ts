@@ -5,6 +5,7 @@ import { TradingEngine } from "../engine/engine.js";
 import { FeedService } from "../feeds/manager.js";
 import { PolymarketClient } from "../polymarket/client.js";
 import { EventBus } from "../engine/event-bus.js";
+import { ObservabilityStore } from "../observability/store.js";
 import type { WSMessage, EngineEvent, WSStatusSnapshot } from "../types.js";
 import type { PnLSummary } from "../types.js";
 
@@ -37,6 +38,7 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
     const feedService = yield* FeedService;
     const polyClient = yield* PolymarketClient;
     const eventBus = yield* EventBus;
+    const observability = yield* ObservabilityStore;
 
     let wss: WebSocketServer | null = null;
     let lastExchangeConnected: boolean | null = null;
@@ -52,7 +54,7 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
           Effect.gen(function* () {
             yield* Effect.log("[WS] Client connected");
 
-            const [tradingActive, mode, strategies, market, orderbook, prices, oracleEst, feedHealth, pnl, shadowPnl, trades, regime, killSwitches, risk, metrics, connected, walletAddr] = yield* Effect.all([
+            const [tradingActive, mode, strategies, market, orderbook, prices, oracleEst, feedHealth, pnl, shadowPnl, trades, regime, killSwitches, risk, metrics, connected, walletAddr, observabilityEvents] = yield* Effect.all([
               engine.isTradingActive,
               engine.getMode,
               engine.getStrategyStates,
@@ -70,6 +72,7 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
               engine.getMetrics,
               polyClient.isConnected,
               polyClient.getWalletAddress,
+              observability.latest(300),
             ]);
 
             const snapshot: WSStatusSnapshot = {
@@ -90,6 +93,7 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
               killSwitches,
               risk,
               metrics,
+              observabilityEvents,
             };
 
             const initial: WSMessage = {
@@ -191,6 +195,7 @@ function eventTagToWSType(tag: EngineEvent["_tag"]): WSMessage["type"] | null {
     Regime: "regime",
     Metrics: "metrics",
     CriticalIncident: "criticalIncident",
+    Observability: "observabilityEvent",
   };
   return (map[tag] as WSMessage["type"]) ?? null;
 }

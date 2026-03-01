@@ -16,6 +16,7 @@ import { EventBus } from "./event-bus.js";
 import { AccountActivityStore } from "../activity/store.js";
 import { CriticalIncidentStore } from "../incident/store.js";
 import { PostgresStorage } from "../storage/postgres.js";
+import { ObservabilityStore } from "../observability/store.js";
 import { makeArbStrategy } from "../strategies/arb.js";
 import { makeEfficiencyStrategy } from "../strategies/efficiency.js";
 import { makeWhaleHuntStrategy } from "../strategies/whale-hunt.js";
@@ -208,6 +209,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const eventBus = yield* EventBus;
     const activityStore = yield* AccountActivityStore;
     const incidentStore = yield* CriticalIncidentStore;
+    const observabilityOpt = yield* Effect.serviceOption(ObservabilityStore);
+    const observability = Option.getOrUndefined(observabilityOpt);
     const postgresOpt = yield* Effect.serviceOption(PostgresStorage);
     const postgres = Option.getOrUndefined(postgresOpt);
     const fs = yield* FileSystem.FileSystem;
@@ -341,6 +344,12 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     }
 
     const emit = (event: EngineEvent) => eventBus.publish(event);
+    const obs = (
+      input: Parameters<NonNullable<typeof observability>["append"]>[0],
+    ) =>
+      observability
+        ? observability.append(input).pipe(Effect.catchAll(() => Effect.void))
+        : Effect.void;
 
     const haltTradingWithIncident = (incident: {
       kind: "unmatched_account_fill" | "oversize_account_fill" | "efficiency_partial_incident" | "reconciler_error";
@@ -359,6 +368,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* Ref.update(stateRef, (s) => ({ ...s, tradingActive: false }));
         yield* emit({ _tag: "TradingActive", data: { tradingActive: false } });
         yield* emit({ _tag: "CriticalIncident", data: created });
+        yield* obs({
+          category: "incident",
+          source: "engine",
+          action: "trading_halted_by_incident",
+          entityType: "incident",
+          entityId: created.id,
+          status: "critical",
+          mode: null,
+          payload: {
+            kind: created.kind,
+            message: created.message,
+            details: created.details,
+          },
+        });
         yield* Effect.logError(`[Engine] CRITICAL INCIDENT: ${created.kind} - ${created.message}`);
       });
 
@@ -384,6 +407,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         });
 
         if (filledNotional > config.risk.maxTradeSize + 1e-6) {
+          yield* obs({
+            category: "risk",
+            source: "reconciler",
+            action: "oversize_fill_detected",
+            entityType: "trade",
+            entityId: order.orderId ?? null,
+            status: "rejected",
+            mode: "live",
+            payload: {
+              source: "clob",
+              filledNotional,
+              maxTradeSize: config.risk.maxTradeSize,
+            },
+          });
           yield* haltTradingWithIncident({
             kind: "oversize_account_fill",
             message: `Observed venue BUY fill $${filledNotional.toFixed(4)} above maxTradeSize $${config.risk.maxTradeSize.toFixed(4)}.`,
@@ -402,6 +439,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         }
 
         if (!matchingTrade) {
+          yield* obs({
+            category: "risk",
+            source: "reconciler",
+            action: "unmatched_fill_detected",
+            entityType: "trade",
+            entityId: order.orderId ?? null,
+            status: "anomaly",
+            mode: "live",
+            payload: {
+              source: "clob",
+              filledNotional,
+              updatedAtMs: order.updatedAtMs,
+            },
+          });
           yield* haltTradingWithIncident({
             kind: "unmatched_account_fill",
             message: "Observed venue BUY fill that does not match any tracked live trade in reconciliation window.",
@@ -431,6 +482,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         });
 
         if (a.usdcAmount > config.risk.maxTradeSize + 1e-6) {
+          yield* obs({
+            category: "risk",
+            source: "reconciler",
+            action: "oversize_activity_detected",
+            entityType: "activity",
+            entityId: a.id,
+            status: "rejected",
+            mode: "live",
+            payload: {
+              hash: a.hash,
+              usdcAmount: a.usdcAmount,
+              maxTradeSize: config.risk.maxTradeSize,
+            },
+          });
           yield* haltTradingWithIncident({
             kind: "oversize_account_fill",
             message: `Observed account BUY $${a.usdcAmount.toFixed(4)} above maxTradeSize $${config.risk.maxTradeSize.toFixed(4)}.`,
@@ -448,6 +513,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         }
 
         if (!matching) {
+          yield* obs({
+            category: "risk",
+            source: "reconciler",
+            action: "unmatched_activity_detected",
+            entityType: "activity",
+            entityId: a.id,
+            status: "anomaly",
+            mode: "live",
+            payload: {
+              hash: a.hash,
+              usdcAmount: a.usdcAmount,
+              timestamp: a.timestamp,
+            },
+          });
           yield* haltTradingWithIncident({
             kind: "unmatched_account_fill",
             message: "Observed account BUY that does not match any tracked live trade in reconciliation window.",
@@ -465,12 +544,25 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       }
     }).pipe(
       Effect.catchAll((err) =>
-        haltTradingWithIncident({
-          kind: "reconciler_error",
-          message: `Account reconciler failed: ${String(err)}`,
-          fingerprint: `reconciler-error:${String(err)}`,
-          details: { error: String(err) },
-        }),
+        obs({
+          category: "risk",
+          source: "reconciler",
+          action: "reconciler_error",
+          entityType: "system",
+          entityId: "account_reconciler",
+          status: "error",
+          mode: "live",
+          payload: { error: String(err) },
+        }).pipe(
+          Effect.zipRight(
+            haltTradingWithIncident({
+              kind: "reconciler_error",
+              message: `Account reconciler failed: ${String(err)}`,
+              fingerprint: `reconciler-error:${String(err)}`,
+              details: { error: String(err) },
+            }),
+          ),
+        ),
       ),
     );
 
@@ -689,6 +781,22 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const updatedWindow: MarketWindow = { ...current, priceToBeat: ptb };
         const title = current.title ?? formatWindowTitle(current);
         yield* Effect.log(`[Engine] New window: ${title} | Price to beat: $${ptb?.toFixed(2) ?? "unknown"}`);
+        yield* obs({
+          category: "engine",
+          source: "engine",
+          action: "window_changed",
+          entityType: "window",
+          entityId: current.conditionId,
+          status: "active",
+          mode: st.mode,
+          payload: {
+            title,
+            conditionId: current.conditionId,
+            startTime: current.startTime,
+            endTime: current.endTime,
+            priceToBeat: ptb,
+          },
+        });
 
         yield* Ref.update(stateRef, (s) => ({
           ...s,
@@ -898,6 +1006,23 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
         const signal = yield* strategy.evaluate(ctx);
         if (!signal) continue;
+        yield* obs({
+          category: "signal",
+          source: "engine",
+          action: "signal_generated",
+          entityType: "signal",
+          entityId: `${strategy.name}:${signal.timestamp}`,
+          status: "generated",
+          strategy: strategy.name,
+          mode: isShadow ? "shadow" : "live",
+          payload: {
+            side: signal.side,
+            confidence: signal.confidence,
+            reason: signal.reason,
+            maxPrice: signal.maxPrice,
+            size: signal.size,
+          },
+        });
 
         if (signal.strategy === "momentum") {
           signal.maxPrice = adjustMomentumMaxPrice(signal, regime, ctx);
@@ -925,8 +1050,39 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
             return stUpd;
           });
           yield* Effect.log(`[Engine] Risk rejected ${signal.strategy}: ${check.reason}`);
+          yield* obs({
+            category: "risk",
+            source: "risk_manager",
+            action: "signal_rejected",
+            entityType: "signal",
+            entityId: `${signal.strategy}:${signal.timestamp}`,
+            status: "rejected",
+            strategy: signal.strategy,
+            mode: isShadow ? "shadow" : "live",
+            payload: {
+              reason: check.reason,
+              side: signal.side,
+              confidence: signal.confidence,
+              size: signal.size,
+            },
+          });
           continue;
         }
+        yield* obs({
+          category: "risk",
+          source: "risk_manager",
+          action: "signal_approved",
+          entityType: "signal",
+          entityId: `${signal.strategy}:${signal.timestamp}`,
+          status: "approved",
+          strategy: signal.strategy,
+          mode: isShadow ? "shadow" : "live",
+          payload: {
+            side: signal.side,
+            confidence: signal.confidence,
+            size: signal.size,
+          },
+        });
 
         const riskSnap = yield* riskManager.getSnapshot;
         const entryContext: EntryContext = {
@@ -977,6 +1133,21 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         });
 
         const executed = yield* executeStrategy(signal, isShadow, ctx, entryContext);
+        yield* obs({
+          category: "signal",
+          source: "engine",
+          action: "signal_execution_result",
+          entityType: "signal",
+          entityId: `${signal.strategy}:${signal.timestamp}`,
+          status: executed ? "executed" : "not_executed",
+          strategy: signal.strategy,
+          mode: isShadow ? "shadow" : "live",
+          payload: {
+            executed,
+            side: signal.side,
+            finalSize: signal.size,
+          },
+        });
         if (executed) {
           yield* Ref.update(stateRef, (s) => {
             s.entriesThisWindow.set(strategy.name, (s.entriesThisWindow.get(strategy.name) ?? 0) + 1);
@@ -1282,6 +1453,16 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         }));
         yield* Effect.log(`[Engine] Trading ${active ? "STARTED" : "STOPPED"}`);
         yield* emit({ _tag: "TradingActive", data: { tradingActive: active } });
+        yield* obs({
+          category: "operator",
+          source: "engine",
+          action: active ? "trading_started" : "trading_stopped",
+          entityType: "system",
+          entityId: "trading_active",
+          status: active ? "active" : "inactive",
+          mode: null,
+          payload: { tradingActive: active },
+        });
       });
 
     const getMode = Ref.get(stateRef).pipe(Effect.map((s) => s.mode));
@@ -1290,6 +1471,16 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* Ref.update(stateRef, (s) => ({ ...s, mode }));
         yield* Effect.log(`[Engine] Mode switched to ${mode.toUpperCase()}`);
         yield* emit({ _tag: "Mode", data: { mode } });
+        yield* obs({
+          category: "operator",
+          source: "engine",
+          action: "mode_changed",
+          entityType: "system",
+          entityId: "engine_mode",
+          status: mode,
+          mode,
+          payload: { mode },
+        });
       });
 
     const getRegime = Ref.get(stateRef).pipe(Effect.map((s) => s.regime));
@@ -1317,6 +1508,17 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* persistStrategyStates;
         const states = yield* getStrategyStates;
         yield* emit({ _tag: "Strategies", data: states });
+        yield* obs({
+          category: "operator",
+          source: "engine",
+          action: "strategy_toggled",
+          entityType: "strategy",
+          entityId: name,
+          status: !current.enabled ? "enabled" : "disabled",
+          strategy: name,
+          mode: null,
+          payload: { enabled: !current.enabled },
+        });
         return !current.enabled;
       });
 
@@ -1329,6 +1531,17 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           yield* persistStrategyStates;
           const states = yield* getStrategyStates;
           yield* emit({ _tag: "Strategies", data: states });
+          yield* obs({
+            category: "operator",
+            source: "engine",
+            action: "strategy_config_updated",
+            entityType: "strategy",
+            entityId: name,
+            status: "ok",
+            strategy: name,
+            mode: null,
+            payload: { config: cfg },
+          });
         }
         return result.ok
           ? { status: "ok" as const }
@@ -1348,6 +1561,17 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* persistStrategyStates;
         const states = yield* getStrategyStates;
         yield* emit({ _tag: "Strategies", data: states });
+        yield* obs({
+          category: "operator",
+          source: "engine",
+          action: "strategy_regime_filter_updated",
+          entityType: "strategy",
+          entityId: name,
+          status: "ok",
+          strategy: name,
+          mode: null,
+          payload: { regimeFilter: filter },
+        });
         return "ok" as const;
       });
 

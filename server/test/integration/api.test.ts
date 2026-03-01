@@ -8,6 +8,7 @@ import { NotesStore } from "../../src/notes-store.js";
 import { AccountActivityStore } from "../../src/activity/store.js";
 import { CriticalIncidentStore } from "../../src/incident/store.js";
 import { PostgresStorage } from "../../src/storage/postgres.js";
+import { ObservabilityStore } from "../../src/observability/store.js";
 import { AppConfig } from "../../src/config.js";
 import type { AppConfigShape } from "../../src/config.js";
 import type { WSStatusSnapshot } from "../../src/types.js";
@@ -205,6 +206,38 @@ const fakePostgresStorage = {
   query: (_text: string, _values?: unknown[]) => Effect.succeed([]),
 };
 
+const fakeObservabilityStore = {
+  append: (_input: any) => Effect.succeed(undefined),
+  list: (_query: any) =>
+    Effect.succeed({
+      items: [
+        {
+          eventId: "obs-1",
+          timestamp: Date.now(),
+          category: "signal",
+          source: "engine",
+          action: "signal_generated",
+          entityType: "signal",
+          entityId: "arb:1",
+          status: "generated",
+          strategy: "arb",
+          mode: "live",
+          searchText: "signal_generated arb",
+          payload: {},
+        },
+      ],
+      hasMore: false,
+      nextCursor: null,
+    }),
+  metrics: (_query: any) =>
+    Effect.succeed({
+      total: 1,
+      byCategory: [{ category: "signal", count: 1 }],
+      byStatus: [{ status: "generated", count: 1 }],
+    }),
+  latest: (_limit = 200) => Effect.succeed([]),
+};
+
 const testLayer = Layer.mergeAll(
   Layer.succeed(AppConfig, baseConfig as any),
   Layer.succeed(TradingEngine, fakeEngine as any),
@@ -213,6 +246,7 @@ const testLayer = Layer.mergeAll(
   Layer.succeed(NotesStore, fakeNotes as any),
   Layer.succeed(AccountActivityStore, fakeActivityStore as any),
   Layer.succeed(CriticalIncidentStore, fakeIncidentStore as any),
+  Layer.succeed(ObservabilityStore, fakeObservabilityStore as any),
   Layer.succeed(PostgresStorage, fakePostgresStorage as any),
 );
 
@@ -295,5 +329,27 @@ describe("API handler integration", () => {
     );
     expect(res.status).toBe(200);
     expect((res.body as any).items).toEqual([]);
+  });
+
+  it("returns observability events payload", async () => {
+    const res = await Effect.runPromise(
+      handleRequest("/api/observability/events?timeframe=30d&limit=25", "GET", undefined, false, {}).pipe(
+        Effect.provide(testLayer),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as any).items.length).toBe(1);
+    expect((res.body as any).items[0].eventId).toBe("obs-1");
+  });
+
+  it("returns observability metrics payload", async () => {
+    const res = await Effect.runPromise(
+      handleRequest("/api/observability/metrics?timeframe=30d", "GET", undefined, false, {}).pipe(
+        Effect.provide(testLayer),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as any).total).toBe(1);
+    expect((res.body as any).byCategory[0].category).toBe("signal");
   });
 });

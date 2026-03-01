@@ -12,6 +12,7 @@ import type {
   EngineMetrics,
   FeedHealthSnapshot,
   CriticalIncident,
+  ObservabilityEvent,
 } from "../types/index.js";
 
 export interface PriceHistory {
@@ -136,3 +137,4 @@ export const metricsRx = Rx.make<EngineMetrics>({ ...emptyMetrics });
 export const feedHealthRx = Rx.make<FeedHealthSnapshot>({ ...emptyFeedHealth });
 export const wsLastMessageTsRx = Rx.make(0);
 export const incidentsRx = Rx.make<CriticalIncident[]>([]);
+export const observabilityEventsRx = Rx.make<ObservabilityEvent[]>([]);

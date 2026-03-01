@@ -8,7 +8,14 @@ import { AppConfig } from "./config.js";
 import { AccountActivityStore } from "./activity/store.js";
 import { CriticalIncidentStore } from "./incident/store.js";
 import { PostgresStorage } from "./storage/postgres.js";
-import type { TradeRecord } from "./types.js";
+import { ObservabilityStore } from "./observability/store.js";
+import type {
+  TradeRecord,
+  ObservabilityCategory,
+  ObservabilitySource,
+  ObservabilityEntityType,
+  TradingMode,
+} from "./types.js";
 
 interface RouteResult {
   status: number;
@@ -47,6 +54,11 @@ function parsePositiveInt(raw: string | null, fallback: number, max = 1000): num
   return Math.max(1, Math.min(n, max));
 }
 
+function parseMode(raw: string | null): TradingMode | undefined {
+  if (raw === "live" || raw === "shadow") return raw;
+  return undefined;
+}
+
 function timeframeToSinceMs(timeframe: TradeTimeframeParam): number | undefined {
   const now = Date.now();
   switch (timeframe) {
@@ -70,6 +82,14 @@ function timeframeToSinceSec(timeframe: TradeTimeframeParam): number | undefined
   return typeof ms === "number" ? Math.floor(ms / 1000) : undefined;
 }
 
+function parseEnum<T extends string>(
+  raw: string | null,
+  allowed: readonly T[],
+): T | undefined {
+  if (!raw) return undefined;
+  return (allowed as readonly string[]).includes(raw) ? (raw as T) : undefined;
+}
+
 function csvCell(value: unknown): string {
   const s = String(value ?? "");
   const needsQuote =
@@ -91,7 +111,7 @@ export const handleRequest = (
 ): Effect.Effect<
   RouteResult,
   never,
-  TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | PostgresStorage | AppConfig
+  TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | ObservabilityStore | PostgresStorage | AppConfig
 > =>
   Effect.gen(function* () {
     const config = yield* AppConfig;
@@ -101,6 +121,7 @@ export const handleRequest = (
     const notesStore = yield* NotesStore;
     const activityStore = yield* AccountActivityStore;
     const incidentStore = yield* CriticalIncidentStore;
+    const observability = yield* ObservabilityStore;
     const postgres = yield* PostgresStorage;
     yield* Effect.annotateCurrentSpan("http.method", method);
     yield* Effect.annotateCurrentSpan("http.url", url);
@@ -110,6 +131,17 @@ export const handleRequest = (
       if (!token || token.trim().length === 0) return true;
       return headers.authorization === `Bearer ${token.trim()}`;
     };
+    const audit = (action: string, payload: Record<string, unknown>) =>
+      observability.append({
+        category: "api",
+        source: "api",
+        action,
+        entityType: "system",
+        entityId: path,
+        status: "ok",
+        mode: null,
+        payload,
+      }).pipe(Effect.catchAll(() => Effect.void));
 
     const path = url.split("?")[0]!;
     const parsedUrl = new URL(url, "http://localhost");
@@ -324,6 +356,119 @@ export const handleRequest = (
         const items = yield* incidentStore.list({ limit, activeOnly });
         return { status: 200, body: { items, limit, activeOnly } };
       }
+      if (path === "/api/observability/events") {
+        const limit = parsePositiveInt(searchParams.get("limit"), 200, 2000);
+        const cursor = searchParams.get("cursor") ?? undefined;
+        const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
+        const sinceMs = timeframeToSinceMs(timeframe);
+        const category = parseEnum<ObservabilityCategory>(searchParams.get("category"), [
+          "trade_lifecycle",
+          "signal",
+          "risk",
+          "engine",
+          "operator",
+          "incident",
+          "activity",
+          "api",
+        ]);
+        const source = parseEnum<ObservabilitySource>(searchParams.get("source"), [
+          "trade_store",
+          "engine",
+          "reconciler",
+          "risk_manager",
+          "api",
+          "incident_store",
+          "activity_store",
+          "system",
+        ]);
+        const entityType = parseEnum<ObservabilityEntityType>(searchParams.get("entityType"), [
+          "trade",
+          "signal",
+          "strategy",
+          "incident",
+          "activity",
+          "window",
+          "system",
+        ]);
+        const mode = parseMode(searchParams.get("mode"));
+        const strategy = searchParams.get("strategy") ?? undefined;
+        const status = searchParams.get("status") ?? undefined;
+        const entityId = searchParams.get("entityId") ?? undefined;
+        const q = searchParams.get("q") ?? undefined;
+        const result = yield* observability.list({
+          limit,
+          cursor,
+          sinceMs,
+          category,
+          source,
+          strategy,
+          mode,
+          status,
+          entityType,
+          entityId,
+          q,
+        });
+        return {
+          status: 200,
+          body: {
+            items: result.items,
+            nextCursor: result.nextCursor,
+            hasMore: result.hasMore,
+            limit,
+            timeframe,
+          },
+        };
+      }
+      if (path === "/api/observability/metrics") {
+        const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
+        const sinceMs = timeframeToSinceMs(timeframe);
+        const category = parseEnum<ObservabilityCategory>(searchParams.get("category"), [
+          "trade_lifecycle",
+          "signal",
+          "risk",
+          "engine",
+          "operator",
+          "incident",
+          "activity",
+          "api",
+        ]);
+        const source = parseEnum<ObservabilitySource>(searchParams.get("source"), [
+          "trade_store",
+          "engine",
+          "reconciler",
+          "risk_manager",
+          "api",
+          "incident_store",
+          "activity_store",
+          "system",
+        ]);
+        const entityType = parseEnum<ObservabilityEntityType>(searchParams.get("entityType"), [
+          "trade",
+          "signal",
+          "strategy",
+          "incident",
+          "activity",
+          "window",
+          "system",
+        ]);
+        const mode = parseMode(searchParams.get("mode"));
+        const strategy = searchParams.get("strategy") ?? undefined;
+        const status = searchParams.get("status") ?? undefined;
+        const entityId = searchParams.get("entityId") ?? undefined;
+        const q = searchParams.get("q") ?? undefined;
+        const metrics = yield* observability.metrics({
+          sinceMs,
+          category,
+          source,
+          strategy,
+          mode,
+          status,
+          entityType,
+          entityId,
+          q,
+        });
+        return { status: 200, body: { ...metrics, timeframe } };
+      }
       if (path === "/api/storage/health") {
         const health = yield* postgres.health;
         return {
@@ -353,6 +498,7 @@ export const handleRequest = (
         const current = yield* engine.isTradingActive;
         yield* engine.setTradingActive(!current);
         const updated = yield* engine.isTradingActive;
+        yield* audit("api_trading_toggle", { previous: current, updated });
         return { status: 200, body: { tradingActive: updated } };
       }
       if (path === "/api/mode") {
@@ -362,6 +508,7 @@ export const handleRequest = (
           return { status: 400, body: { error: 'mode must be "live" or "shadow"' } };
         }
         yield* engine.setMode(mode);
+        yield* audit("api_mode_set", { mode });
         return { status: 200, body: { mode } };
       }
       if (path === "/api/connect") {
@@ -374,6 +521,9 @@ export const handleRequest = (
             Effect.succeed({ status: 500, body: { error: String(err) } } as RouteResult),
           ),
         );
+        if (result.status === 200) {
+          yield* audit("api_connect", { ok: true });
+        }
         return result;
       }
       if (path === "/api/activity/import-csv") {
@@ -383,12 +533,14 @@ export const handleRequest = (
           return { status: 400, body: { error: "csv is required" } };
         }
         const result = yield* activityStore.importCsv(csv);
+        yield* audit("api_activity_import_csv", result as Record<string, unknown>);
         return { status: 200, body: result };
       }
       if (path === "/api/killswitches/reset") {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
         yield* engine.resetKillSwitchPause;
         const status = yield* engine.getKillSwitchStatus;
+        yield* audit("api_killswitches_reset", { ok: true, count: status.length });
         return { status: 200, body: { ok: true, killSwitches: status } };
       }
 
@@ -397,6 +549,7 @@ export const handleRequest = (
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
         const name = decodeURIComponent(stratToggle[1]!);
         const enabled = yield* engine.toggleStrategy(name);
+        yield* audit("api_strategy_toggle", { name, enabled });
         return { status: 200, body: { name, enabled } };
       }
 
@@ -419,6 +572,7 @@ export const handleRequest = (
             },
           };
         }
+        yield* audit("api_strategy_config_update", { name, keys: Object.keys(body ?? {}) });
         return { status: 200, body: { ok: true } };
       }
 
@@ -428,6 +582,7 @@ export const handleRequest = (
         const name = decodeURIComponent(stratRegime[1]!);
         const result = yield* engine.updateStrategyRegimeFilter(name, body ?? {});
         if (result === "not_found") return { status: 404, body: { error: "Strategy not found" } };
+        yield* audit("api_strategy_regime_filter_update", { name, keys: Object.keys(body ?? {}) });
         return { status: 200, body: { ok: true } };
       }
     }
@@ -442,6 +597,9 @@ export const handleRequest = (
             Effect.succeed({ status: 500, body: { error: String(err) } } as RouteResult),
           ),
         );
+        if (result.status === 200) {
+          yield* audit("api_notes_save", { textLength: text.length });
+        }
         return result;
       }
     }
