@@ -23,30 +23,30 @@
         <div class='clearfix'>
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">14.28% </span>
+                <span class="strong">24.48% </span>
                 <span class="quiet">Statements</span>
-                <span class='fraction'>7/49</span>
+                <span class='fraction'>12/49</span>
             </div>
         
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">0% </span>
+                <span class="strong">18.6% </span>
                 <span class="quiet">Branches</span>
-                <span class='fraction'>0/43</span>
+                <span class='fraction'>8/43</span>
             </div>
         
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">16.66% </span>
+                <span class="strong">25% </span>
                 <span class="quiet">Functions</span>
-                <span class='fraction'>2/12</span>
+                <span class='fraction'>3/12</span>
             </div>
         
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">15.21% </span>
+                <span class="strong">26.08% </span>
                 <span class="quiet">Lines</span>
-                <span class='fraction'>7/46</span>
+                <span class='fraction'>12/46</span>
             </div>
         
             
@@ -251,19 +251,19 @@
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-yes">110x</span>
 <span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-yes">110x</span>
 <span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">110x</span>
 <span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">110x</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">110x</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
@@ -403,20 +403,20 @@ export interface StrategyConfigUpdateResult {
   error?: string;
 }
 &nbsp;
-export function <span class="fstat-no" title="function not covered" >shouldRunInRegime(f</span>ilter: RegimeFilter, regime: RegimeState): { allowed: boolean; reason: string | null } {
-<span class="cstat-no" title="statement not covered" >  if (filter.allowedVolatility &amp;&amp; !filter.allowedVolatility.includes(regime.volatilityRegime)) {</span>
+export function shouldRunInRegime(filter: RegimeFilter, regime: RegimeState): { allowed: boolean; reason: string | null } {
+  <span class="missing-if-branch" title="if path not taken" >I</span>if (filter.allowedVolatility &amp;&amp; <span class="branch-1 cbranch-no" title="branch not covered" >!filter.allowedVolatility.includes(regime.volatilityRegime)) {</span>
 <span class="cstat-no" title="statement not covered" >    return { allowed: false, reason: `Vol: ${regime.volatilityRegime}` };</span>
   }
-<span class="cstat-no" title="statement not covered" >  if (filter.allowedTrend &amp;&amp; !filter.allowedTrend.includes(regime.trendRegime)) {</span>
+  <span class="missing-if-branch" title="if path not taken" >I</span>if (filter.allowedTrend &amp;&amp; <span class="branch-1 cbranch-no" title="branch not covered" >!filter.allowedTrend.includes(regime.trendRegime)) {</span>
 <span class="cstat-no" title="statement not covered" >    return { allowed: false, reason: `Trend: ${regime.trendRegime}` };</span>
   }
-<span class="cstat-no" title="statement not covered" >  if (filter.allowedLiquidity &amp;&amp; !filter.allowedLiquidity.includes(regime.liquidityRegime)) {</span>
+  <span class="missing-if-branch" title="if path not taken" >I</span>if (filter.allowedLiquidity &amp;&amp; <span class="branch-1 cbranch-no" title="branch not covered" >!filter.allowedLiquidity.includes(regime.liquidityRegime)) {</span>
 <span class="cstat-no" title="statement not covered" >    return { allowed: false, reason: `Liquidity: ${regime.liquidityRegime}` };</span>
   }
-<span class="cstat-no" title="statement not covered" >  if (filter.allowedSpread &amp;&amp; !filter.allowedSpread.includes(regime.spreadRegime)) {</span>
+  <span class="missing-if-branch" title="if path not taken" >I</span>if (filter.allowedSpread &amp;&amp; <span class="branch-1 cbranch-no" title="branch not covered" >!filter.allowedSpread.includes(regime.spreadRegime)) {</span>
 <span class="cstat-no" title="statement not covered" >    return { allowed: false, reason: `Spread: ${regime.spreadRegime}` };</span>
   }
-<span class="cstat-no" title="statement not covered" >  return { allowed: true, reason: null };</span>
+  return { allowed: true, reason: null };
 }
 &nbsp;
 export function makeStrategyBase(
@@ -529,7 +529,7 @@ export function makeInitialState(
             <div class='footer quiet pad2 space-top1 center small'>
                 Code coverage generated by
                 <a href="https://istanbul.js.org/" target="_blank" rel="noopener noreferrer">istanbul</a>
-                at 2026-02-25T21:28:23.386Z
+                at 2026-03-01T21:43:19.361Z
             </div>
         <script src="../../prettify.js"></script>
         <script>

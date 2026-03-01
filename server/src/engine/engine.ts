@@ -13,6 +13,17 @@ import { PositionSizer } from "./position-sizer.js";
 import { RegimeDetector } from "./regime-detector.js";
 import { preflightShadowBuy } from "./shadow-preflight.js";
 import { EventBus } from "./event-bus.js";
+import {
+  adjustMomentumMaxPrice,
+  initialEngineState,
+  type EngineState,
+  zeroDiagnostics,
+} from "./state.js";
+import { makeSnapshotEmitter } from "./snapshot-emitter.js";
+import { makeAccountReconciler } from "./account-reconciliation.js";
+import { makeMarketPoller } from "./window-manager.js";
+import { makeExecutionHandlers } from "./execution.js";
+import { makeStrategyRunner } from "./strategy-runner.js";
 import { AccountActivityStore } from "../activity/store.js";
 import { CriticalIncidentStore } from "../incident/store.js";
 import { PostgresStorage } from "../storage/postgres.js";
@@ -38,8 +49,6 @@ import type {
   EngineEvent,
   EntryContext,
 } from "../types.js";
-
-let tradeCounter = 0;
 
 const STRATEGY_COOLDOWN_MS: Record<string, number> = {
   arb: 3000,
@@ -79,120 +88,6 @@ interface PersistedStrategyStateEntry {
 }
 
 type PersistedStrategyState = Record<string, PersistedStrategyStateEntry>;
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function adjustMomentumMaxPrice(signal: Signal, regime: RegimeState, ctx: MarketContext): number {
-  const base = signal.maxPrice;
-  if (signal.strategy !== "momentum") return base;
-
-  let allowance = 0;
-  if (regime.trendRegime === "strong_up" || regime.trendRegime === "strong_down") allowance += 0.05;
-  else if (regime.trendRegime === "up" || regime.trendRegime === "down") allowance += 0.03;
-
-  if (signal.confidence >= 0.75) allowance += 0.02;
-  if (ctx.windowRemainingMs <= 120_000) allowance += 0.02;
-
-  if (regime.liquidityRegime === "thin") allowance -= 0.02;
-  if (regime.spreadRegime === "blowout") allowance -= 0.03;
-
-  return Math.round(clamp(base + allowance, 0.5, 0.78) * 1000) / 1000;
-}
-
-function zeroDiagnostics(): StrategyDiagnostics {
-  return {
-    signals: 0, riskRejected: 0, liveRejected: 0, dynamicWindowUsed: 0,
-    earlyEntryAccepted: 0, earlyEntryRejected: 0, probabilityRejected: 0,
-    submitted: 0, queueMiss: 0, liquidityFail: 0, lowFillCancel: 0, partialFill: 0, fullFill: 0,
-    wins: 0, losses: 0,
-  };
-}
-
-function emptyReconciliation() {
-  return {
-    updatedAt: 0, liveTotalTrades: 0, shadowTotalTrades: 0,
-    liveWinRate: 0, shadowWinRate: 0, liveTotalPnl: 0, shadowTotalPnl: 0,
-    strategies: [],
-  };
-}
-
-interface EngineState {
-  currentWindow: MarketWindow | null;
-  windowTitle: string;
-  orderBook: OrderBookState;
-  running: boolean;
-  tradingActive: boolean;
-  tickInFlight: boolean;
-  mode: "live" | "shadow";
-  regime: RegimeState;
-  inFlightByCondition: Map<string, number>;
-  retryBackoffUntil: Map<string, number>;
-  retryBackoffCount: Map<string, number>;
-  lastSignalFingerprint: Map<string, string>;
-  lastStrategyExecution: Map<string, number>;
-  entriesThisWindow: Map<string, number>;
-  windowSideByStrategy: Map<string, "UP" | "DOWN">;
-  lastOrderbookUpdateTs: number;
-  windowEndPriceSnapshot: number | null;
-  windowEndSnapshotTs: number;
-  recentSignalLatencies: number[];
-  windowDiagnostics: Record<string, StrategyDiagnostics>;
-  rollingDiagnostics: Record<string, StrategyDiagnostics>;
-  liveModeDiagnostics: Record<string, StrategyDiagnostics>;
-  shadowModeDiagnostics: Record<string, StrategyDiagnostics>;
-  metrics: EngineMetrics;
-  lastPoll: number;
-  lastReconcileAt: number;
-  efficiencyIncidentBlocked: boolean;
-}
-
-function initialEngineState(mode: "live" | "shadow"): EngineState {
-  return {
-    currentWindow: null,
-    windowTitle: "",
-    orderBook: {
-      up: { bids: [], asks: [] }, down: { bids: [], asks: [] },
-      bestAskUp: null, bestAskDown: null, bestBidUp: null, bestBidDown: null,
-    },
-    running: false,
-    tradingActive: false,
-    tickInFlight: false,
-    mode,
-    regime: {
-      volatilityRegime: "normal", trendRegime: "chop",
-      liquidityRegime: "normal", spreadRegime: "normal",
-      volatilityValue: 0, trendStrength: 0, liquidityDepth: 0, spreadValue: 0,
-    },
-    inFlightByCondition: new Map(),
-    retryBackoffUntil: new Map(),
-    retryBackoffCount: new Map(),
-    lastSignalFingerprint: new Map(),
-    lastStrategyExecution: new Map(),
-    entriesThisWindow: new Map(),
-    windowSideByStrategy: new Map(),
-    lastOrderbookUpdateTs: 0,
-    windowEndPriceSnapshot: null,
-    windowEndSnapshotTs: 0,
-    recentSignalLatencies: [],
-    windowDiagnostics: {},
-    rollingDiagnostics: {},
-    liveModeDiagnostics: {},
-    shadowModeDiagnostics: {},
-    metrics: {
-      windowConditionId: null, rolling: {}, window: {},
-      latency: {
-        lastSignalToSubmitMs: 0, avgSignalToSubmitMs: 0, avgRecentSignalToSubmitMs: 0,
-        samples: 0, lastSampleAt: 0, priceDataAgeMs: 0, orderbookAgeMs: 0,
-      },
-      reconciliation: emptyReconciliation(),
-    },
-    lastPoll: 0,
-    lastReconcileAt: 0,
-    efficiencyIncidentBlocked: false,
-  };
-}
 
 export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngine", {
   scoped: Effect.gen(function* () {
@@ -385,163 +280,13 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* Effect.logError(`[Engine] CRITICAL INCIDENT: ${created.kind} - ${created.message}`);
       });
 
-    const runAccountReconciliation = Effect.gen(function* () {
-      const now = Date.now();
-      const sinceSec = Math.floor((now - 5 * 60_000) / 1000);
-      const sinceMs = sinceSec * 1000;
-      const venueOrders = yield* orderService.listRecentOrders(sinceMs, 300);
-      const liveTrades = yield* tracker.listTrades({ mode: "live", sinceMs, limit: 1000 });
-
-      for (const order of venueOrders) {
-        if (order.side !== "BUY") continue;
-        if (order.mappedStatus !== "filled" && order.mappedStatus !== "partial") continue;
-        const filledNotional = (order.filledShares ?? 0) * (order.avgPrice ?? 0);
-        if (filledNotional <= 0) continue;
-
-        const matchingTrade = liveTrades.items.some((t) => {
-          if (t.shadow) return false;
-          if (t.clobOrderId && order.orderId) return t.clobOrderId === order.orderId;
-          const closeInTime = order.updatedAtMs ? Math.abs(t.timestamp - order.updatedAtMs) <= 120_000 : true;
-          const closeInSize = Math.abs(t.size - filledNotional) <= 0.2;
-          return closeInTime && closeInSize;
-        });
-
-        if (filledNotional > config.risk.maxTradeSize + 1e-6) {
-          yield* obs({
-            category: "risk",
-            source: "reconciler",
-            action: "oversize_fill_detected",
-            entityType: "trade",
-            entityId: order.orderId ?? null,
-            status: "rejected",
-            mode: "live",
-            payload: {
-              source: "clob",
-              filledNotional,
-              maxTradeSize: config.risk.maxTradeSize,
-            },
-          });
-          yield* haltTradingWithIncident({
-            kind: "oversize_account_fill",
-            message: `Observed venue BUY fill $${filledNotional.toFixed(4)} above maxTradeSize $${config.risk.maxTradeSize.toFixed(4)}.`,
-            fingerprint: `venue-oversize:${order.orderId}:${filledNotional.toFixed(4)}`,
-            details: {
-              source: "clob",
-              orderId: order.orderId,
-              status: order.rawStatus,
-              updatedAtMs: order.updatedAtMs,
-              avgPrice: order.avgPrice,
-              filledShares: order.filledShares,
-              filledNotional,
-            },
-          });
-          continue;
-        }
-
-        if (!matchingTrade) {
-          yield* obs({
-            category: "risk",
-            source: "reconciler",
-            action: "unmatched_fill_detected",
-            entityType: "trade",
-            entityId: order.orderId ?? null,
-            status: "anomaly",
-            mode: "live",
-            payload: {
-              source: "clob",
-              filledNotional,
-              updatedAtMs: order.updatedAtMs,
-            },
-          });
-          yield* haltTradingWithIncident({
-            kind: "unmatched_account_fill",
-            message: "Observed venue BUY fill that does not match any tracked live trade in reconciliation window.",
-            fingerprint: `venue-unmatched:${order.orderId}:${order.updatedAtMs ?? "na"}`,
-            details: {
-              source: "clob",
-              orderId: order.orderId,
-              status: order.rawStatus,
-              updatedAtMs: order.updatedAtMs,
-              avgPrice: order.avgPrice,
-              filledShares: order.filledShares,
-              filledNotional,
-            },
-          });
-        }
-      }
-
-      const activities = yield* activityStore.list({ limit: 500, sinceSec });
-      if (activities.items.length === 0) return;
-
-      for (const a of activities.items) {
-        if (a.action !== "Buy") continue;
-        const matching = liveTrades.items.some((t) => {
-          const closeInTime = Math.abs(t.timestamp - a.timestamp * 1000) <= 120_000;
-          const closeInSize = Math.abs(t.size - a.usdcAmount) <= 0.15;
-          return !t.shadow && closeInTime && closeInSize;
-        });
-
-        if (a.usdcAmount > config.risk.maxTradeSize + 1e-6) {
-          yield* obs({
-            category: "risk",
-            source: "reconciler",
-            action: "oversize_activity_detected",
-            entityType: "activity",
-            entityId: a.id,
-            status: "rejected",
-            mode: "live",
-            payload: {
-              hash: a.hash,
-              usdcAmount: a.usdcAmount,
-              maxTradeSize: config.risk.maxTradeSize,
-            },
-          });
-          yield* haltTradingWithIncident({
-            kind: "oversize_account_fill",
-            message: `Observed account BUY $${a.usdcAmount.toFixed(4)} above maxTradeSize $${config.risk.maxTradeSize.toFixed(4)}.`,
-            fingerprint: `oversize:${a.hash}:${a.timestamp}:${a.usdcAmount}`,
-            details: {
-              action: a.action,
-              hash: a.hash,
-              marketName: a.marketName,
-              tokenName: a.tokenName,
-              timestamp: a.timestamp,
-              usdcAmount: a.usdcAmount,
-            },
-          });
-          continue;
-        }
-
-        if (!matching) {
-          yield* obs({
-            category: "risk",
-            source: "reconciler",
-            action: "unmatched_activity_detected",
-            entityType: "activity",
-            entityId: a.id,
-            status: "anomaly",
-            mode: "live",
-            payload: {
-              hash: a.hash,
-              usdcAmount: a.usdcAmount,
-              timestamp: a.timestamp,
-            },
-          });
-          yield* haltTradingWithIncident({
-            kind: "unmatched_account_fill",
-            message: "Observed account BUY that does not match any tracked live trade in reconciliation window.",
-            fingerprint: `unmatched:${a.hash}:${a.timestamp}:${a.usdcAmount}`,
-            details: {
-              action: a.action,
-              hash: a.hash,
-              marketName: a.marketName,
-              tokenName: a.tokenName,
-              timestamp: a.timestamp,
-              usdcAmount: a.usdcAmount,
-            },
-          });
-        }
-      }
+    const runAccountReconciliation = makeAccountReconciler({
+      maxTradeSize: config.risk.maxTradeSize,
+      listRecentOrders: (sinceMs, limit) => orderService.listRecentOrders(sinceMs, limit),
+      listLiveTrades: (args) => tracker.listTrades(args),
+      listActivity: (args) => activityStore.list(args),
+      obs,
+      haltTradingWithIncident,
     }).pipe(
       Effect.catchAll((err) =>
         obs({
@@ -764,64 +509,18 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* emit({ _tag: "OrderBook", data: s.orderBook });
       }).pipe(Effect.catchAll(() => Effect.void));
 
-    const pollMarkets = Effect.gen(function* () {
-      yield* Ref.update(stateRef, (st) => ({ ...st, lastPoll: Date.now() }));
-      const current = yield* marketService.fetchCurrentBtc5mWindow;
-      const st = yield* Ref.get(stateRef);
-
-      if (current && current.conditionId !== st.currentWindow?.conditionId) {
-        let ptb = current.priceToBeat;
-        if (ptb === null) {
-          const openPrice = yield* feedService.getCurrentBtcPrice;
-          if (openPrice > 0) {
-            ptb = openPrice;
-            yield* Effect.logWarning(`[Engine] priceToBeat not in market metadata — using local feed $${openPrice.toFixed(2)}`);
-          }
-        }
-        const updatedWindow: MarketWindow = { ...current, priceToBeat: ptb };
-        const title = current.title ?? formatWindowTitle(current);
-        yield* Effect.log(`[Engine] New window: ${title} | Price to beat: $${ptb?.toFixed(2) ?? "unknown"}`);
-        yield* obs({
-          category: "engine",
-          source: "engine",
-          action: "window_changed",
-          entityType: "window",
-          entityId: current.conditionId,
-          status: "active",
-          mode: st.mode,
-          payload: {
-            title,
-            conditionId: current.conditionId,
-            startTime: current.startTime,
-            endTime: current.endTime,
-            priceToBeat: ptb,
-          },
-        });
-
-        yield* Ref.update(stateRef, (s) => ({
-          ...s,
-          currentWindow: updatedWindow,
-          windowTitle: title,
-          entriesThisWindow: new Map(),
-          windowSideByStrategy: new Map(),
-          windowEndPriceSnapshot: null,
-          windowEndSnapshotTs: 0,
-          inFlightByCondition: new Map(),
-          retryBackoffUntil: new Map(),
-          retryBackoffCount: new Map(),
-          metrics: { ...s.metrics, windowConditionId: current.conditionId },
-          windowDiagnostics: Object.fromEntries(strategies.map((s) => [s.name, zeroDiagnostics()])),
-        }));
-        yield* riskManager.onNewWindow(current.conditionId);
-        yield* emit({ _tag: "Market", data: updatedWindow });
-      }
-
-      const afterSt = yield* Ref.get(stateRef);
-      const connected = yield* polyClient.isConnected;
-      if (afterSt.currentWindow && (connected || afterSt.mode === "shadow")) {
-        yield* refreshOrderBook(afterSt.currentWindow);
-      }
-    }).pipe(Effect.catchAll((err) => Effect.logError(`[Engine] Market poll error: ${err}`)));
+    const pollMarkets = makeMarketPoller({
+      stateRef,
+      strategies,
+      fetchCurrentWindow: marketService.fetchCurrentBtc5mWindow,
+      fetchCurrentBtcPrice: feedService.getCurrentBtcPrice,
+      isConnected: polyClient.isConnected,
+      onNewWindow: (conditionId) => riskManager.onNewWindow(conditionId),
+      emit,
+      obs,
+      refreshOrderBook,
+      formatWindowTitle,
+    });
 
     const tick = Effect.gen(function* () {
       const st = yield* Ref.get(stateRef);
@@ -972,427 +671,51 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         return;
       }
 
-      // Evaluate strategies
-      for (const strategy of strategies) {
-        const sState = yield* Ref.get(strategy.stateRef);
-        if (!sState.enabled) continue;
-
-        const sCurrent = yield* Ref.get(stateRef);
-        if (!sCurrent.tradingActive) continue;
-        if (strategy.name === "efficiency" && sCurrent.efficiencyIncidentBlocked) {
-          yield* Ref.update(strategy.stateRef, (s) => ({
-            ...s,
-            status: "regime_blocked" as const,
-            statusReason: "Blocked: unresolved efficiency dual-leg incident",
-          }));
-          continue;
-        }
-
-        const regimeCheck = shouldRunInRegime(sState.regimeFilter, regime);
-        if (!regimeCheck.allowed) {
-          yield* Ref.update(strategy.stateRef, (s) => ({
-            ...s, status: "regime_blocked" as const, statusReason: regimeCheck.reason,
-          }));
-          continue;
-        }
-
-        const cooldownMs = STRATEGY_COOLDOWN_MS[strategy.name] ?? 3000;
-        const lastExec = sCurrent.lastStrategyExecution.get(strategy.name) ?? 0;
-        if (now - lastExec < cooldownMs) continue;
-
-        const maxEntries = MAX_ENTRIES_PER_WINDOW[strategy.name] ?? 2;
-        const entries = sCurrent.entriesThisWindow.get(strategy.name) ?? 0;
-        if (entries >= maxEntries) continue;
-
-        const signal = yield* strategy.evaluate(ctx);
-        if (!signal) continue;
-        yield* obs({
-          category: "signal",
-          source: "engine",
-          action: "signal_generated",
-          entityType: "signal",
-          entityId: `${strategy.name}:${signal.timestamp}`,
-          status: "generated",
-          strategy: strategy.name,
-          mode: isShadow ? "shadow" : "live",
-          payload: {
-            side: signal.side,
-            confidence: signal.confidence,
-            reason: signal.reason,
-            maxPrice: signal.maxPrice,
-            size: signal.size,
-          },
-        });
-
-        if (signal.strategy === "momentum") {
-          signal.maxPrice = adjustMomentumMaxPrice(signal, regime, ctx);
-        }
-
-        yield* Ref.update(stateRef, (stUpd) => {
-          bumpDiag(stUpd, strategy.name, "signals", 1, isShadow);
-          return stUpd;
-        });
-
-        const configuredTradeSize = signal.size;
-        const recentPrices = yield* feedService.getRecentPrices(300_000, "binance");
-        
-        const strategyMetrics = sCurrent.metrics.reconciliation.strategies.find((m) => m.strategy === strategy.name);
-        const winRate = isShadow ? strategyMetrics?.shadowWinRate : strategyMetrics?.liveWinRate;
-        const computedSize = positionSizer.computeSize(signal, recentPrices, winRate);
-        const alignedSize = Math.min(computedSize, config.risk.maxTradeSize);
-        signal.size = Math.round(alignedSize * 100) / 100;
-
-        const posSlots = signal.strategy === "efficiency" ? 2 : 1;
-        const check = yield* riskManager.approve(signal, ctx, posSlots);
-        if (!check.approved) {
-          yield* Ref.update(stateRef, (stUpd) => {
-            bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
-            return stUpd;
-          });
-          yield* Effect.log(`[Engine] Risk rejected ${signal.strategy}: ${check.reason}`);
-          yield* obs({
-            category: "risk",
-            source: "risk_manager",
-            action: "signal_rejected",
-            entityType: "signal",
-            entityId: `${signal.strategy}:${signal.timestamp}`,
-            status: "rejected",
-            strategy: signal.strategy,
-            mode: isShadow ? "shadow" : "live",
-            payload: {
-              reason: check.reason,
-              side: signal.side,
-              confidence: signal.confidence,
-              size: signal.size,
-            },
-          });
-          continue;
-        }
-        yield* obs({
-          category: "risk",
-          source: "risk_manager",
-          action: "signal_approved",
-          entityType: "signal",
-          entityId: `${signal.strategy}:${signal.timestamp}`,
-          status: "approved",
-          strategy: signal.strategy,
-          mode: isShadow ? "shadow" : "live",
-          payload: {
-            side: signal.side,
-            confidence: signal.confidence,
-            size: signal.size,
-          },
-        });
-
-        const riskSnap = yield* riskManager.getSnapshot;
-        const entryContext: EntryContext = {
-          strategyName: strategy.name,
-          mode: isShadow ? "shadow" : "live",
-          regime: { ...regime },
-          strategyConfig: { ...sState.config },
-          regimeFilter: { ...sState.regimeFilter },
-          signal: {
-            side: signal.side,
-            confidence: signal.confidence,
-            reason: signal.reason,
-            maxPrice: signal.maxPrice,
-            timestamp: signal.timestamp,
-            telemetry: signal.telemetry ? { ...signal.telemetry } : undefined,
-          },
-          window: {
-            conditionId: ctx.currentWindow?.conditionId ?? "",
-            windowStart: ctx.currentWindow?.startTime ?? 0,
-            windowEnd: ctx.currentWindow?.endTime ?? 0,
-            priceToBeat: ctx.priceToBeat,
-          },
-          microstructure: {
-            bestAskUp: ctx.orderBook.bestAskUp,
-            bestAskDown: ctx.orderBook.bestAskDown,
-            bestBidUp: ctx.orderBook.bestBidUp,
-            bestBidDown: ctx.orderBook.bestBidDown,
-            oracleEstimate: ctx.oracleEstimate,
-            currentBtcPrice: ctx.currentBtcPrice,
-          },
-          riskAtEntry: {
-            openPositions: riskSnap.openPositions,
-            openExposure: riskSnap.openExposure,
-            dailyPnl: riskSnap.dailyPnl,
-            hourlyPnl: riskSnap.hourlyPnl,
-            consecutiveLosses: riskSnap.consecutiveLosses,
-          },
-          sizing: {
-            configuredTradeSize,
-            computedSize,
-            finalNotional: signal.size,
-          },
-        };
-
-        yield* Ref.update(stateRef, (s) => {
-          s.lastStrategyExecution.set(strategy.name, now);
-          return s;
-        });
-
-        const executed = yield* executeStrategy(signal, isShadow, ctx, entryContext);
-        yield* obs({
-          category: "signal",
-          source: "engine",
-          action: "signal_execution_result",
-          entityType: "signal",
-          entityId: `${signal.strategy}:${signal.timestamp}`,
-          status: executed ? "executed" : "not_executed",
-          strategy: signal.strategy,
-          mode: isShadow ? "shadow" : "live",
-          payload: {
-            executed,
-            side: signal.side,
-            finalSize: signal.size,
-          },
-        });
-        if (executed) {
-          yield* Ref.update(stateRef, (s) => {
-            s.entriesThisWindow.set(strategy.name, (s.entriesThisWindow.get(strategy.name) ?? 0) + 1);
-            s.windowSideByStrategy.set(strategy.name, signal.side);
-            return s;
-          });
-        }
-      }
+      yield* runStrategies(ctx, regime, isShadow, now);
 
       yield* emitTick(isShadow);
     });
 
-    const emitTick = (isShadow: boolean) =>
-      Effect.gen(function* () {
-        const now = Date.now();
-        const stBefore = yield* Ref.get(stateRef);
-        if (now - stBefore.metrics.reconciliation.updatedAt > 5_000) {
-          yield* recomputeReconciliation;
-        }
-        const stratStates = yield* Effect.all(strategies.map((s) => s.getState));
-        yield* emit({ _tag: "Strategies", data: stratStates });
-        const livePnl = yield* tracker.getSummary(false);
-        yield* emit({ _tag: "Pnl", data: livePnl });
-        const shadowPnl = yield* tracker.getSummary(true);
-        yield* emit({ _tag: "ShadowPnl", data: shadowPnl });
-        const regime = (yield* Ref.get(stateRef)).regime;
-        yield* emit({ _tag: "Regime", data: regime });
-        const killSwitch = yield* riskManager.getKillSwitchStatus;
-        yield* emit({ _tag: "KillSwitch", data: killSwitch });
-        const risk = yield* riskManager.getSnapshot;
-        yield* emit({ _tag: "Risk", data: risk });
-        const st = yield* Ref.get(stateRef);
-        yield* emit({
-          _tag: "Metrics",
-          data: { ...st.metrics, rolling: st.rollingDiagnostics, window: st.windowDiagnostics },
-        });
-      });
+    const emitTick = makeSnapshotEmitter({
+      stateRef,
+      strategies,
+      emit,
+      recomputeReconciliation,
+      getLiveSummary: tracker.getSummary(false),
+      getShadowSummary: tracker.getSummary(true),
+      getKillSwitchStatus: riskManager.getKillSwitchStatus,
+      getRiskSnapshot: riskManager.getSnapshot,
+    });
 
-    const executeStrategy = (signal: Signal, shadow: boolean, ctx: MarketContext, entryCtx: EntryContext) =>
-      Effect.gen(function* () {
-        const st = yield* Ref.get(stateRef);
-        if (!st.currentWindow) return false;
-        const conditionId = st.currentWindow.conditionId;
-        const ptb = st.currentWindow.priceToBeat ?? 0;
+    const { executeStrategy } = makeExecutionHandlers({
+      stateRef,
+      minFillRatioByStrategy: MIN_FILL_RATIO_BY_STRATEGY,
+      shadowSimOptsByStrategy: SHADOW_SIM_OPTS_BY_STRATEGY,
+      fillSimulator,
+      tracker,
+      orderService,
+      riskManager,
+      emit,
+      bumpDiag,
+      recordSignalLatency,
+      haltTradingWithIncident,
+    });
 
-        if (shadow) {
-          return yield* executeShadow(signal, conditionId, ptb, ctx, entryCtx);
-        }
-        return yield* executeLive(signal, conditionId, ptb, entryCtx);
-      });
-
-    const executeShadow = (signal: Signal, conditionId: string, ptb: number, ctx: MarketContext, entryCtx: EntryContext) =>
-      Effect.gen(function* () {
-        const st = yield* Ref.get(stateRef);
-        if (!st.currentWindow) return false;
-
-        const tokenId = signal.side === "UP" ? st.currentWindow.upTokenId : st.currentWindow.downTokenId;
-        const notional = signal.size;
-        const book = signal.side === "UP" ? st.orderBook.up : st.orderBook.down;
-        const preflight = preflightShadowBuy(notional, signal.maxPrice, book);
-        if (!preflight.allowed) {
-          yield* Ref.update(stateRef, (s) => {
-            bumpDiag(s, signal.strategy, "liquidityFail", 1, true);
-            return s;
-          });
-          yield* Effect.log(
-            `[Shadow] ${signal.strategy} ${signal.side} skipped: ${preflight.reason}`,
-          );
-          return false;
-        }
-
-        const shares = Math.floor(preflight.requestedShares * 100) / 100;
-
-        const simOpts = SHADOW_SIM_OPTS_BY_STRATEGY[signal.strategy];
-        const result = fillSimulator.simulate("BUY", tokenId, shares, signal.maxPrice, book, simOpts);
-
-        const tradeId = `shadow-${++tradeCounter}-${Date.now()}`;
-        const signalToSubmitMs = Math.max(0, Date.now() - signal.timestamp);
-
-        yield* tracker.shadowStore.createTrade({
-          id: tradeId, conditionId, strategy: signal.strategy, side: signal.side,
-          tokenId, priceToBeatAtEntry: ptb, windowEnd: st.currentWindow.endTime,
-          shadow: true, size: notional, requestedShares: shares,
-          entryContext: entryCtx,
-        });
-        yield* tracker.shadowStore.appendEvent(tradeId, "signal_generated", {
-          conditionId, strategy: signal.strategy, side: signal.side, tokenId,
-          priceToBeatAtEntry: ptb, windowEnd: st.currentWindow.endTime,
-          shadow: true, size: notional, requestedShares: shares,
-          entryContext: entryCtx,
-        });
-        yield* tracker.shadowStore.appendEvent(tradeId, "order_submitted", { shares, price: signal.maxPrice });
-        const submittedRecord = yield* tracker.getTradeRecordById(tradeId, true);
-        if (submittedRecord) {
-          (submittedRecord as any).shadow = true;
-          yield* emit({ _tag: "Trade", data: submittedRecord });
-        }
-
-        yield* Ref.update(stateRef, (s) => {
-          bumpDiag(s, signal.strategy, "submitted", 1, true);
-          recordSignalLatency(s, signalToSubmitMs);
-          return s;
-        });
-
-        if (!result.filled) {
-          yield* tracker.shadowStore.appendEvent(tradeId, "cancel", { reason: result.reason });
-          yield* Ref.update(stateRef, (s) => {
-            if (result.reason === "queue_position_miss") {
-              bumpDiag(s, signal.strategy, "queueMiss", 1, true);
-            } else if (result.reason === "insufficient_liquidity" || result.reason === "no_liquidity") {
-              bumpDiag(s, signal.strategy, "liquidityFail", 1, true);
-            }
-            return s;
-          });
-          const cancelledRecord = yield* tracker.getTradeRecordById(tradeId, true);
-          if (cancelledRecord) {
-            (cancelledRecord as any).shadow = true;
-            yield* emit({ _tag: "Trade", data: cancelledRecord });
-          }
-          yield* Effect.log(`[Shadow] ${signal.strategy} ${signal.side} cancelled: ${result.reason}`);
-          return false;
-        }
-
-        const fillRatio = shares > 0 ? result.filledShares / shares : 0;
-        const minFill = MIN_FILL_RATIO_BY_STRATEGY[signal.strategy] ?? 0.5;
-        if (fillRatio < minFill) {
-          yield* tracker.shadowStore.appendEvent(tradeId, "cancel", { reason: "low_fill_ratio", fillRatio, minFillRatio: minFill });
-          yield* Ref.update(stateRef, (s) => {
-            bumpDiag(s, signal.strategy, "lowFillCancel", 1, true);
-            return s;
-          });
-          const cancelledRecord = yield* tracker.getTradeRecordById(tradeId, true);
-          if (cancelledRecord) {
-            (cancelledRecord as any).shadow = true;
-            yield* emit({ _tag: "Trade", data: cancelledRecord });
-          }
-          return false;
-        }
-
-        if (result.filledShares < shares) {
-          yield* tracker.shadowStore.appendEvent(tradeId, "partial_fill", { shares: result.filledShares, price: result.avgPrice, fee: result.fee });
-          yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "partialFill", 1, true); return s; });
-        } else {
-          yield* tracker.shadowStore.appendEvent(tradeId, "fill", { shares: result.filledShares, price: result.avgPrice, fee: result.fee });
-          yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "fullFill", 1, true); return s; });
-        }
-
-        const record = yield* tracker.getTradeRecordById(tradeId, true);
-        if (record) {
-          (record as any).shadow = true;
-          yield* riskManager.onTradeOpened(record, true);
-          yield* emit({ _tag: "Trade", data: record });
-        }
-
-        yield* Effect.log(`[Shadow] ${signal.strategy} ${signal.side} filled ${result.filledShares} @ $${result.avgPrice.toFixed(4)}`);
-        return true;
-      });
-
-    const executeLive = (signal: Signal, conditionId: string, ptb: number, entryCtx: EntryContext) =>
-      Effect.gen(function* () {
-        const st = yield* Ref.get(stateRef);
-        if (!st.currentWindow) return false;
-
-        const signalToSubmitMs = Math.max(0, Date.now() - signal.timestamp);
-        yield* Ref.update(stateRef, (s) => { recordSignalLatency(s, signalToSubmitMs); return s; });
-
-        if (signal.strategy === "efficiency") {
-          const trades = yield* orderService.executeDualBuy(
-            st.currentWindow.upTokenId, st.currentWindow.downTokenId,
-            st.orderBook.bestAskUp!, st.orderBook.bestAskDown!,
-            signal.size, st.currentWindow.endTime, conditionId, ptb,
-          );
-          let incident = false;
-          for (const trade of trades) {
-            trade.entryContext = entryCtx;
-            if (trade.strategy === "efficiency-partial") {
-              incident = true;
-            }
-            yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
-            yield* tracker.addTrade(trade);
-            if (trade.status === "filled" || trade.status === "partial") {
-              yield* riskManager.onTradeOpened(trade);
-              yield* Ref.update(stateRef, (s) => {
-                bumpDiag(s, signal.strategy, trade.status === "partial" ? "partialFill" : "fullFill", 1, false);
-                return s;
-              });
-            } else if (trade.status === "cancelled" || trade.status === "rejected") {
-              yield* Ref.update(stateRef, (s) => {
-                bumpDiag(s, signal.strategy, "liveRejected", 1, false);
-                return s;
-              });
-            }
-            yield* emit({ _tag: "Trade", data: trade });
-          }
-          if (incident) {
-            yield* Ref.update(stateRef, (s) => ({
-              ...s,
-              efficiencyIncidentBlocked: true,
-              tradingActive: false,
-            }));
-            yield* emit({ _tag: "TradingActive", data: { tradingActive: false } });
-            yield* haltTradingWithIncident({
-              kind: "efficiency_partial_incident",
-              message: "Efficiency dual-leg incident detected. Trading paused until manual intervention.",
-              fingerprint: `efficiency-partial:${conditionId}:${Date.now()}`,
-              details: {
-                conditionId,
-                strategy: signal.strategy,
-                side: signal.side,
-                size: signal.size,
-              },
-            });
-            yield* Effect.logError(
-              "[Engine] Efficiency dual-leg incident detected. Trading paused and efficiency strategy blocked until manual restart.",
-            );
-            return false;
-          }
-          return trades.some(
-            (t) => t.status === "submitted" || t.status === "partial" || t.status === "filled",
-          );
-        }
-
-        const trade = yield* orderService.executeSignal(
-          signal, st.currentWindow.upTokenId, st.currentWindow.downTokenId,
-          st.currentWindow.endTime, conditionId, ptb,
-        );
-        if (trade) {
-          trade.entryContext = entryCtx;
-          yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
-          yield* tracker.addTrade(trade);
-          if (trade.status === "filled" || trade.status === "partial") {
-            yield* riskManager.onTradeOpened(trade);
-            yield* Ref.update(stateRef, (s) => {
-              bumpDiag(s, signal.strategy, trade.status === "partial" ? "partialFill" : "fullFill", 1, false);
-              return s;
-            });
-          } else if (trade.status === "cancelled" || trade.status === "rejected") {
-            yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "liveRejected", 1, false); return s; });
-          }
-          yield* emit({ _tag: "Trade", data: trade });
-          return trade.status === "submitted" || trade.status === "partial" || trade.status === "filled";
-        }
-        yield* Ref.update(stateRef, (s) => { bumpDiag(s, signal.strategy, "liveRejected", 1, false); return s; });
-        return false;
-      });
+    const runStrategies = makeStrategyRunner({
+      stateRef,
+      strategies,
+      strategyCooldownMs: STRATEGY_COOLDOWN_MS,
+      maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
+      maxTradeSize: config.risk.maxTradeSize,
+      getRecentPrices: (windowMs, source) => feedService.getRecentPrices(windowMs, source),
+      computeSize: (signal, recentPrices, winRate) => positionSizer.computeSize(signal, recentPrices, winRate),
+      approveRisk: (signal, ctx, posSlots) => riskManager.approve(signal, ctx, posSlots),
+      getRiskSnapshot: riskManager.getSnapshot,
+      executeStrategy,
+      adjustMomentumMaxPrice,
+      bumpDiag,
+      obs,
+    });
 
     // Start loops
     yield* Ref.update(stateRef, (s) => ({ ...s, running: true }));

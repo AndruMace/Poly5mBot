@@ -454,8 +454,7 @@ export type WSMessageType =
   | "exchangeStatus"
   | "risk"
   | "criticalIncident"
-  | "observabilityEvent"
-  | "error";
+  | "observabilityEvent";
 
 export interface WSMessage {
   type: WSMessageType;
@@ -482,6 +481,56 @@ export interface WSStatusSnapshot {
   risk: RiskSnapshot;
   metrics: EngineMetrics;
   observabilityEvents?: ReadonlyArray<ObservabilityEvent>;
+}
+
+// ── API pagination/query contracts ──
+
+export type TradeFilterMode = "all" | "live" | "shadow";
+export type TradeTimeframe = "1h" | "12h" | "1d" | "7d" | "30d" | "all";
+
+export interface TradesPageResponse {
+  items: ReadonlyArray<TradeRecord>;
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
+  mode: TradeFilterMode;
+  timeframe: TradeTimeframe;
+}
+
+export type AccountActivityAction = "Buy" | "Sell" | "Redeem" | "Deposit";
+
+export interface AccountActivityRecord {
+  id: string;
+  marketName: string;
+  action: AccountActivityAction;
+  usdcAmount: number;
+  tokenAmount: number;
+  tokenName: string;
+  timestamp: number;
+  hash: string;
+  source: "imported_csv";
+  importedAt: number;
+}
+
+export interface AccountActivityPageResponse {
+  items: ReadonlyArray<AccountActivityRecord>;
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
+  timeframe: TradeTimeframe;
+}
+
+export interface ObservabilityEventsPageResponse {
+  items: ReadonlyArray<ObservabilityEvent>;
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
+}
+
+export interface ObservabilityMetricsResponse {
+  total: number;
+  byCategory: Array<{ category: ObservabilityCategory; count: number }>;
+  byStatus: Array<{ status: string; count: number }>;
 }
 
 // ── Notes ──

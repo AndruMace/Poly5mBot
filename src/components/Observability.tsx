@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRxValue } from "@effect-rx/rx-react";
 import { Activity, Search, Save, Clock3, Table2 } from "lucide-react";
 import { observabilityEventsRx } from "../store/index.js";
+import {
+  OBSERVABILITY_CATEGORIES,
+  OBSERVABILITY_ENTITY_TYPES,
+  OBSERVABILITY_SOURCES,
+} from "../../server/src/shared/observability.js";
 import type {
   ObservabilityCategory,
   ObservabilityEntityType,
@@ -48,37 +53,9 @@ const DEFAULT_FILTERS: FiltersState = {
 const STORAGE_KEY = "observabilitySavedFilters";
 const PAGE_SIZE = 200;
 
-const CATEGORY_OPTIONS: Array<ObservabilityCategory> = [
-  "trade_lifecycle",
-  "signal",
-  "risk",
-  "engine",
-  "operator",
-  "incident",
-  "activity",
-  "api",
-];
-
-const SOURCE_OPTIONS: Array<ObservabilitySource> = [
-  "trade_store",
-  "engine",
-  "reconciler",
-  "risk_manager",
-  "api",
-  "incident_store",
-  "activity_store",
-  "system",
-];
-
-const ENTITY_OPTIONS: Array<ObservabilityEntityType> = [
-  "trade",
-  "signal",
-  "strategy",
-  "incident",
-  "activity",
-  "window",
-  "system",
-];
+const CATEGORY_OPTIONS: Array<ObservabilityCategory> = [...OBSERVABILITY_CATEGORIES];
+const SOURCE_OPTIONS: Array<ObservabilitySource> = [...OBSERVABILITY_SOURCES];
+const ENTITY_OPTIONS: Array<ObservabilityEntityType> = [...OBSERVABILITY_ENTITY_TYPES];
 
 const TIMEFRAME_OPTIONS: Array<{ value: TradeTimeframe; label: string }> = [
   { value: "1h", label: "1h" },

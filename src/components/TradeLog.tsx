@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRxValue } from "@effect-rx/rx-react";
 import { tradesRx } from "../store/index.js";
 import { PnLCard } from "./PnLCard.js";
+import { TradeStatusBadge } from "./TradeStatusBadge.js";
 import { History, Download } from "lucide-react";
 import type {
   AccountActivityPageResponse,
@@ -376,7 +377,7 @@ export function TradeLog() {
                       ${t.fee.toFixed(4)}
                     </td>
                     <td className="py-2 px-2 text-center">
-                      <StatusBadge status={t.status} outcome={t.outcome} />
+                      <TradeStatusBadge status={t.status} outcome={t.outcome} />
                     </td>
                     <td className="py-2 px-2 font-mono text-[var(--text-secondary)]">
                       {t.lastEventType ?? "—"}
@@ -464,67 +465,5 @@ export function TradeLog() {
         )}
       </div>
     </div>
-  );
-}
-
-function StatusBadge({
-  status,
-  outcome,
-}: {
-  status: string;
-  outcome: string | null;
-}) {
-  if (status === "resolved") {
-    return (
-      <span
-        className={`px-1.5 py-0.5 rounded ${
-          outcome === "win"
-            ? "bg-[var(--accent-green)]/15 text-[var(--accent-green)]"
-            : "bg-[var(--accent-red)]/15 text-[var(--accent-red)]"
-        }`}
-      >
-        {outcome === "win" ? "Won" : "Lost"}
-      </span>
-    );
-  }
-  if (status === "filled") {
-    return (
-      <span className="px-1.5 py-0.5 rounded bg-[var(--accent-blue)]/15 text-[var(--accent-blue)]">
-        Active
-      </span>
-    );
-  }
-  if (status === "partial") {
-    return (
-      <span className="px-1.5 py-0.5 rounded bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]">
-        Partial
-      </span>
-    );
-  }
-  if (status === "submitted" || status === "pending") {
-    return (
-      <span className="px-1.5 py-0.5 rounded bg-[var(--accent-blue)]/10 text-[var(--text-secondary)]">
-        {status}
-      </span>
-    );
-  }
-  if (status === "cancelled") {
-    return (
-      <span className="px-1.5 py-0.5 rounded bg-[var(--text-secondary)]/15 text-[var(--text-secondary)]">
-        Cancelled
-      </span>
-    );
-  }
-  if (status === "expired") {
-    return (
-      <span className="px-1.5 py-0.5 rounded bg-[var(--accent-yellow)]/10 text-[var(--text-secondary)]">
-        Expired
-      </span>
-    );
-  }
-  return (
-    <span className="px-1.5 py-0.5 rounded bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]">
-      {status}
-    </span>
   );
 }

@@ -409,53 +409,6 @@ export const makeTradeStore = (shadow: boolean) =>
             "insert into trade_events (id, trade_id, stream, event_type, event_ts, data) values ($1, $2, $3, $4, $5, $6::jsonb) on conflict (id) do nothing",
             [event.id, event.tradeId, stream, event.type, event.timestamp, JSON.stringify(event.data ?? {})],
           ).pipe(Effect.catchAll(() => Effect.void));
-          if (updatedTrade) {
-            const record = toTradeRecord(updatedTrade);
-            yield* postgres!.execute(
-              `insert into trades_projection
-                (id, stream, strategy, side, token_id, status, outcome, size, shares, fee, pnl, timestamp_ms, window_end_ms, condition_id, clob_order_id, clob_result, clob_reason, payload)
-               values
-                ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
-               on conflict (id) do update set
-                stream=excluded.stream,
-                strategy=excluded.strategy,
-                side=excluded.side,
-                token_id=excluded.token_id,
-                status=excluded.status,
-                outcome=excluded.outcome,
-                size=excluded.size,
-                shares=excluded.shares,
-                fee=excluded.fee,
-                pnl=excluded.pnl,
-                timestamp_ms=excluded.timestamp_ms,
-                window_end_ms=excluded.window_end_ms,
-                condition_id=excluded.condition_id,
-                clob_order_id=excluded.clob_order_id,
-                clob_result=excluded.clob_result,
-                clob_reason=excluded.clob_reason,
-                payload=excluded.payload`,
-              [
-                record.id,
-                stream,
-                record.strategy,
-                record.side,
-                record.tokenId,
-                record.status,
-                record.outcome,
-                record.size,
-                record.shares,
-                record.fee,
-                record.pnl,
-                record.timestamp,
-                record.windowEnd,
-                record.conditionId,
-                record.clobOrderId ?? null,
-                record.clobResult ?? null,
-                record.clobReason ?? null,
-                JSON.stringify(record),
-              ],
-            ).pipe(Effect.catchAll(() => Effect.void));
-          }
         }
         return event;
       });

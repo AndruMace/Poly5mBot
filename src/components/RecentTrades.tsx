@@ -3,6 +3,7 @@ import { useRxValue } from "@effect-rx/rx-react";
 import { tradesRx, modeRx } from "../store/index.js";
 import { History } from "lucide-react";
 import { getStrategyDisplayName } from "../utils/strategy.js";
+import { TradeStatusBadge } from "./TradeStatusBadge.js";
 
 export function RecentTrades() {
   const trades = useRxValue(tradesRx);
@@ -108,7 +109,7 @@ export function RecentTrades() {
                     ${t.size.toFixed(2)}
                   </td>
                   <td className="py-1.5 px-2 text-center">
-                    <StatusBadge status={t.status} outcome={t.outcome} />
+                    <TradeStatusBadge status={t.status} outcome={t.outcome} compact />
                   </td>
                   <td className="py-1.5 px-2 font-mono text-[var(--text-secondary)]">
                     {t.lastEventType ?? "—"}
@@ -132,60 +133,5 @@ export function RecentTrades() {
         </div>
       )}
     </div>
-  );
-}
-
-function StatusBadge({
-  status,
-  outcome,
-}: {
-  status: string;
-  outcome: string | null;
-}) {
-  if (status === "resolved") {
-    return (
-      <span
-        className={`px-1.5 py-0.5 rounded text-xs ${
-          outcome === "win"
-            ? "bg-[var(--accent-green)]/15 text-[var(--accent-green)]"
-            : "bg-[var(--accent-red)]/15 text-[var(--accent-red)]"
-        }`}
-      >
-        {outcome === "win" ? "Won" : "Lost"}
-      </span>
-    );
-  }
-  if (status === "filled") {
-    return (
-      <span className="px-1.5 py-0.5 rounded text-xs bg-[var(--accent-blue)]/15 text-[var(--accent-blue)]">
-        Active
-      </span>
-    );
-  }
-  if (status === "partial") {
-    return (
-      <span className="px-1.5 py-0.5 rounded text-xs bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]">
-        Partial
-      </span>
-    );
-  }
-  if (status === "cancelled") {
-    return (
-      <span className="px-1.5 py-0.5 rounded text-xs bg-[var(--text-secondary)]/15 text-[var(--text-secondary)]">
-        Cancelled
-      </span>
-    );
-  }
-  if (status === "rejected") {
-    return (
-      <span className="px-1.5 py-0.5 rounded text-xs bg-[var(--accent-red)]/15 text-[var(--accent-red)]">
-        Rejected
-      </span>
-    );
-  }
-  return (
-    <span className="px-1.5 py-0.5 rounded text-xs bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]">
-      {status}
-    </span>
   );
 }

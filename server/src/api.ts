@@ -9,6 +9,11 @@ import { AccountActivityStore } from "./activity/store.js";
 import { CriticalIncidentStore } from "./incident/store.js";
 import { PostgresStorage } from "./storage/postgres.js";
 import { ObservabilityStore } from "./observability/store.js";
+import {
+  OBSERVABILITY_CATEGORIES,
+  OBSERVABILITY_ENTITY_TYPES,
+  OBSERVABILITY_SOURCES,
+} from "./shared/observability.js";
 import type {
   TradeRecord,
   ObservabilityCategory,
@@ -153,10 +158,10 @@ export const handleRequest = (
 
     if (method === "GET") {
       if (path === "/api/status") {
-        const [tradingActive, mode, currentWindow, windowTitle, regime, killSwitches, risk, metrics, prices, oracleEst, btcPrice, feedHealth, connected, walletAddr] = yield* Effect.all([
+        const [tradingActive, mode, currentWindow, windowTitle, regime, killSwitches, risk, metrics, oracleEst, btcPrice, feedHealth, connected, walletAddr] = yield* Effect.all([
           engine.isTradingActive, engine.getMode, engine.getCurrentWindow, engine.getWindowTitle,
           engine.getRegime, engine.getKillSwitchStatus, engine.getRiskSnapshot, engine.getMetrics,
-          feedService.getLatestPrices, feedService.getOracleEstimate, feedService.getCurrentBtcPrice,
+          feedService.getOracleEstimate, feedService.getCurrentBtcPrice,
           feedService.getFeedHealth, polyClient.isConnected, polyClient.getWalletAddress,
         ]);
         return { status: 200, body: { connected, walletAddress: walletAddr, tradingActive, mode, currentWindow, windowTitle, oracleEstimate: oracleEst, btcPrice, feedHealth, regime, killSwitches, risk, metrics } };
@@ -361,35 +366,9 @@ export const handleRequest = (
         const cursor = searchParams.get("cursor") ?? undefined;
         const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
         const sinceMs = timeframeToSinceMs(timeframe);
-        const category = parseEnum<ObservabilityCategory>(searchParams.get("category"), [
-          "trade_lifecycle",
-          "signal",
-          "risk",
-          "engine",
-          "operator",
-          "incident",
-          "activity",
-          "api",
-        ]);
-        const source = parseEnum<ObservabilitySource>(searchParams.get("source"), [
-          "trade_store",
-          "engine",
-          "reconciler",
-          "risk_manager",
-          "api",
-          "incident_store",
-          "activity_store",
-          "system",
-        ]);
-        const entityType = parseEnum<ObservabilityEntityType>(searchParams.get("entityType"), [
-          "trade",
-          "signal",
-          "strategy",
-          "incident",
-          "activity",
-          "window",
-          "system",
-        ]);
+        const category = parseEnum<ObservabilityCategory>(searchParams.get("category"), OBSERVABILITY_CATEGORIES);
+        const source = parseEnum<ObservabilitySource>(searchParams.get("source"), OBSERVABILITY_SOURCES);
+        const entityType = parseEnum<ObservabilityEntityType>(searchParams.get("entityType"), OBSERVABILITY_ENTITY_TYPES);
         const mode = parseMode(searchParams.get("mode"));
         const strategy = searchParams.get("strategy") ?? undefined;
         const status = searchParams.get("status") ?? undefined;
@@ -422,35 +401,9 @@ export const handleRequest = (
       if (path === "/api/observability/metrics") {
         const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
         const sinceMs = timeframeToSinceMs(timeframe);
-        const category = parseEnum<ObservabilityCategory>(searchParams.get("category"), [
-          "trade_lifecycle",
-          "signal",
-          "risk",
-          "engine",
-          "operator",
-          "incident",
-          "activity",
-          "api",
-        ]);
-        const source = parseEnum<ObservabilitySource>(searchParams.get("source"), [
-          "trade_store",
-          "engine",
-          "reconciler",
-          "risk_manager",
-          "api",
-          "incident_store",
-          "activity_store",
-          "system",
-        ]);
-        const entityType = parseEnum<ObservabilityEntityType>(searchParams.get("entityType"), [
-          "trade",
-          "signal",
-          "strategy",
-          "incident",
-          "activity",
-          "window",
-          "system",
-        ]);
+        const category = parseEnum<ObservabilityCategory>(searchParams.get("category"), OBSERVABILITY_CATEGORIES);
+        const source = parseEnum<ObservabilitySource>(searchParams.get("source"), OBSERVABILITY_SOURCES);
+        const entityType = parseEnum<ObservabilityEntityType>(searchParams.get("entityType"), OBSERVABILITY_ENTITY_TYPES);
         const mode = parseMode(searchParams.get("mode"));
         const strategy = searchParams.get("strategy") ?? undefined;
         const status = searchParams.get("status") ?? undefined;
