@@ -13,6 +13,8 @@ import { PositionSizer } from "../../src/engine/position-sizer.js";
 import { RegimeDetector } from "../../src/engine/regime-detector.js";
 import { EventBus } from "../../src/engine/event-bus.js";
 import { TradeStore, ShadowTradeStore } from "../../src/engine/trade-store.js";
+import { AccountActivityStore } from "../../src/activity/store.js";
+import { CriticalIncidentStore } from "../../src/incident/store.js";
 import { makeTestConfigLayer } from "../helpers.js";
 import type { MarketWindow, Signal, StrategyState, TradeRecord } from "../../src/types.js";
 
@@ -340,6 +342,7 @@ function makeHarness(opts: {
         filledShares: null,
         reason: null,
       }),
+    listRecentOrders: () => Effect.succeed([]),
   } as any);
 
   const polyLayer = Layer.succeed(PolymarketClient, {
@@ -433,6 +436,8 @@ function makeHarness(opts: {
     Layer.provideMerge(regimeLayer),
     Layer.provideMerge(EventBus.Default),
     Layer.provideMerge(PnLTracker.Default),
+    Layer.provideMerge(AccountActivityStore.Default),
+    Layer.provideMerge(CriticalIncidentStore.Default),
     Layer.provideMerge(TradeStore.Default),
     Layer.provideMerge(ShadowTradeStore.Default),
     Layer.provideMerge(fsLayer),

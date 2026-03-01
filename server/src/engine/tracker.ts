@@ -131,8 +131,20 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
         }
       });
 
-    const resolveTrade = (id: string, won: boolean, shadow = false) =>
-      getStore(shadow).appendEvent(id, "resolved", { won });
+    const resolveTrade = (
+      id: string,
+      won: boolean,
+      shadow = false,
+      details?: {
+        outcomeSource?: "venue" | "estimated";
+        settlementWinnerSide?: "UP" | "DOWN" | null;
+      },
+    ) =>
+      getStore(shadow).appendEvent(id, "resolved", {
+        won,
+        outcomeSource: details?.outcomeSource ?? "estimated",
+        settlementWinnerSide: details?.settlementWinnerSide ?? null,
+      });
 
     const expireTrade = (id: string, closingBtcPrice: number, shadow = false) =>
       getStore(shadow).appendEvent(id, "expired", { closingBtcPrice });

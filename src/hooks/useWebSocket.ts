@@ -22,6 +22,7 @@ import {
   metricsRx,
   feedHealthRx,
   wsLastMessageTsRx,
+  incidentsRx,
   MAX_PRICE_HISTORY,
   MAX_PNL_HISTORY,
   emptyOrderBook,
@@ -39,6 +40,7 @@ import type {
   PnLSummary,
   WSStatusSnapshot,
   TradesPageResponse,
+  CriticalIncident,
 } from "../types/index.js";
 
 const PRICE_HISTORY_FLUSH_MS = 1000;
@@ -145,6 +147,18 @@ export function useWebSocket() {
     let tradeBackfillInFlight = false;
     let lastTradeBackfillAt = 0;
     const pendingTrades = new Map<string, TradeRecord>();
+    const mergeIncidents = (
+      current: CriticalIncident[],
+      incoming: CriticalIncident[],
+      limit = 200,
+    ): CriticalIncident[] => {
+      const merged = new Map<string, CriticalIncident>();
+      for (const i of current) merged.set(i.id, i);
+      for (const i of incoming) merged.set(i.id, i);
+      return Array.from(merged.values())
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, limit);
+    };
 
     const clearReconnectTimer = () => {
       if (!reconnectTimer) return;
@@ -236,6 +250,22 @@ export function useWebSocket() {
         })
         .finally(() => {
           rehydrateInFlight = false;
+        });
+    };
+
+    const fetchIncidents = () => {
+      if (destroyed) return;
+      void fetch("/api/incidents?limit=200")
+        .then(async (res) => {
+          if (!res.ok) return null;
+          return (await res.json()) as { items?: CriticalIncident[] };
+        })
+        .then((payload) => {
+          if (!payload?.items || destroyed) return;
+          registry.update(incidentsRx, (prev) => mergeIncidents(prev, payload.items ?? []));
+        })
+        .catch(() => {
+          /* best effort */
         });
     };
 
@@ -358,6 +388,7 @@ export function useWebSocket() {
           ? { ...emptyFeedHealth, ...data.feedHealth }
           : { ...emptyFeedHealth },
       );
+      fetchIncidents();
     }
 
     function connect() {
@@ -379,6 +410,7 @@ export function useWebSocket() {
         if (destroyed || activeSocket !== ws) return;
         registry.set(connectedRx, true);
         registry.set(wsLastMessageTsRx, Date.now());
+        fetchIncidents();
       };
 
       ws.onmessage = (event) => {
@@ -454,6 +486,9 @@ export function useWebSocket() {
                   ...emptyMetrics,
                   ...(msg.data as any),
                 });
+                break;
+              case "criticalIncident":
+                registry.update(incidentsRx, (prev) => mergeIncidents(prev, [msg.data as CriticalIncident]));
                 break;
               case "feedHealth":
                 registry.set(feedHealthRx, {

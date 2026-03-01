@@ -1,5 +1,5 @@
 import { Effect, Ref } from "effect";
-import type { MarketWindow } from "../types.js";
+import type { MarketWindow, Side } from "../types.js";
 import { PolymarketError } from "../errors.js";
 
 const FIVE_MIN_S = 300;
@@ -28,6 +28,15 @@ interface GammaMarket {
   active: boolean;
   closed: boolean;
   acceptingOrders: boolean;
+  outcomePrices?: string | number[];
+  outcome_prices?: string | number[];
+  winningOutcome?: string | number;
+  winner?: string | number;
+}
+
+interface SettlementResult {
+  resolved: boolean;
+  winnerSide: Side | null;
 }
 
 function extractPriceToBeat(
@@ -77,6 +86,68 @@ function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
     priceToBeat,
     resolved: m.closed,
   };
+}
+
+function parseArrayField<T = string>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value === "string" && value.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed as T[];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function sideFromOutcomeLabel(label: unknown): Side | null {
+  if (typeof label !== "string") return null;
+  const normalized = label.toLowerCase();
+  if (normalized === "up" || normalized === "yes") return "UP";
+  if (normalized === "down" || normalized === "no") return "DOWN";
+  return null;
+}
+
+export function inferSettlementWinnerFromMarket(market: GammaMarket): SettlementResult {
+  if (!market.closed) return { resolved: false, winnerSide: null };
+  const outcomes = parseArrayField<string>(market.outcomes);
+  const pricesRaw = parseArrayField<number | string>(
+    market.outcomePrices ?? market.outcome_prices ?? [],
+  );
+  const prices = pricesRaw.map((v) => Number(v)).filter((n) => Number.isFinite(n));
+
+  if (prices.length > 0 && outcomes.length === prices.length) {
+    let maxIdx = -1;
+    let max = -1;
+    let second = -1;
+    for (let i = 0; i < prices.length; i++) {
+      const p = prices[i]!;
+      if (p > max) {
+        second = max;
+        max = p;
+        maxIdx = i;
+      } else if (p > second) {
+        second = p;
+      }
+    }
+    if (maxIdx >= 0 && max >= 0.99 && max - second > 0.2) {
+      return { resolved: true, winnerSide: sideFromOutcomeLabel(outcomes[maxIdx]) };
+    }
+  }
+
+  const winnerHint = market.winningOutcome ?? market.winner;
+  if (typeof winnerHint === "number" && Number.isInteger(winnerHint)) {
+    const idx = winnerHint;
+    if (idx >= 0 && idx < outcomes.length) {
+      return { resolved: true, winnerSide: sideFromOutcomeLabel(outcomes[idx]) };
+    }
+  }
+  if (typeof winnerHint === "string") {
+    return { resolved: true, winnerSide: sideFromOutcomeLabel(winnerHint) };
+  }
+
+  return { resolved: true, winnerSide: null };
 }
 
 export function formatWindowTitle(window: MarketWindow): string {
@@ -149,6 +220,36 @@ export class MarketService extends Effect.Service<MarketService>()("MarketServic
       return final.window;
     });
 
-    return { fetchCurrentBtc5mWindow, formatWindowTitle } as const;
+    const fetchSettlementByCondition = (conditionId: string) =>
+      Effect.gen(function* () {
+        const cid = conditionId.toLowerCase();
+        const endpoints = [
+          `${GAMMA_API}/markets?conditionId=${cid}`,
+          `${GAMMA_API}/markets?condition_id=${cid}`,
+          `${GAMMA_API}/markets?condition_ids=${cid}`,
+        ];
+
+        for (const url of endpoints) {
+          const candidate = yield* Effect.tryPromise({
+            try: async () => {
+              const res = await fetch(url);
+              if (!res.ok) return null;
+              const body = (await res.json()) as unknown;
+              const markets = Array.isArray(body) ? body : [];
+              const match = (markets as GammaMarket[]).find(
+                (m) => (m.conditionId ?? "").toLowerCase() === cid,
+              );
+              return match ?? null;
+            },
+            catch: () => null,
+          }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+          if (!candidate) continue;
+          return inferSettlementWinnerFromMarket(candidate);
+        }
+        return null;
+      });
+
+    return { fetchCurrentBtc5mWindow, fetchSettlementByCondition, formatWindowTitle } as const;
   }),
 }) {}

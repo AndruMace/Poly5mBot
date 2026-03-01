@@ -5,6 +5,9 @@ import { TradingEngine } from "../../src/engine/engine.js";
 import { FeedService } from "../../src/feeds/manager.js";
 import { PolymarketClient } from "../../src/polymarket/client.js";
 import { NotesStore } from "../../src/notes-store.js";
+import { AccountActivityStore } from "../../src/activity/store.js";
+import { CriticalIncidentStore } from "../../src/incident/store.js";
+import { PostgresStorage } from "../../src/storage/postgres.js";
 import { AppConfig } from "../../src/config.js";
 import type { AppConfigShape } from "../../src/config.js";
 import type { WSStatusSnapshot } from "../../src/types.js";
@@ -44,6 +47,10 @@ const baseConfig: AppConfigShape = {
   server: {
     port: 3001,
     operatorToken: "secret",
+  },
+  storage: {
+    backend: "file",
+    databaseUrl: "",
   },
   test: {
     ciLiveIntegration: false,
@@ -167,12 +174,46 @@ const fakeNotes = {
   save: (text: string) => Effect.succeed({ text, updatedAt: Date.now() }),
 };
 
+const fakeActivityStore = {
+  list: (_query: any) =>
+    Effect.succeed({
+      items: [],
+      hasMore: false,
+      nextCursor: null,
+    }),
+  importCsv: (_csv: string) => Effect.succeed({ imported: 0, skipped: 0 }),
+};
+
+const fakeIncidentStore = {
+  list: (_query: any) => Effect.succeed([]),
+  create: (_input: any) =>
+    Effect.succeed({
+      id: "inc-test",
+      kind: "reconciler_error",
+      severity: "critical",
+      message: "test",
+      fingerprint: "fp",
+      details: {},
+      createdAt: Date.now(),
+      resolvedAt: null,
+    }),
+  resolve: (_id: string) => Effect.succeed(null),
+};
+
+const fakePostgresStorage = {
+  health: Effect.succeed({ enabled: false, ok: true }),
+  query: (_text: string, _values?: unknown[]) => Effect.succeed([]),
+};
+
 const testLayer = Layer.mergeAll(
   Layer.succeed(AppConfig, baseConfig as any),
   Layer.succeed(TradingEngine, fakeEngine as any),
   Layer.succeed(FeedService, fakeFeedService as any),
   Layer.succeed(PolymarketClient, fakePoly as any),
   Layer.succeed(NotesStore, fakeNotes as any),
+  Layer.succeed(AccountActivityStore, fakeActivityStore as any),
+  Layer.succeed(CriticalIncidentStore, fakeIncidentStore as any),
+  Layer.succeed(PostgresStorage, fakePostgresStorage as any),
 );
 
 describe("API handler integration", () => {
@@ -244,5 +285,15 @@ describe("API handler integration", () => {
     expect(res.contentType).toContain("text/csv");
     expect(res.rawBody).toBe(true);
     expect(typeof res.body).toBe("string");
+  });
+
+  it("returns account activity payload", async () => {
+    const res = await Effect.runPromise(
+      handleRequest("/api/activity?timeframe=30d&limit=25", "GET", undefined, false, {}).pipe(
+        Effect.provide(testLayer),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as any).items).toEqual([]);
   });
 });

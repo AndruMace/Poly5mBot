@@ -6,6 +6,7 @@ export type Side = "UP" | "DOWN";
 export type TradingMode = "live" | "shadow";
 export type TradeStatus = "pending" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "resolved";
 export type TradeOutcome = "win" | "loss";
+export type ResolutionSource = "venue" | "estimated";
 export type TradeEventType =
   | "signal_generated"
   | "order_submitted"
@@ -89,6 +90,8 @@ export interface TradeRecord {
   fee: number;
   status: TradeStatus;
   outcome: TradeOutcome | null;
+  resolutionSource?: ResolutionSource;
+  settlementWinnerSide?: Side | null;
   pnl: number;
   timestamp: number;
   windowEnd: number;
@@ -181,6 +184,8 @@ export interface Trade {
   size: number;
   pnl: number;
   outcome: TradeOutcome | null;
+  resolutionSource?: ResolutionSource;
+  settlementWinnerSide?: Side | null;
   closingBtcPrice?: number;
   clobOrderId?: string;
   clobResult?: string;
@@ -350,6 +355,25 @@ export interface RiskSnapshot {
   pauseRemainingSec: number;
 }
 
+// ── Critical incidents ──
+
+export type CriticalIncidentKind =
+  | "unmatched_account_fill"
+  | "oversize_account_fill"
+  | "efficiency_partial_incident"
+  | "reconciler_error";
+
+export interface CriticalIncident {
+  id: string;
+  kind: CriticalIncidentKind;
+  severity: "critical";
+  message: string;
+  fingerprint: string;
+  details: Record<string, unknown>;
+  createdAt: number;
+  resolvedAt: number | null;
+}
+
 // ── Market context ──
 
 export interface MarketContext {
@@ -383,6 +407,7 @@ export type WSMessageType =
   | "feedHealth"
   | "exchangeStatus"
   | "risk"
+  | "criticalIncident"
   | "error";
 
 export interface WSMessage {
@@ -439,7 +464,8 @@ export type EngineEvent =
   | { readonly _tag: "TradingActive"; readonly data: { readonly tradingActive: boolean } }
   | { readonly _tag: "Mode"; readonly data: { readonly mode: TradingMode } }
   | { readonly _tag: "Regime"; readonly data: RegimeState }
-  | { readonly _tag: "Metrics"; readonly data: EngineMetrics };
+  | { readonly _tag: "Metrics"; readonly data: EngineMetrics }
+  | { readonly _tag: "CriticalIncident"; readonly data: CriticalIncident };
 
 // ── Schema definitions for serialization boundaries ──
 

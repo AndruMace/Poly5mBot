@@ -4,6 +4,8 @@ import { tradesRx } from "../store/index.js";
 import { PnLCard } from "./PnLCard.js";
 import { History, Download } from "lucide-react";
 import type {
+  AccountActivityPageResponse,
+  AccountActivityRecord,
   TradeFilterMode,
   TradeRecord,
   TradesPageResponse,
@@ -25,10 +27,14 @@ const CSV_TIMEFRAME_OPTIONS: Array<{
 
 export function TradeLog() {
   const wsTrades = useRxValue(tradesRx);
+  const [viewMode, setViewMode] = useState<"strategy" | "activity">("strategy");
   const [filter, setFilter] = useState<TradeFilterMode>("all");
   const [rows, setRows] = useState<TradeRecord[]>([]);
+  const [activityRows, setActivityRows] = useState<AccountActivityRecord[]>([]);
   const [loading, setLoading] = useState(false);
+  const [activityLoading, setActivityLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [activityError, setActivityError] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([null]);
@@ -71,10 +77,36 @@ export function TradeLog() {
     [],
   );
 
+  const loadActivity = useCallback(async () => {
+    setActivityLoading(true);
+    setActivityError(null);
+    try {
+      const qs = new URLSearchParams({
+        timeframe: DISPLAY_TIMEFRAME,
+        limit: String(PAGE_SIZE),
+      });
+      const res = await fetch(`/api/activity?${qs.toString()}`);
+      if (!res.ok) throw new Error(`Account activity request failed (${res.status})`);
+      const payload = (await res.json()) as AccountActivityPageResponse;
+      setActivityRows([...payload.items]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Could not load account activity";
+      setActivityError(msg);
+      setActivityRows([]);
+    } finally {
+      setActivityLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     setCursorHistory([null]);
     void loadPage(filter, null, 0);
   }, [filter, loadPage]);
+
+  useEffect(() => {
+    if (viewMode !== "activity") return;
+    void loadActivity();
+  }, [loadActivity, viewMode]);
 
   useEffect(() => {
     if (pageIndex !== 0 || wsTrades.length === 0) return;
@@ -102,17 +134,17 @@ export function TradeLog() {
   async function exportCsv() {
     setExporting(true);
     try {
-      const qs = new URLSearchParams({
-        mode: filter,
-        timeframe: csvTimeframe,
-      });
-      const res = await fetch(`/api/trades/export.csv?${qs.toString()}`);
+      const qs = new URLSearchParams({ timeframe: csvTimeframe });
+      if (viewMode === "strategy") qs.set("mode", filter);
+      const endpoint = viewMode === "strategy" ? "/api/trades/export.csv" : "/api/activity/export.csv";
+      const res = await fetch(`${endpoint}?${qs.toString()}`);
       if (!res.ok) throw new Error(`CSV export failed (${res.status})`);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `trades-${csvTimeframe}-${new Date().toISOString().slice(0, 10)}.csv`;
+      const prefix = viewMode === "strategy" ? "trades" : "account-activity";
+      a.download = `${prefix}-${csvTimeframe}-${new Date().toISOString().slice(0, 10)}.csv`;
       a.click();
       URL.revokeObjectURL(url);
     } finally {
@@ -156,10 +188,35 @@ export function TradeLog() {
             <History size={16} className="text-[var(--accent-blue)]" />
             <h2 className="text-lg font-semibold">Trade History</h2>
             <span className="text-xs text-[var(--text-secondary)] ml-2">
-              {loading ? "Loading..." : `${filtered.length} trades`}
+              {viewMode === "strategy"
+                ? loading
+                  ? "Loading..."
+                  : `${filtered.length} trades`
+                : activityLoading
+                  ? "Loading..."
+                  : `${activityRows.length} activity rows`}
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
+              {[
+                { label: "Strategy Trades", value: "strategy" as const },
+                { label: "Account Activity", value: "activity" as const },
+              ].map((btn) => (
+                <button
+                  key={btn.value}
+                  onClick={() => setViewMode(btn.value)}
+                  className={`px-3 py-1 text-xs transition-colors ${
+                    viewMode === btn.value
+                      ? "bg-[var(--accent-blue)] text-white"
+                      : "bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  {btn.label}
+                </button>
+              ))}
+            </div>
+            {viewMode === "strategy" && (
             <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
               {filterBtns.map((btn) => (
                 <button
@@ -175,6 +232,7 @@ export function TradeLog() {
                 </button>
               ))}
             </div>
+            )}
             <select
               value={csvTimeframe}
               onChange={(e) => setCsvTimeframe(e.target.value as TradeTimeframe)}
@@ -199,6 +257,7 @@ export function TradeLog() {
 
         <div className="mb-3 flex items-center justify-between text-xs text-[var(--text-secondary)]">
           <span>Showing {DISPLAY_TIMEFRAME === "30d" ? "past 30 days" : DISPLAY_TIMEFRAME}</span>
+          {viewMode === "strategy" && (
           <div className="flex items-center gap-2">
             <button
               onClick={() => void goToPrevPage()}
@@ -216,9 +275,10 @@ export function TradeLog() {
               Next
             </button>
           </div>
+          )}
         </div>
 
-        {lossByStrategy.length > 0 && (
+        {viewMode === "strategy" && lossByStrategy.length > 0 && (
           <div className="mb-3 rounded-lg border border-[var(--accent-red)]/35 bg-[var(--accent-red)]/8 p-3">
             <div className="mb-2 text-xs font-medium text-[var(--accent-red)]">
               Losses By Strategy (Resolved)
@@ -239,15 +299,15 @@ export function TradeLog() {
           </div>
         )}
 
-        {loadError ? (
+        {viewMode === "strategy" && loadError ? (
           <div className="text-sm text-[var(--accent-red)] text-center py-8">
             {loadError}
           </div>
-        ) : filtered.length === 0 ? (
+        ) : viewMode === "strategy" && filtered.length === 0 ? (
           <div className="text-sm text-[var(--text-secondary)] text-center py-12">
             No trades recorded yet. Enable strategies and wait for signals.
           </div>
-        ) : (
+        ) : viewMode === "strategy" ? (
           <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
             <table className="w-full text-xs">
               <thead className="sticky top-0 bg-[var(--bg-card)]">
@@ -264,6 +324,7 @@ export function TradeLog() {
                   <th className="text-center py-2 px-2 font-medium">Status</th>
                   <th className="text-left py-2 px-2 font-medium">Last Event</th>
                   <th className="text-left py-2 px-2 font-medium">CLOB</th>
+                  <th className="text-left py-2 px-2 font-medium">Resolution</th>
                   <th className="text-right py-2 px-2 font-medium">P&L</th>
                 </tr>
               </thead>
@@ -339,6 +400,16 @@ export function TradeLog() {
                         </div>
                       )}
                     </td>
+                    <td className="py-2 px-2 text-[11px]">
+                      {t.status === "resolved" ? (
+                        <span className="font-mono text-[var(--text-secondary)]">
+                          {t.resolutionSource === "venue" ? "venue" : "estimated"}
+                          {t.settlementWinnerSide ? ` (${t.settlementWinnerSide})` : ""}
+                        </span>
+                      ) : (
+                        <span className="text-[var(--text-secondary)]">—</span>
+                      )}
+                    </td>
                     <td
                       className={`py-2 px-2 text-right font-mono font-medium ${
                         t.pnl >= 0
@@ -348,6 +419,43 @@ export function TradeLog() {
                     >
                       {t.pnl >= 0 ? "+" : ""}${t.pnl.toFixed(2)}
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : activityError ? (
+          <div className="text-sm text-[var(--accent-red)] text-center py-8">{activityError}</div>
+        ) : activityRows.length === 0 ? (
+          <div className="text-sm text-[var(--text-secondary)] text-center py-12">
+            No account activity imported yet. Use `/api/activity/import-csv` to ingest Polymarket CSV.
+          </div>
+        ) : (
+          <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-[var(--bg-card)]">
+                <tr className="text-[var(--text-secondary)] border-b border-[var(--border)]">
+                  <th className="text-left py-2 px-2 font-medium">Time</th>
+                  <th className="text-left py-2 px-2 font-medium">Market</th>
+                  <th className="text-left py-2 px-2 font-medium">Action</th>
+                  <th className="text-right py-2 px-2 font-medium">USDC</th>
+                  <th className="text-right py-2 px-2 font-medium">Tokens</th>
+                  <th className="text-left py-2 px-2 font-medium">Token</th>
+                  <th className="text-left py-2 px-2 font-medium">Hash</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activityRows.map((a) => (
+                  <tr key={a.id} className="border-t border-[var(--border)]/50 hover:bg-[var(--bg-secondary)]/30">
+                    <td className="py-2 px-2 font-mono text-[var(--text-secondary)]">
+                      {new Date(a.timestamp * 1000).toLocaleTimeString()}
+                    </td>
+                    <td className="py-2 px-2">{a.marketName}</td>
+                    <td className="py-2 px-2">{a.action}</td>
+                    <td className="py-2 px-2 text-right font-mono">${a.usdcAmount.toFixed(6)}</td>
+                    <td className="py-2 px-2 text-right font-mono">{a.tokenAmount.toFixed(6)}</td>
+                    <td className="py-2 px-2">{a.tokenName || "—"}</td>
+                    <td className="py-2 px-2 font-mono text-[11px]">{a.hash || "—"}</td>
                   </tr>
                 ))}
               </tbody>

@@ -1,6 +1,8 @@
-import { Effect, Ref, Chunk, Schedule, Queue } from "effect";
+import { Effect, Ref, Chunk, Schedule, Queue, Option } from "effect";
 import { FileSystem } from "@effect/platform";
 import crypto from "crypto";
+import { AppConfig } from "../config.js";
+import { PostgresStorage } from "../storage/postgres.js";
 import type {
   Trade,
   TradeEvent,
@@ -75,6 +77,11 @@ function applyEventToTrade(trade: Trade, event: TradeEvent): void {
       trade.status = "resolved";
       const won = Boolean(event.data.won);
       trade.outcome = won ? "win" : "loss";
+      trade.resolutionSource = event.data.outcomeSource === "venue" ? "venue" : "estimated";
+      trade.settlementWinnerSide =
+        event.data.settlementWinnerSide === "UP" || event.data.settlementWinnerSide === "DOWN"
+          ? event.data.settlementWinnerSide
+          : null;
       const realizedCost = trade.avgFillPrice * trade.filledShares;
       trade.pnl = won
         ? trade.filledShares * 1.0 - realizedCost - trade.totalFees
@@ -109,6 +116,8 @@ function makeTrade(init: {
     totalFees: 0,
     pnl: 0,
     outcome: null,
+    resolutionSource: undefined,
+    settlementWinnerSide: null,
     clobOrderId: init.clobOrderId,
     clobResult: init.clobResult,
     clobReason: init.clobReason,
@@ -128,6 +137,8 @@ export function toTradeRecord(t: Trade): TradeRecord {
     fee: t.totalFees,
     status: t.status,
     outcome: t.outcome,
+    resolutionSource: t.resolutionSource,
+    settlementWinnerSide: t.settlementWinnerSide ?? null,
     pnl: t.pnl,
     timestamp: t.events[0]?.timestamp ?? Date.now(),
     windowEnd: t.windowEnd,
@@ -238,19 +249,31 @@ export interface TradeStoreService {
 
 export const makeTradeStore = (shadow: boolean) =>
   Effect.gen(function* () {
+    const configOpt = yield* Effect.serviceOption(AppConfig);
+    const postgresOpt = yield* Effect.serviceOption(PostgresStorage);
+    const backend = Option.match(configOpt, {
+      onNone: () => "file" as const,
+      onSome: (cfg) => cfg.storage.backend,
+    });
+    const postgres = Option.getOrUndefined(postgresOpt);
     const fs = yield* FileSystem.FileSystem;
     const filePath = shadow ? SHADOW_FILE : LIVE_FILE;
+    const stream = shadow ? "shadow" : "live";
+    const useFile = backend === "file" || backend === "dual";
+    const usePostgres = !!postgres && (backend === "postgres" || backend === "dual");
     const tradesRef = yield* Ref.make(new Map<string, Trade>());
     const writeQueue = yield* Queue.unbounded<string>();
 
     const flushLoop = Effect.gen(function* () {
       const items = yield* Queue.takeAll(writeQueue);
       if (Chunk.size(items) === 0) return;
-      const data = Chunk.toReadonlyArray(items).join("");
-      yield* fs.makeDirectory(DATA_DIR, { recursive: true }).pipe(Effect.catchAll(() => Effect.void));
-      yield* fs.writeFileString(filePath, data, { flag: "a" }).pipe(
-        Effect.catchAll((err) => Effect.logError(`[TradeStore] Failed to persist events: ${err}`)),
-      );
+      if (useFile) {
+        const data = Chunk.toReadonlyArray(items).join("");
+        yield* fs.makeDirectory(DATA_DIR, { recursive: true }).pipe(Effect.catchAll(() => Effect.void));
+        yield* fs.writeFileString(filePath, data, { flag: "a" }).pipe(
+          Effect.catchAll((err) => Effect.logError(`[TradeStore] Failed to persist events: ${err}`)),
+        );
+      }
     }).pipe(
       Effect.repeat(Schedule.fixed("200 millis")),
       Effect.catchAll(() => Effect.void),
@@ -259,22 +282,51 @@ export const makeTradeStore = (shadow: boolean) =>
     yield* flushLoop;
 
     const replay = Effect.gen(function* () {
-      const exists = yield* fs.exists(filePath);
-      if (!exists) return;
-      const content = yield* fs.readFileString(filePath);
-      const lines = content.split("\n").filter(Boolean);
       const initEvents: TradeEvent[] = [];
-      for (const line of lines) {
-        try {
-          initEvents.push(JSON.parse(line));
-        } catch {
-          /* skip corrupt lines */
+      if (useFile) {
+        const exists = yield* fs.exists(filePath);
+        if (exists) {
+          const content = yield* fs.readFileString(filePath);
+          const lines = content.split("\n").filter(Boolean);
+          for (const line of lines) {
+            try {
+              initEvents.push(JSON.parse(line));
+            } catch {
+              /* skip corrupt lines */
+            }
+          }
         }
       }
-      const tradeIds = new Set(initEvents.map((e) => e.tradeId));
+      if (usePostgres) {
+        const rows = yield* postgres!.query<{
+          id: string;
+          trade_id: string;
+          event_type: string;
+          event_ts: number;
+          data: Record<string, unknown>;
+        }>(
+          "select id, trade_id, event_type, event_ts, data from trade_events where stream = $1 order by event_ts asc",
+          [stream],
+        ).pipe(Effect.catchAll(() => Effect.succeed([])));
+        for (const row of rows) {
+          initEvents.push({
+            id: String(row.id),
+            tradeId: String(row.trade_id),
+            type: row.event_type as TradeEventType,
+            timestamp: Number(row.event_ts ?? 0),
+            data: row.data ?? {},
+          });
+        }
+      }
+      const deduped = new Map<string, TradeEvent>();
+      for (const e of initEvents) {
+        deduped.set(e.id, e);
+      }
+      const replayEvents = [...deduped.values()].sort((a, b) => a.timestamp - b.timestamp);
+      const tradeIds = new Set(replayEvents.map((e) => e.tradeId));
       yield* Ref.update(tradesRef, (trades) => {
         for (const id of tradeIds) {
-          const first = initEvents.find((e) => e.tradeId === id && e.type === "signal_generated");
+          const first = replayEvents.find((e) => e.tradeId === id && e.type === "signal_generated");
           if (first?.data) {
             const ec = first.data.entryContext as EntryContext | undefined;
             const t = makeTrade({
@@ -293,13 +345,13 @@ export const makeTradeStore = (shadow: boolean) =>
             trades.set(id, t);
           }
         }
-        for (const event of initEvents) {
+        for (const event of replayEvents) {
           const trade = trades.get(event.tradeId);
           if (trade) applyEventToTrade(trade, event);
         }
         return trades;
       });
-      yield* Effect.log(`[TradeStore] Replayed ${initEvents.length} events for ${tradeIds.size} trades`);
+      yield* Effect.log(`[TradeStore] Replayed ${replayEvents.length} events for ${tradeIds.size} trades`);
     }).pipe(Effect.catchAll(() => Effect.log("[TradeStore] No existing events to replay")));
 
     yield* replay;
@@ -318,7 +370,63 @@ export const makeTradeStore = (shadow: boolean) =>
           if (trade) applyEventToTrade(trade, event);
           return trades;
         });
-        yield* Queue.offer(writeQueue, JSON.stringify(event) + "\n");
+        if (useFile) {
+          yield* Queue.offer(writeQueue, JSON.stringify(event) + "\n");
+        }
+        if (usePostgres) {
+          yield* postgres!.execute(
+            "insert into trade_events (id, trade_id, stream, event_type, event_ts, data) values ($1, $2, $3, $4, $5, $6::jsonb) on conflict (id) do nothing",
+            [event.id, event.tradeId, stream, event.type, event.timestamp, JSON.stringify(event.data ?? {})],
+          ).pipe(Effect.catchAll(() => Effect.void));
+          const updatedTrade = yield* Ref.get(tradesRef).pipe(Effect.map((m) => m.get(event.tradeId)));
+          if (updatedTrade) {
+            const record = toTradeRecord(updatedTrade);
+            yield* postgres!.execute(
+              `insert into trades_projection
+                (id, stream, strategy, side, token_id, status, outcome, size, shares, fee, pnl, timestamp_ms, window_end_ms, condition_id, clob_order_id, clob_result, clob_reason, payload)
+               values
+                ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
+               on conflict (id) do update set
+                stream=excluded.stream,
+                strategy=excluded.strategy,
+                side=excluded.side,
+                token_id=excluded.token_id,
+                status=excluded.status,
+                outcome=excluded.outcome,
+                size=excluded.size,
+                shares=excluded.shares,
+                fee=excluded.fee,
+                pnl=excluded.pnl,
+                timestamp_ms=excluded.timestamp_ms,
+                window_end_ms=excluded.window_end_ms,
+                condition_id=excluded.condition_id,
+                clob_order_id=excluded.clob_order_id,
+                clob_result=excluded.clob_result,
+                clob_reason=excluded.clob_reason,
+                payload=excluded.payload`,
+              [
+                record.id,
+                stream,
+                record.strategy,
+                record.side,
+                record.tokenId,
+                record.status,
+                record.outcome,
+                record.size,
+                record.shares,
+                record.fee,
+                record.pnl,
+                record.timestamp,
+                record.windowEnd,
+                record.conditionId,
+                record.clobOrderId ?? null,
+                record.clobResult ?? null,
+                record.clobReason ?? null,
+                JSON.stringify(record),
+              ],
+            ).pipe(Effect.catchAll(() => Effect.void));
+          }
+        }
         return event;
       });
 

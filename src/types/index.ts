@@ -4,6 +4,7 @@ export type Side = "UP" | "DOWN";
 export type TradingMode = "live" | "shadow";
 export type TradeStatus = "pending" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "resolved";
 export type TradeOutcome = "win" | "loss";
+export type ResolutionSource = "venue" | "estimated";
 export type TradeEventType =
   | "signal_generated"
   | "order_submitted"
@@ -87,6 +88,8 @@ export interface TradeRecord {
   fee: number;
   status: TradeStatus;
   outcome: TradeOutcome | null;
+  resolutionSource?: ResolutionSource;
+  settlementWinnerSide?: Side | null;
   pnl: number;
   timestamp: number;
   windowEnd: number;
@@ -311,6 +314,25 @@ export interface RiskSnapshot {
   pauseRemainingSec: number;
 }
 
+// ── Critical incidents ──
+
+export type CriticalIncidentKind =
+  | "unmatched_account_fill"
+  | "oversize_account_fill"
+  | "efficiency_partial_incident"
+  | "reconciler_error";
+
+export interface CriticalIncident {
+  id: string;
+  kind: CriticalIncidentKind;
+  severity: "critical";
+  message: string;
+  fingerprint: string;
+  details: Record<string, unknown>;
+  createdAt: number;
+  resolvedAt: number | null;
+}
+
 // ── WebSocket types ──
 
 export type WSMessageType =
@@ -330,6 +352,7 @@ export type WSMessageType =
   | "feedHealth"
   | "exchangeStatus"
   | "risk"
+  | "criticalIncident"
   | "error";
 
 export interface WSMessage {
@@ -367,6 +390,29 @@ export interface TradesPageResponse {
   hasMore: boolean;
   limit: number;
   mode: TradeFilterMode;
+  timeframe: TradeTimeframe;
+}
+
+export type AccountActivityAction = "Buy" | "Sell" | "Redeem" | "Deposit";
+
+export interface AccountActivityRecord {
+  id: string;
+  marketName: string;
+  action: AccountActivityAction;
+  usdcAmount: number;
+  tokenAmount: number;
+  tokenName: string;
+  timestamp: number;
+  hash: string;
+  source: "imported_csv";
+  importedAt: number;
+}
+
+export interface AccountActivityPageResponse {
+  items: ReadonlyArray<AccountActivityRecord>;
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
   timeframe: TradeTimeframe;
 }
 

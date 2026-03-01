@@ -18,6 +18,9 @@ import { RegimeDetector } from "./engine/regime-detector.js";
 import { EventBus } from "./engine/event-bus.js";
 import { TradingEngine } from "./engine/engine.js";
 import { NotesStore } from "./notes-store.js";
+import { AccountActivityStore } from "./activity/store.js";
+import { CriticalIncidentStore } from "./incident/store.js";
+import { PostgresStorage } from "./storage/postgres.js";
 import { WebSocketService } from "./ws/server.js";
 import { handleRequest } from "./api.js";
 
@@ -42,6 +45,9 @@ const AppLive = WebSocketService.Default.pipe(
   Layer.provideMerge(MarketService.Default),
   Layer.provideMerge(PolymarketClient.Default),
   Layer.provideMerge(NotesStore.Default),
+  Layer.provideMerge(AccountActivityStore.Default),
+  Layer.provideMerge(CriticalIncidentStore.Default),
+  Layer.provideMerge(PostgresStorage.Default),
   Layer.provideMerge(AppConfig.Default),
   Layer.provideMerge(NodeContext.layer),
 );
@@ -51,7 +57,7 @@ const program = Effect.gen(function* () {
   const wsService = yield* WebSocketService;
   const polyClient = yield* PolymarketClient;
   const runtime = yield* Effect.runtime<
-    TradingEngine | FeedService | PolymarketClient | NotesStore | AppConfig
+    TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | PostgresStorage | AppConfig
   >();
   const runFork = Runtime.runFork(runtime);
 

@@ -5,6 +5,9 @@ import { FeedService } from "./feeds/manager.js";
 import { PolymarketClient } from "./polymarket/client.js";
 import { NotesStore } from "./notes-store.js";
 import { AppConfig } from "./config.js";
+import { AccountActivityStore } from "./activity/store.js";
+import { CriticalIncidentStore } from "./incident/store.js";
+import { PostgresStorage } from "./storage/postgres.js";
 import type { TradeRecord } from "./types.js";
 
 interface RouteResult {
@@ -62,6 +65,11 @@ function timeframeToSinceMs(timeframe: TradeTimeframeParam): number | undefined 
   }
 }
 
+function timeframeToSinceSec(timeframe: TradeTimeframeParam): number | undefined {
+  const ms = timeframeToSinceMs(timeframe);
+  return typeof ms === "number" ? Math.floor(ms / 1000) : undefined;
+}
+
 function csvCell(value: unknown): string {
   const s = String(value ?? "");
   const needsQuote =
@@ -83,7 +91,7 @@ export const handleRequest = (
 ): Effect.Effect<
   RouteResult,
   never,
-  TradingEngine | FeedService | PolymarketClient | NotesStore | AppConfig
+  TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | PostgresStorage | AppConfig
 > =>
   Effect.gen(function* () {
     const config = yield* AppConfig;
@@ -91,13 +99,16 @@ export const handleRequest = (
     const feedService = yield* FeedService;
     const polyClient = yield* PolymarketClient;
     const notesStore = yield* NotesStore;
+    const activityStore = yield* AccountActivityStore;
+    const incidentStore = yield* CriticalIncidentStore;
+    const postgres = yield* PostgresStorage;
     yield* Effect.annotateCurrentSpan("http.method", method);
     yield* Effect.annotateCurrentSpan("http.url", url);
 
     const checkAuth = () => {
       const token = config.server.operatorToken;
-      if (!token) return true;
-      return headers.authorization === `Bearer ${token}`;
+      if (!token || token.trim().length === 0) return true;
+      return headers.authorization === `Bearer ${token.trim()}`;
     };
 
     const path = url.split("?")[0]!;
@@ -180,6 +191,8 @@ export const handleRequest = (
           "CLOB Reason",
           "P&L",
           "Shadow",
+          "Resolution Source",
+          "Settlement Winner Side",
         ];
         const rows = allItems.map((t) => [
           t.id,
@@ -198,6 +211,8 @@ export const handleRequest = (
           t.clobReason ?? "",
           t.pnl,
           t.shadow ? "yes" : "no",
+          t.resolutionSource ?? "estimated",
+          t.settlementWinnerSide ?? "",
         ]);
         const csv = [
           headers.map(csvCell).join(","),
@@ -209,6 +224,78 @@ export const handleRequest = (
           rawBody: true,
           contentType: "text/csv; charset=utf-8",
           contentDisposition: `attachment; filename="trades-${timeframe}-${new Date().toISOString().slice(0, 10)}.csv"`,
+        };
+      }
+      if (path === "/api/activity") {
+        const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
+        const limit = parsePositiveInt(searchParams.get("limit"), 100, 500);
+        const cursor = searchParams.get("cursor") ?? undefined;
+        const sinceSec = timeframeToSinceSec(timeframe);
+        const result = yield* activityStore.list({
+          limit,
+          cursor,
+          sinceSec,
+        });
+        return {
+          status: 200,
+          body: {
+            items: result.items,
+            nextCursor: result.nextCursor,
+            hasMore: result.hasMore,
+            limit,
+            timeframe,
+          },
+        };
+      }
+      if (path === "/api/activity/export.csv") {
+        const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
+        const sinceSec = timeframeToSinceSec(timeframe);
+        const allItems: Array<any> = [];
+        let cursor: string | undefined;
+        for (let i = 0; i < 200; i++) {
+          const page = yield* activityStore.list({
+            limit: 500,
+            sinceSec,
+            cursor,
+          });
+          allItems.push(...page.items);
+          if (!page.hasMore || !page.nextCursor) break;
+          cursor = page.nextCursor;
+        }
+        const headers = [
+          "ID",
+          "Market",
+          "Action",
+          "USDC Amount",
+          "Token Amount",
+          "Token Name",
+          "Timestamp",
+          "Hash",
+          "Source",
+          "Imported At",
+        ];
+        const rows = allItems.map((a) => [
+          a.id,
+          a.marketName,
+          a.action,
+          a.usdcAmount,
+          a.tokenAmount,
+          a.tokenName,
+          new Date(a.timestamp * 1000).toISOString(),
+          a.hash,
+          a.source,
+          new Date(a.importedAt).toISOString(),
+        ]);
+        const csv = [
+          headers.map(csvCell).join(","),
+          ...rows.map((r) => r.map(csvCell).join(",")),
+        ].join("\n");
+        return {
+          status: 200,
+          body: csv,
+          rawBody: true,
+          contentType: "text/csv; charset=utf-8",
+          contentDisposition: `attachment; filename="account-activity-${timeframe}-${new Date().toISOString().slice(0, 10)}.csv"`,
         };
       }
       if (path === "/api/pnl") {
@@ -230,6 +317,22 @@ export const handleRequest = (
       if (path === "/api/orderbook") {
         const ob = yield* engine.getOrderBookState;
         return { status: 200, body: ob };
+      }
+      if (path === "/api/incidents") {
+        const limit = parsePositiveInt(searchParams.get("limit"), 50, 500);
+        const activeOnly = searchParams.get("activeOnly") === "true";
+        const items = yield* incidentStore.list({ limit, activeOnly });
+        return { status: 200, body: { items, limit, activeOnly } };
+      }
+      if (path === "/api/storage/health") {
+        const health = yield* postgres.health;
+        return {
+          status: 200,
+          body: {
+            backend: config.storage.backend,
+            ...health,
+          },
+        };
       }
       if (path === "/api/prices") {
         const [prices, oracleEst] = yield* Effect.all([
@@ -272,6 +375,15 @@ export const handleRequest = (
           ),
         );
         return result;
+      }
+      if (path === "/api/activity/import-csv") {
+        if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
+        const csv = typeof body?.csv === "string" ? body.csv : "";
+        if (csv.trim().length === 0) {
+          return { status: 400, body: { error: "csv is required" } };
+        }
+        const result = yield* activityStore.importCsv(csv);
+        return { status: 200, body: result };
       }
       if (path === "/api/killswitches/reset") {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };

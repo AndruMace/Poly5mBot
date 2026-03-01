@@ -251,6 +251,17 @@ function normalizeOrderStatus(order: unknown): {
   return { mappedStatus, rawStatus, avgPrice, filledShares, reason };
 }
 
+export interface VenueOrderSnapshot {
+  orderId: string;
+  tokenId: string | null;
+  side: "BUY" | "SELL" | null;
+  mappedStatus: TradeStatus | null;
+  rawStatus: string | null;
+  avgPrice: number | null;
+  filledShares: number | null;
+  updatedAtMs: number | null;
+}
+
 let tradeCounter = 0;
 
 export class OrderService extends Effect.Service<OrderService>()("OrderService", {
@@ -671,7 +682,91 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         return { mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null };
       }).pipe(Effect.catchAll(() => Effect.succeed({ mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null })));
 
-    return { executeSignal, executeDualBuy, getOrderBook, getMidpoint, getOrderStatusById, calculateFee, effectiveFeeRate } as const;
+    const listRecentOrders = (sinceMs: number, limit = 300) =>
+      Effect.gen(function* () {
+        const client = yield* polyClient.getClient;
+        const c = client as any;
+        const calls = [
+          () => c.getOrders?.(),
+          () => c.getActiveOrders?.(),
+          () => c.listOrders?.(),
+          () => c.getTrades?.(),
+        ].filter((fn) => typeof fn === "function");
+
+        for (const call of calls) {
+          const result = yield* Effect.tryPromise({
+            try: () => Promise.resolve(call()),
+            catch: () => null,
+          });
+          if (!result) continue;
+          const rows: unknown[] = Array.isArray(result)
+            ? result
+            : Array.isArray((result as any)?.orders)
+              ? (result as any).orders
+              : Array.isArray((result as any)?.data)
+                ? (result as any).data
+                : [];
+          if (rows.length === 0) continue;
+
+          const snapshots: VenueOrderSnapshot[] = [];
+          for (const row of rows.slice(0, Math.max(1, limit * 2))) {
+            const status = normalizeOrderStatus(row);
+            const obj = row as Record<string, unknown>;
+            const orderIdRaw = obj["orderID"] ?? obj["orderId"] ?? obj["id"];
+            const orderId = typeof orderIdRaw === "string" ? orderIdRaw : null;
+            if (!orderId) continue;
+            const tokenIdRaw = obj["tokenID"] ?? obj["tokenId"] ?? obj["asset_id"];
+            const tokenId = typeof tokenIdRaw === "string" ? tokenIdRaw : null;
+            const sideRaw = obj["side"];
+            const side = sideRaw === "BUY" || sideRaw === "SELL" ? sideRaw : null;
+            const updatedRaw = toNumber(obj["updatedAt"]) ?? toNumber(obj["createdAt"]) ?? toNumber(obj["timestamp"]);
+            if (typeof updatedRaw === "number" && Number.isFinite(updatedRaw) && updatedRaw > 0 && updatedRaw < 10_000_000_000) {
+              // best-effort normalization for second-based timestamps
+              const updatedAtMs = Math.floor(updatedRaw * 1000);
+              if (updatedAtMs < sinceMs) continue;
+              snapshots.push({
+                orderId,
+                tokenId,
+                side,
+                mappedStatus: status.mappedStatus,
+                rawStatus: status.rawStatus,
+                avgPrice: status.avgPrice,
+                filledShares: status.filledShares,
+                updatedAtMs,
+              });
+              continue;
+            }
+            const updatedAtMs = typeof updatedRaw === "number" && Number.isFinite(updatedRaw) ? Math.floor(updatedRaw) : null;
+            if (updatedAtMs !== null && updatedAtMs < sinceMs) continue;
+            snapshots.push({
+              orderId,
+              tokenId,
+              side,
+              mappedStatus: status.mappedStatus,
+              rawStatus: status.rawStatus,
+              avgPrice: status.avgPrice,
+              filledShares: status.filledShares,
+              updatedAtMs,
+            });
+          }
+          snapshots.sort((a, b) => (b.updatedAtMs ?? 0) - (a.updatedAtMs ?? 0));
+          return snapshots.slice(0, limit);
+        }
+        return [] as VenueOrderSnapshot[];
+      }).pipe(
+        Effect.catchAll(() => Effect.succeed([] as VenueOrderSnapshot[])),
+      );
+
+    return {
+      executeSignal,
+      executeDualBuy,
+      getOrderBook,
+      getMidpoint,
+      getOrderStatusById,
+      listRecentOrders,
+      calculateFee,
+      effectiveFeeRate,
+    } as const;
   }),
 }) {}
 

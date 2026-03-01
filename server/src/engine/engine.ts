@@ -1,4 +1,4 @@
-import { Effect, Ref, Schedule } from "effect";
+import { Effect, Ref, Schedule, Option } from "effect";
 import { FileSystem } from "@effect/platform";
 import { AppConfig } from "../config.js";
 import { FeedService } from "../feeds/manager.js";
@@ -13,6 +13,9 @@ import { PositionSizer } from "./position-sizer.js";
 import { RegimeDetector } from "./regime-detector.js";
 import { preflightShadowBuy } from "./shadow-preflight.js";
 import { EventBus } from "./event-bus.js";
+import { AccountActivityStore } from "../activity/store.js";
+import { CriticalIncidentStore } from "../incident/store.js";
+import { PostgresStorage } from "../storage/postgres.js";
 import { makeArbStrategy } from "../strategies/arb.js";
 import { makeEfficiencyStrategy } from "../strategies/efficiency.js";
 import { makeWhaleHuntStrategy } from "../strategies/whale-hunt.js";
@@ -140,6 +143,7 @@ interface EngineState {
   shadowModeDiagnostics: Record<string, StrategyDiagnostics>;
   metrics: EngineMetrics;
   lastPoll: number;
+  lastReconcileAt: number;
   efficiencyIncidentBlocked: boolean;
 }
 
@@ -184,6 +188,7 @@ function initialEngineState(mode: "live" | "shadow"): EngineState {
       reconciliation: emptyReconciliation(),
     },
     lastPoll: 0,
+    lastReconcileAt: 0,
     efficiencyIncidentBlocked: false,
   };
 }
@@ -201,7 +206,14 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const positionSizer = yield* PositionSizer;
     const regimeDetector = yield* RegimeDetector;
     const eventBus = yield* EventBus;
+    const activityStore = yield* AccountActivityStore;
+    const incidentStore = yield* CriticalIncidentStore;
+    const postgresOpt = yield* Effect.serviceOption(PostgresStorage);
+    const postgres = Option.getOrUndefined(postgresOpt);
     const fs = yield* FileSystem.FileSystem;
+    const useFileStorage = config.storage.backend === "file" || config.storage.backend === "dual";
+    const usePostgresStorage =
+      !!postgres && (config.storage.backend === "postgres" || config.storage.backend === "dual");
 
     const arb = yield* makeArbStrategy;
     const efficiency = yield* makeEfficiencyStrategy;
@@ -213,18 +225,36 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const strategyMap = new Map<string, Strategy>(strategies.map((s) => [s.name, s]));
 
     const readPersistedStrategyState = Effect.gen(function* () {
-      const exists = yield* fs.exists(STRATEGY_STATE_FILE);
-      if (!exists) return {} as PersistedStrategyState;
-
-      const raw = yield* fs.readFileString(STRATEGY_STATE_FILE);
-      const parsed = yield* Effect.try({
-        try: () => JSON.parse(raw),
-        catch: (err) => new Error(String(err)),
-      });
-      if (!parsed || typeof parsed !== "object") {
-        return {} as PersistedStrategyState;
+      const fromDb: PersistedStrategyState = {};
+      if (usePostgresStorage) {
+        const rows = yield* postgres!.query<{ strategy_name: string; payload: unknown }>(
+          "select strategy_name, payload from strategy_state",
+        ).pipe(Effect.catchAll(() => Effect.succeed([])));
+        for (const row of rows) {
+          if (typeof row.strategy_name === "string" && row.strategy_name.length > 0) {
+            fromDb[row.strategy_name] =
+              row.payload && typeof row.payload === "object" ? (row.payload as PersistedStrategyStateEntry) : {};
+          }
+        }
       }
-      return parsed as PersistedStrategyState;
+      const fromFile: PersistedStrategyState = {};
+      if (useFileStorage) {
+        const exists = yield* fs.exists(STRATEGY_STATE_FILE);
+        if (exists) {
+          const raw = yield* fs.readFileString(STRATEGY_STATE_FILE);
+          const parsed = yield* Effect.try({
+            try: () => JSON.parse(raw),
+            catch: (err) => new Error(String(err)),
+          });
+          if (parsed && typeof parsed === "object") {
+            Object.assign(fromFile, parsed as PersistedStrategyState);
+          }
+        }
+      }
+      return {
+        ...fromFile,
+        ...fromDb,
+      } as PersistedStrategyState;
     }).pipe(
       Effect.catchAll((err) =>
         Effect.logError(`[Engine] Failed to load strategy state from ${STRATEGY_STATE_FILE}: ${String(err)}`).pipe(
@@ -248,10 +278,25 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       );
 
       const payload = Object.fromEntries(entries) as PersistedStrategyState;
-      yield* fs.makeDirectory(STRATEGY_STATE_DIR, { recursive: true }).pipe(
-        Effect.catchAll(() => Effect.void),
-      );
-      yield* fs.writeFileString(STRATEGY_STATE_FILE, JSON.stringify(payload, null, 2));
+      if (useFileStorage) {
+        yield* fs.makeDirectory(STRATEGY_STATE_DIR, { recursive: true }).pipe(
+          Effect.catchAll(() => Effect.void),
+        );
+        yield* fs.writeFileString(STRATEGY_STATE_FILE, JSON.stringify(payload, null, 2));
+      }
+      if (usePostgresStorage) {
+        yield* Effect.forEach(
+          Object.entries(payload),
+          ([name, entry]) =>
+            postgres!.execute(
+              `insert into strategy_state (strategy_name, payload, updated_at_ms)
+               values ($1, $2::jsonb, $3)
+               on conflict (strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+              [name, JSON.stringify(entry ?? {}), Date.now()],
+            ).pipe(Effect.catchAll(() => Effect.void)),
+          { discard: true },
+        );
+      }
     });
 
     const applyPersistedStrategyState = (persisted: PersistedStrategyState) =>
@@ -296,6 +341,138 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     }
 
     const emit = (event: EngineEvent) => eventBus.publish(event);
+
+    const haltTradingWithIncident = (incident: {
+      kind: "unmatched_account_fill" | "oversize_account_fill" | "efficiency_partial_incident" | "reconciler_error";
+      message: string;
+      fingerprint: string;
+      details: Record<string, unknown>;
+    }) =>
+      Effect.gen(function* () {
+        const created = yield* incidentStore.create({
+          kind: incident.kind,
+          severity: "critical",
+          message: incident.message,
+          fingerprint: incident.fingerprint,
+          details: incident.details,
+        });
+        yield* Ref.update(stateRef, (s) => ({ ...s, tradingActive: false }));
+        yield* emit({ _tag: "TradingActive", data: { tradingActive: false } });
+        yield* emit({ _tag: "CriticalIncident", data: created });
+        yield* Effect.logError(`[Engine] CRITICAL INCIDENT: ${created.kind} - ${created.message}`);
+      });
+
+    const runAccountReconciliation = Effect.gen(function* () {
+      const now = Date.now();
+      const sinceSec = Math.floor((now - 5 * 60_000) / 1000);
+      const sinceMs = sinceSec * 1000;
+      const venueOrders = yield* orderService.listRecentOrders(sinceMs, 300);
+      const liveTrades = yield* tracker.listTrades({ mode: "live", sinceMs, limit: 1000 });
+
+      for (const order of venueOrders) {
+        if (order.side !== "BUY") continue;
+        if (order.mappedStatus !== "filled" && order.mappedStatus !== "partial") continue;
+        const filledNotional = (order.filledShares ?? 0) * (order.avgPrice ?? 0);
+        if (filledNotional <= 0) continue;
+
+        const matchingTrade = liveTrades.items.some((t) => {
+          if (t.shadow) return false;
+          if (t.clobOrderId && order.orderId) return t.clobOrderId === order.orderId;
+          const closeInTime = order.updatedAtMs ? Math.abs(t.timestamp - order.updatedAtMs) <= 120_000 : true;
+          const closeInSize = Math.abs(t.size - filledNotional) <= 0.2;
+          return closeInTime && closeInSize;
+        });
+
+        if (filledNotional > config.risk.maxTradeSize + 1e-6) {
+          yield* haltTradingWithIncident({
+            kind: "oversize_account_fill",
+            message: `Observed venue BUY fill $${filledNotional.toFixed(4)} above maxTradeSize $${config.risk.maxTradeSize.toFixed(4)}.`,
+            fingerprint: `venue-oversize:${order.orderId}:${filledNotional.toFixed(4)}`,
+            details: {
+              source: "clob",
+              orderId: order.orderId,
+              status: order.rawStatus,
+              updatedAtMs: order.updatedAtMs,
+              avgPrice: order.avgPrice,
+              filledShares: order.filledShares,
+              filledNotional,
+            },
+          });
+          continue;
+        }
+
+        if (!matchingTrade) {
+          yield* haltTradingWithIncident({
+            kind: "unmatched_account_fill",
+            message: "Observed venue BUY fill that does not match any tracked live trade in reconciliation window.",
+            fingerprint: `venue-unmatched:${order.orderId}:${order.updatedAtMs ?? "na"}`,
+            details: {
+              source: "clob",
+              orderId: order.orderId,
+              status: order.rawStatus,
+              updatedAtMs: order.updatedAtMs,
+              avgPrice: order.avgPrice,
+              filledShares: order.filledShares,
+              filledNotional,
+            },
+          });
+        }
+      }
+
+      const activities = yield* activityStore.list({ limit: 500, sinceSec });
+      if (activities.items.length === 0) return;
+
+      for (const a of activities.items) {
+        if (a.action !== "Buy") continue;
+        const matching = liveTrades.items.some((t) => {
+          const closeInTime = Math.abs(t.timestamp - a.timestamp * 1000) <= 120_000;
+          const closeInSize = Math.abs(t.size - a.usdcAmount) <= 0.15;
+          return !t.shadow && closeInTime && closeInSize;
+        });
+
+        if (a.usdcAmount > config.risk.maxTradeSize + 1e-6) {
+          yield* haltTradingWithIncident({
+            kind: "oversize_account_fill",
+            message: `Observed account BUY $${a.usdcAmount.toFixed(4)} above maxTradeSize $${config.risk.maxTradeSize.toFixed(4)}.`,
+            fingerprint: `oversize:${a.hash}:${a.timestamp}:${a.usdcAmount}`,
+            details: {
+              action: a.action,
+              hash: a.hash,
+              marketName: a.marketName,
+              tokenName: a.tokenName,
+              timestamp: a.timestamp,
+              usdcAmount: a.usdcAmount,
+            },
+          });
+          continue;
+        }
+
+        if (!matching) {
+          yield* haltTradingWithIncident({
+            kind: "unmatched_account_fill",
+            message: "Observed account BUY that does not match any tracked live trade in reconciliation window.",
+            fingerprint: `unmatched:${a.hash}:${a.timestamp}:${a.usdcAmount}`,
+            details: {
+              action: a.action,
+              hash: a.hash,
+              marketName: a.marketName,
+              tokenName: a.tokenName,
+              timestamp: a.timestamp,
+              usdcAmount: a.usdcAmount,
+            },
+          });
+        }
+      }
+    }).pipe(
+      Effect.catchAll((err) =>
+        haltTradingWithIncident({
+          kind: "reconciler_error",
+          message: `Account reconciler failed: ${String(err)}`,
+          fingerprint: `reconciler-error:${String(err)}`,
+          details: { error: String(err) },
+        }),
+      ),
+    );
 
     const bumpDiag = (st: EngineState, strategy: string, key: keyof StrategyDiagnostics, delta: number, isShadowMode?: boolean) => {
       if (!st.windowDiagnostics[strategy]) st.windowDiagnostics[strategy] = zeroDiagnostics();
@@ -553,6 +730,10 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       const st = yield* Ref.get(stateRef);
       const isShadow = st.mode === "shadow";
       const now = Date.now();
+      if (!isShadow && now - st.lastReconcileAt >= 15_000) {
+        yield* runAccountReconciliation;
+        yield* Ref.update(stateRef, (s) => ({ ...s, lastReconcileAt: Date.now() }));
+      }
       const liveBtcPrice = yield* feedService.getCurrentBtcPrice;
       const connected = yield* polyClient.isConnected;
 
@@ -587,17 +768,29 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const tradeRecord = yield* tracker.getTradeRecordById(trade.id, tradeShadow);
         if (!tradeRecord) continue;
         yield* tracker.expireTrade(trade.id, closingBtcPrice, tradeShadow);
-        const won = didTradeWin(
-          { ...tradeRecord, closingBtcPrice },
-          sNow,
-          liveBtcPrice,
+        const settlement = yield* marketService.fetchSettlementByCondition(trade.conditionId).pipe(
+          Effect.catchAll(() => Effect.succeed(null)),
         );
-        yield* tracker.resolveTrade(trade.id, won, tradeShadow);
+        const hasVenueWinner = settlement?.resolved === true && settlement.winnerSide !== null;
+        const won = hasVenueWinner
+          ? trade.side === settlement!.winnerSide
+          : didTradeWin(
+            { ...tradeRecord, closingBtcPrice },
+            sNow,
+            liveBtcPrice,
+          );
+        const outcomeSource: "venue" | "estimated" = hasVenueWinner ? "venue" : "estimated";
+        yield* tracker.resolveTrade(trade.id, won, tradeShadow, {
+          outcomeSource,
+          settlementWinnerSide: settlement?.winnerSide ?? null,
+        });
         const resolved =
           (yield* tracker.getTradeRecordById(trade.id, tradeShadow)) ?? {
             ...tradeRecord,
             status: "resolved" as const,
             outcome: won ? ("win" as const) : ("loss" as const),
+            resolutionSource: outcomeSource,
+            settlementWinnerSide: settlement?.winnerSide ?? null,
             pnl: 0,
             closingBtcPrice,
           };
@@ -985,6 +1178,17 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
               tradingActive: false,
             }));
             yield* emit({ _tag: "TradingActive", data: { tradingActive: false } });
+            yield* haltTradingWithIncident({
+              kind: "efficiency_partial_incident",
+              message: "Efficiency dual-leg incident detected. Trading paused until manual intervention.",
+              fingerprint: `efficiency-partial:${conditionId}:${Date.now()}`,
+              details: {
+                conditionId,
+                strategy: signal.strategy,
+                side: signal.side,
+                size: signal.size,
+              },
+            });
             yield* Effect.logError(
               "[Engine] Efficiency dual-leg incident detected. Trading paused and efficiency strategy blocked until manual restart.",
             );

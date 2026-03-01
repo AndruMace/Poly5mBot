@@ -9,6 +9,8 @@ import { PositionSizer } from "../src/engine/position-sizer.js";
 import { RegimeDetector } from "../src/engine/regime-detector.js";
 import { TradeStore, ShadowTradeStore } from "../src/engine/trade-store.js";
 import { PnLTracker } from "../src/engine/tracker.js";
+import { AccountActivityStore } from "../src/activity/store.js";
+import { CriticalIncidentStore } from "../src/incident/store.js";
 import type { AppConfigShape } from "../src/config.js";
 
 export const TestAppConfig = Layer.succeed(AppConfig, {
@@ -44,6 +46,10 @@ export const TestAppConfig = Layer.succeed(AppConfig, {
     polygonRpcUrl: "https://polygon-rpc.com",
   },
   server: { port: 3001, operatorToken: "" },
+  storage: {
+    backend: "file",
+    databaseUrl: "",
+  },
   test: {
     ciLiveIntegration: false,
     liveTestTimeoutMs: 5000,
@@ -60,6 +66,8 @@ export const CoreTestLayer = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(RiskManager.Default),
   Layer.provideMerge(PnLTracker.Default),
+  Layer.provideMerge(AccountActivityStore.Default),
+  Layer.provideMerge(CriticalIncidentStore.Default),
   Layer.provideMerge(TradeStore.Default),
   Layer.provideMerge(ShadowTradeStore.Default),
   Layer.provideMerge(TestAppConfig),
@@ -121,6 +129,11 @@ export const makeTestConfigLayer = (
       port: 3001,
       operatorToken: "",
       ...(overrides.server ?? {}),
+    },
+    storage: {
+      backend: "file" as const,
+      databaseUrl: "",
+      ...(overrides.storage ?? {}),
     },
     test: {
       ciLiveIntegration: false,

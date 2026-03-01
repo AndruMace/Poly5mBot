@@ -38,6 +38,10 @@ export interface AppConfigShape {
     readonly port: number;
     readonly operatorToken: string;
   };
+  readonly storage: {
+    readonly backend: "file" | "dual" | "postgres";
+    readonly databaseUrl: string;
+  };
   readonly test: {
     readonly ciLiveIntegration: boolean;
     readonly liveTestTimeoutMs: number;
@@ -80,6 +84,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
     const serverPort = yield* Config.integer("SERVER_PORT").pipe(Config.withDefault(3001));
     const operatorToken = yield* Config.string("OPERATOR_TOKEN").pipe(Config.withDefault(""));
+    const storageBackend = yield* Config.literal("file", "dual", "postgres")("STORAGE_BACKEND").pipe(
+      Config.withDefault("file" as const),
+    );
+    const databaseUrl = yield* Config.string("DATABASE_URL").pipe(Config.withDefault(""));
     const ciLiveIntegration = yield* Config.string("CI_LIVE_INTEGRATION").pipe(
       Config.withDefault("false"),
       Config.map((v) => v === "true"),
@@ -127,6 +135,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
         polygonRpcUrl,
       },
       server: { port: serverPort, operatorToken },
+      storage: { backend: storageBackend, databaseUrl },
       test: {
         ciLiveIntegration,
         liveTestTimeoutMs,

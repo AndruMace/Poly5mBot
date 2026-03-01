@@ -190,6 +190,7 @@ function eventTagToWSType(tag: EngineEvent["_tag"]): WSMessage["type"] | null {
     Mode: "mode",
     Regime: "regime",
     Metrics: "metrics",
+    CriticalIncident: "criticalIncident",
   };
   return (map[tag] as WSMessage["type"]) ?? null;
 }
