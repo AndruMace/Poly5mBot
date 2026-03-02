@@ -198,7 +198,17 @@ const fakeIncidentStore = {
       createdAt: Date.now(),
       resolvedAt: null,
     }),
-  resolve: (_id: string) => Effect.succeed(null),
+  resolve: (id: string) =>
+    Effect.succeed({
+      id,
+      kind: "reconciler_error",
+      severity: "critical",
+      message: "resolved",
+      fingerprint: "fp",
+      details: {},
+      createdAt: Date.now() - 1000,
+      resolvedAt: Date.now(),
+    }),
 };
 
 const fakePostgresStorage = {
@@ -351,5 +361,21 @@ describe("API handler integration", () => {
     expect(res.status).toBe(200);
     expect((res.body as any).total).toBe(1);
     expect((res.body as any).byCategory[0].category).toBe("signal");
+  });
+
+  it("resolves incidents via authenticated route", async () => {
+    const res = await Effect.runPromise(
+      handleRequest(
+        "/api/incidents/inc-123/resolve",
+        "POST",
+        {},
+        false,
+        { authorization: "Bearer secret" },
+      ).pipe(Effect.provide(testLayer)),
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as any).ok).toBe(true);
+    expect((res.body as any).incident.id).toBe("inc-123");
+    expect((res.body as any).incident.resolvedAt).not.toBeNull();
   });
 });

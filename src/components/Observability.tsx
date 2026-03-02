@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRxValue } from "@effect-rx/rx-react";
-import { Activity, Search, Save, Clock3, Table2 } from "lucide-react";
+import { Activity, Search, Save, Clock3, Table2, AlertTriangle } from "lucide-react";
 import { observabilityEventsRx } from "../store/index.js";
 import {
   OBSERVABILITY_CATEGORIES,
@@ -9,6 +9,7 @@ import {
 } from "../../server/src/shared/observability.js";
 import type {
   ObservabilityCategory,
+  CriticalIncident,
   ObservabilityEntityType,
   ObservabilityEvent,
   ObservabilityMetricsResponse,
@@ -82,6 +83,11 @@ export function Observability() {
   const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<ObservabilityMetricsResponse | null>(null);
   const [selected, setSelected] = useState<ObservabilityEvent | null>(null);
+  const [incidents, setIncidents] = useState<CriticalIncident[]>([]);
+  const [incidentLoading, setIncidentLoading] = useState(false);
+  const [incidentError, setIncidentError] = useState<string | null>(null);
+  const [selectedIncident, setSelectedIncident] = useState<CriticalIncident | null>(null);
+  const [resolvingIncidentId, setResolvingIncidentId] = useState<string | null>(null);
   const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([]);
 
   useEffect(() => {
@@ -133,6 +139,24 @@ export function Observability() {
     }
   }, [buildQuery]);
 
+  const loadIncidents = useCallback(async () => {
+    setIncidentLoading(true);
+    setIncidentError(null);
+    try {
+      const res = await fetch("/api/incidents?limit=200");
+      if (!res.ok) throw new Error(`Incident request failed (${res.status})`);
+      const payload = (await res.json()) as { items?: CriticalIncident[] };
+      const rows = Array.isArray(payload.items) ? payload.items : [];
+      rows.sort((a, b) => b.createdAt - a.createdAt);
+      setIncidents(rows);
+    } catch (err) {
+      setIncidentError(err instanceof Error ? err.message : "Failed to load incidents");
+      setIncidents([]);
+    } finally {
+      setIncidentLoading(false);
+    }
+  }, []);
+
   const loadPage = useCallback(
     async (cursor: string | null, targetPage: number) => {
       setLoading(true);
@@ -155,11 +179,34 @@ export function Observability() {
     [buildQuery],
   );
 
+  const resolveIncident = useCallback(
+    async (incidentId: string) => {
+      if (!incidentId || resolvingIncidentId) return;
+      setResolvingIncidentId(incidentId);
+      setIncidentError(null);
+      try {
+        const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/resolve`, {
+          method: "POST",
+        });
+        if (!res.ok) throw new Error(`Resolve request failed (${res.status})`);
+        await loadIncidents();
+        void loadPage(cursorHistory[pageIndex] ?? null, pageIndex);
+        void loadMetrics();
+      } catch (err) {
+        setIncidentError(err instanceof Error ? err.message : "Failed to resolve incident");
+      } finally {
+        setResolvingIncidentId(null);
+      }
+    },
+    [cursorHistory, loadIncidents, loadMetrics, loadPage, pageIndex, resolvingIncidentId],
+  );
+
   useEffect(() => {
     setCursorHistory([null]);
     void loadPage(null, 0);
     void loadMetrics();
-  }, [loadPage, loadMetrics]);
+    void loadIncidents();
+  }, [loadIncidents, loadMetrics, loadPage]);
 
   useEffect(() => {
     if (pageIndex !== 0 || liveEvents.length === 0) return;
@@ -191,6 +238,11 @@ export function Observability() {
   const categoryCounts = useMemo(
     () => metrics?.byCategory ?? [],
     [metrics],
+  );
+
+  const activeIncidents = useMemo(
+    () => incidents.filter((incident) => incident.resolvedAt === null),
+    [incidents],
   );
 
   const saveCurrentFilter = () => {
@@ -310,6 +362,79 @@ export function Observability() {
       </div>
 
       <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <AlertTriangle size={14} className="text-[var(--accent-red)]" />
+            <span>Critical Incidents</span>
+            <span className="text-xs text-[var(--text-secondary)]">
+              {incidentLoading ? "Loading..." : `${activeIncidents.length} active / ${incidents.length} total`}
+            </span>
+          </div>
+          <button
+            onClick={() => void loadIncidents()}
+            className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1 text-xs"
+          >
+            Refresh
+          </button>
+        </div>
+        {incidentError ? (
+          <div className="py-2 text-xs text-[var(--accent-red)]">{incidentError}</div>
+        ) : incidents.length === 0 ? (
+          <div className="py-2 text-xs text-[var(--text-secondary)]">No incidents found.</div>
+        ) : (
+          <div className="max-h-[28vh] overflow-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-[var(--bg-card)]">
+                <tr className="border-b border-[var(--border)] text-[var(--text-secondary)]">
+                  <th className="px-2 py-2 text-left">Created</th>
+                  <th className="px-2 py-2 text-left">Kind</th>
+                  <th className="px-2 py-2 text-left">Message</th>
+                  <th className="px-2 py-2 text-left">State</th>
+                  <th className="px-2 py-2 text-left">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {incidents.map((incident) => {
+                  const isResolved = incident.resolvedAt !== null;
+                  const canResolve = !isResolved;
+                  return (
+                    <tr
+                      key={incident.id}
+                      className="border-t border-[var(--border)]/50 hover:bg-[var(--bg-secondary)]/35"
+                    >
+                      <td className="px-2 py-2 text-[var(--text-secondary)]">
+                        {new Date(incident.createdAt).toLocaleString()}
+                      </td>
+                      <td className="px-2 py-2">{incident.kind}</td>
+                      <td className="max-w-[28rem] truncate px-2 py-2">{incident.message}</td>
+                      <td className="px-2 py-2">{isResolved ? "resolved" : "active"}</td>
+                      <td className="px-2 py-2">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => setSelectedIncident(incident)}
+                            className="rounded border border-[var(--border)] px-2 py-1 text-[11px]"
+                          >
+                            View
+                          </button>
+                          <button
+                            onClick={() => void resolveIncident(incident.id)}
+                            disabled={!canResolve || resolvingIncidentId === incident.id}
+                            className="rounded border border-[var(--border)] px-2 py-1 text-[11px] disabled:opacity-50"
+                          >
+                            {resolvingIncidentId === incident.id ? "Resolving..." : "Resolve"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3">
         <div className="mb-2 flex items-center justify-between text-xs text-[var(--text-secondary)]">
           <span>Page {pageIndex + 1}</span>
           <div className="flex gap-2">
@@ -382,6 +507,17 @@ export function Observability() {
           </div>
           <pre className="max-h-[40vh] overflow-auto rounded bg-[var(--bg-secondary)] p-2 text-[11px] leading-relaxed">
             {JSON.stringify(selected, null, 2)}
+          </pre>
+        </div>
+      )}
+      {selectedIncident && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold">Incident Detail</h3>
+            <button onClick={() => setSelectedIncident(null)} className="text-xs text-[var(--text-secondary)]">Close</button>
+          </div>
+          <pre className="max-h-[40vh] overflow-auto rounded bg-[var(--bg-secondary)] p-2 text-[11px] leading-relaxed">
+            {JSON.stringify(selectedIncident, null, 2)}
           </pre>
         </div>
       )}

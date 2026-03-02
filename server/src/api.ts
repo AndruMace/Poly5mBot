@@ -496,6 +496,15 @@ export const handleRequest = (
         yield* audit("api_killswitches_reset", { ok: true, count: status.length });
         return { status: 200, body: { ok: true, killSwitches: status } };
       }
+      const incidentResolve = path.match(/^\/api\/incidents\/([^/]+)\/resolve$/);
+      if (incidentResolve) {
+        if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
+        const id = decodeURIComponent(incidentResolve[1]!);
+        const updated = yield* incidentStore.resolve(id);
+        if (!updated) return { status: 404, body: { error: "Incident not found" } };
+        yield* audit("api_incident_resolve", { incidentId: id, resolvedAt: updated.resolvedAt });
+        return { status: 200, body: { ok: true, incident: updated } };
+      }
 
       const stratToggle = path.match(/^\/api\/strategies\/([^/]+)\/toggle$/);
       if (stratToggle) {

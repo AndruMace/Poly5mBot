@@ -266,4 +266,113 @@ describe("OrderService", () => {
     expect(status.avgPrice).toBeCloseTo(0.52, 6);
     expect(status.filledShares).toBeCloseTo(11.5, 6);
   });
+
+  it("clamps single-leg FOK orders to at least 5 shares", async () => {
+    const submittedSizes: number[] = [];
+    const client = {
+      createAndPostOrder: async (order: { size: number }) => {
+        submittedSizes.push(order.size);
+        return { orderID: "ord-min-fok", status: "accepted" };
+      },
+    };
+
+    const record = await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        return yield* orders.executeSignal(
+          makeSignal({ strategy: "momentum", size: 2, maxPrice: 0.9 }),
+          "up-token",
+          "down-token",
+          Date.now() + 60_000,
+          "cond-min-fok-1",
+          100_000,
+        );
+      }),
+      client,
+    );
+
+    expect(record).not.toBeNull();
+    expect(submittedSizes[0]).toBe(5);
+    expect(record?.shares).toBe(5);
+  });
+
+  it("clamps IOC fallback orders to at least 5 shares", async () => {
+    const iocSubmittedSizes: number[] = [];
+    const client = {
+      createAndPostOrder: async (
+        order: { size: number },
+        _opts: unknown,
+        tif: string,
+      ) => {
+        if (tif === "FOK") {
+          throw { message: "order couldn't be fully filled. FOK orders are fully filled or killed." };
+        }
+        iocSubmittedSizes.push(order.size);
+        return {
+          orderID: "ord-min-ioc",
+          status: "partially_filled",
+          avgPrice: "0.9",
+          sizeMatched: String(order.size),
+        };
+      },
+      getOrderById: async () => ({
+        status: "partially_filled",
+        averagePrice: "0.9",
+        filledSize: "5",
+      }),
+    };
+
+    const record = await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        return yield* orders.executeSignal(
+          makeSignal({ strategy: "momentum", size: 2, maxPrice: 0.9 }),
+          "up-token",
+          "down-token",
+          Date.now() + 60_000,
+          "cond-min-ioc-1",
+          100_000,
+        );
+      }),
+      client,
+    );
+
+    expect(record).not.toBeNull();
+    expect(iocSubmittedSizes[0]).toBe(5);
+    expect(record?.shares).toBe(5);
+  });
+
+  it("clamps dual-buy orders to at least 5 shares on both legs", async () => {
+    const submittedSizes: number[] = [];
+    const client = {
+      createAndPostOrder: async (order: { size: number }) => {
+        submittedSizes.push(order.size);
+        return { orderID: `dual-min-${submittedSizes.length}`, status: "accepted" };
+      },
+    };
+
+    const trades = await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        return yield* orders.executeDualBuy(
+          "up-token",
+          "down-token",
+          0.52,
+          0.47,
+          2,
+          Date.now() + 60_000,
+          "cond-min-dual-1",
+          100_250,
+        );
+      }),
+      client,
+    );
+
+    expect(trades).toHaveLength(2);
+    expect(submittedSizes).toEqual([5, 5]);
+    expect(trades[0]?.shares).toBe(5);
+    expect(trades[1]?.shares).toBe(5);
+    expect(trades[0]?.size).toBeCloseTo(2.6, 6);
+    expect(trades[1]?.size).toBeCloseTo(2.34, 6);
+  });
 });

@@ -48,6 +48,25 @@ describe("Observability", () => {
           }),
         } as any;
       }
+      if (url.includes("/api/incidents?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              {
+                id: "inc-1",
+                kind: "efficiency_partial_incident",
+                severity: "critical",
+                message: "Efficiency dual-leg incident detected.",
+                fingerprint: "fp-1",
+                details: { conditionId: "abc" },
+                createdAt: Date.now(),
+                resolvedAt: null,
+              },
+            ],
+          }),
+        } as any;
+      }
       return { ok: false, status: 404 } as any;
     });
 
@@ -59,7 +78,8 @@ describe("Observability", () => {
 
     expect(await screen.findByText(/observability & data discovery/i)).toBeTruthy();
     expect(await screen.findByText(/signal_generated/i)).toBeTruthy();
-    expect(await screen.findByText(/Total/i)).toBeTruthy();
+    expect(await screen.findByText(/^Total$/)).toBeTruthy();
+    expect(await screen.findByText(/critical incidents/i)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Signals" })).toBeTruthy());

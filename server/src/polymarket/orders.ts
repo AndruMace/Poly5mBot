@@ -8,6 +8,7 @@ const FEE_EXPONENT = 2;
 const FOK_SIZE_SCALES = [1, 0.8, 0.6, 0.45];
 const IOC_SIZE_SCALES = [1, 0.8, 0.6, 0.45, 0.35, 0.25, 0.15];
 const FOK_BACKOFF_SIZE_SCALES = [0.45, 0.35, 0.25, 0.15];
+const MIN_SHARES = 5;
 const MIN_CLOB_NOTIONAL = 1.0;
 const FOK_LIQUIDITY_BACKOFF_BASE_MS = 8_000;
 const FOK_LIQUIDITY_BACKOFF_MAX_MS = 120_000;
@@ -91,6 +92,14 @@ function quantizeBuyOrder(notional: number, rawPrice: number) {
   return { price, shares, quote };
 }
 
+function enforceMinSharesSingleLeg(price: number, shares: number) {
+  if (price <= 0 || shares <= 0) return { shares: 0, quote: 0, clamped: false };
+  const clamped = shares > 0 && shares < MIN_SHARES;
+  const safeShares = clamped ? MIN_SHARES : shares;
+  const quote = floorTo(safeShares * price, 2);
+  return { shares: floorTo(safeShares, 4), quote, clamped };
+}
+
 function quantizeDualBuyOrder(totalNotional: number, upPriceRaw: number, downPriceRaw: number) {
   const upPrice = floorTo(upPriceRaw, 2);
   const downPrice = floorTo(downPriceRaw, 2);
@@ -126,6 +135,25 @@ function quantizeDualBuyOrder(totalNotional: number, upPriceRaw: number, downPri
   const downNotional = floorTo((shareUnits * downPriceCents) / 1_000_000, 2);
 
   return { shares, upNotional, downNotional, upPrice, downPrice };
+}
+
+function enforceMinSharesDualLeg(
+  shares: number,
+  upPrice: number,
+  downPrice: number,
+) {
+  if (shares <= 0 || upPrice <= 0 || downPrice <= 0) {
+    return { shares: 0, upNotional: 0, downNotional: 0, clamped: false };
+  }
+  const clamped = shares > 0 && shares < MIN_SHARES;
+  const safeShares = clamped ? MIN_SHARES : shares;
+  const normalizedShares = floorTo(safeShares, 4);
+  return {
+    shares: normalizedShares,
+    upNotional: floorTo(normalizedShares * upPrice, 2),
+    downNotional: floorTo(normalizedShares * downPrice, 2),
+    clamped,
+  };
 }
 
 function extractOrderError(err: unknown): string {
@@ -289,11 +317,21 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
 
         for (const scale of scales) {
           const q = quantizeBuyOrder(signal.size * scale, signal.maxPrice);
-          const notional = q.quote;
           const price = q.price;
-          const shares = q.shares;
+          const normalized = enforceMinSharesSingleLeg(price, q.shares);
+          const shares = normalized.shares;
+          const notional = normalized.quote;
           if (price <= 0 || shares <= 0 || notional <= 0) continue;
           if (notional < MIN_CLOB_NOTIONAL) continue;
+          if (normalized.clamped) {
+            const requestedNotional = signal.size * scale;
+            const delta = notional - requestedNotional;
+            if (delta > 0.01) {
+              yield* Effect.logWarning(
+                `[Orders] Min-shares clamp applied for ${signal.strategy} ${signal.side} [FOK scale=${scale}]: requested=$${requestedNotional.toFixed(2)} -> effective=$${notional.toFixed(2)} (delta=$${delta.toFixed(2)}, shares=${shares.toFixed(4)})`,
+              );
+            }
+          }
 
           const result = yield* Effect.tryPromise({
             try: () =>
@@ -415,11 +453,21 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         // would still be strategically valuable. Try IOC as a controlled fallback.
         for (const scale of IOC_SIZE_SCALES) {
           const q = quantizeBuyOrder(signal.size * scale, signal.maxPrice);
-          const notional = q.quote;
           const price = q.price;
-          const shares = q.shares;
+          const normalized = enforceMinSharesSingleLeg(price, q.shares);
+          const shares = normalized.shares;
+          const notional = normalized.quote;
           if (price <= 0 || shares <= 0 || notional <= 0) continue;
           if (notional < MIN_CLOB_NOTIONAL) continue;
+          if (normalized.clamped) {
+            const requestedNotional = signal.size * scale;
+            const delta = notional - requestedNotional;
+            if (delta > 0.01) {
+              yield* Effect.logWarning(
+                `[Orders] Min-shares clamp applied for ${signal.strategy} ${signal.side} [IOC scale=${scale}]: requested=$${requestedNotional.toFixed(2)} -> effective=$${notional.toFixed(2)} (delta=$${delta.toFixed(2)}, shares=${shares.toFixed(4)})`,
+              );
+            }
+          }
 
           const result = yield* Effect.tryPromise({
             try: () =>
@@ -562,12 +610,22 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         const q = quantizeDualBuyOrder(size, upPrice, downPrice);
         const pxUp = q.upPrice;
         const pxDown = q.downPrice;
-        const shares = q.shares;
+        const normalized = enforceMinSharesDualLeg(q.shares, pxUp, pxDown);
+        const shares = normalized.shares;
         if (shares <= 0) return trades;
+        if (normalized.clamped) {
+          const effectiveTotal = normalized.upNotional + normalized.downNotional;
+          const delta = effectiveTotal - size;
+          if (delta > 0.01) {
+            yield* Effect.logWarning(
+              `[Orders] Min-shares clamp applied for efficiency dual-buy: requested=$${size.toFixed(2)} -> effective=$${effectiveTotal.toFixed(2)} (delta=$${delta.toFixed(2)}, shares=${shares.toFixed(4)})`,
+            );
+          }
+        }
 
         const legs: Array<["UP" | "DOWN", string, number, number]> = [
-          ["UP", upTokenId, pxUp, q.upNotional],
-          ["DOWN", downTokenId, pxDown, q.downNotional],
+          ["UP", upTokenId, pxUp, normalized.upNotional],
+          ["DOWN", downTokenId, pxDown, normalized.downNotional],
         ];
 
         for (const [side, tokenId, px, legNotional] of legs) {
