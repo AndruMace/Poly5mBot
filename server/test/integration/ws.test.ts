@@ -6,6 +6,10 @@ import { FeedService } from "../../src/feeds/manager.js";
 import { PolymarketClient } from "../../src/polymarket/client.js";
 import { EventBus } from "../../src/engine/event-bus.js";
 import { ObservabilityStore } from "../../src/observability/store.js";
+import { PostgresStorage } from "../../src/storage/postgres.js";
+import { AppConfig } from "../../src/config.js";
+import { MarketOrchestrator } from "../../src/markets/orchestrator.js";
+import { makeTestConfigLayer } from "../helpers.js";
 import type { TradeRecord } from "../../src/types.js";
 
 const wsMockState = {
@@ -141,12 +145,132 @@ describe("WebSocketService integration", () => {
       latest: (_limit = 200) => Effect.succeed([]),
     } as any);
 
+    const postgresLayer = Layer.succeed(PostgresStorage, {
+      health: Effect.succeed({ enabled: false, ok: true }),
+      query: (_text: string, _values?: unknown[]) => Effect.succeed([]),
+    } as any);
+
+    const fakeMarketEngine = {
+      marketId: "btc",
+      displayName: "BTC",
+      feedManager: {
+        marketId: "btc",
+        getLatestPrices: Effect.succeed({}),
+        getOracleEstimate: Effect.succeed(0),
+        getFeedHealth: Effect.succeed({
+          sources: [],
+          healthyCount: 0,
+          staleCount: 0,
+          downCount: 0,
+          oracleEstimate: 0,
+          oracleSourceCount: 0,
+          updatedAt: Date.now(),
+        }),
+      },
+      isTradingActive: Effect.succeed(false),
+      getMode: Effect.succeed("shadow" as const),
+      getStrategyStates: Effect.succeed([]),
+      getCurrentWindow: Effect.succeed(null),
+      getOrderBookState: Effect.succeed({
+        up: { bids: [], asks: [] },
+        down: { bids: [], asks: [] },
+        bestAskUp: null,
+        bestAskDown: null,
+        bestBidUp: null,
+        bestBidDown: null,
+      }),
+      getRegime: Effect.succeed({
+        volatilityRegime: "normal",
+        trendRegime: "chop",
+        liquidityRegime: "normal",
+        spreadRegime: "normal",
+      }),
+      getKillSwitchStatus: Effect.succeed([]),
+      getRiskSnapshot: Effect.succeed({
+        openPositions: 0,
+        maxConcurrentPositions: 0,
+        openExposure: 0,
+        maxTotalExposure: 0,
+        dailyPnl: 0,
+        maxDailyLoss: 0,
+        hourlyPnl: 0,
+        maxHourlyLoss: 0,
+        consecutiveLosses: 0,
+        maxConsecutiveLosses: 0,
+        windowLosses: 0,
+        maxLossPerWindow: 0,
+        pauseRemainingSec: 0,
+      }),
+      getMetrics: Effect.succeed({
+        windowConditionId: null,
+        rolling: {},
+        window: {},
+        latency: {
+          lastSignalToSubmitMs: 0,
+          avgSignalToSubmitMs: 0,
+          avgRecentSignalToSubmitMs: 0,
+          samples: 0,
+          lastSampleAt: 0,
+          priceDataAgeMs: 0,
+          orderbookAgeMs: 0,
+        },
+        reconciliation: {
+          updatedAt: 0,
+          liveTotalTrades: 0,
+          shadowTotalTrades: 0,
+          liveWinRate: 0,
+          shadowWinRate: 0,
+          liveTotalPnl: 0,
+          shadowTotalPnl: 0,
+          strategies: [],
+        },
+      }),
+      getWindowTitle: Effect.succeed("BTC/USD 5m"),
+      getTradeRecords: (_limit?: number) => Effect.succeed([]),
+      listTrades: (_query: any) => Effect.succeed({ items: [], hasMore: false, nextCursor: null }),
+      getPnLSummary: Effect.succeed({
+        totalPnl: 0,
+        todayPnl: 0,
+        totalTrades: 0,
+        winRate: 0,
+        byStrategy: {},
+        history: [],
+      }),
+      getShadowPnLSummary: Effect.succeed({
+        totalPnl: 0,
+        todayPnl: 0,
+        totalTrades: 0,
+        winRate: 0,
+        byStrategy: {},
+        history: [],
+      }),
+      getFeedHealth: Effect.succeed({
+        sources: [],
+        healthyCount: 0,
+        staleCount: 0,
+        downCount: 0,
+        oracleEstimate: 0,
+        oracleSourceCount: 0,
+        updatedAt: Date.now(),
+      }),
+    };
+
+    const orchestratorLayer = Layer.succeed(MarketOrchestrator, {
+      getEngine: (id: string) => (id === "btc" ? fakeMarketEngine : null),
+      getAllEngines: () => [fakeMarketEngine],
+      getEnabledMarketIds: () => ["btc"],
+      getEnabledMarkets: () => [{ id: "btc", displayName: "BTC" }],
+    } as any);
+
     const layer = WebSocketService.Default.pipe(
       Layer.provideMerge(engineLayer),
       Layer.provideMerge(feedLayer),
       Layer.provideMerge(polyLayer),
       Layer.provideMerge(busLayer),
       Layer.provideMerge(observabilityLayer),
+      Layer.provideMerge(postgresLayer),
+      Layer.provideMerge(orchestratorLayer),
+      Layer.provideMerge(makeTestConfigLayer()),
     );
 
     const messages = await Effect.runPromise(
@@ -190,7 +314,7 @@ describe("WebSocketService integration", () => {
           priceToBeatAtEntry: 100000,
         };
 
-        yield* eventBus.publish({ _tag: "Trade", data: trade });
+        yield* eventBus.publish({ _tag: "Trade", data: trade, marketId: "btc" });
         yield* eventBus.publish({
           _tag: "Observability",
           data: {
@@ -215,7 +339,10 @@ describe("WebSocketService integration", () => {
     );
 
     expect(messages.some((m: any) => m.type === "status")).toBe(true);
-    expect(messages.some((m: any) => m.type === "trade" && m.data.id === "t-1")).toBe(true);
+    const tradeMsg = messages.find((m: any) => m.type === "trade" && m.data.id === "t-1");
+    expect(tradeMsg).not.toBeUndefined();
+    // marketId must be included so the frontend routes the event to the correct market
+    expect(tradeMsg?.marketId).toBe("btc");
     expect(messages.some((m: any) => m.type === "observabilityEvent" && m.data.eventId === "obs-ws-1")).toBe(true);
   });
 });

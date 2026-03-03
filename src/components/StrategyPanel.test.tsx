@@ -38,7 +38,7 @@ describe("StrategyPanel", () => {
       .spyOn(globalThis, "fetch")
       .mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === "/api/strategies") {
+      if (url.startsWith("/api/strategies?")) {
         return Promise.resolve({
           ok: true,
           json: async () => [],
@@ -72,17 +72,17 @@ describe("StrategyPanel", () => {
       expect(fetchSpy).toHaveBeenCalled();
     });
 
-    expect(fetchSpy).toHaveBeenCalledWith("/api/strategies/arb/toggle", {
+    expect(fetchSpy).toHaveBeenCalledWith("/api/strategies/btc/arb/toggle", {
       method: "POST",
     });
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/strategies/arb/config",
+      "/api/strategies/btc/arb/config",
       expect.objectContaining({ method: "POST" }),
     );
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/strategies/arb/regime-filter",
+      "/api/strategies/btc/arb/regime-filter",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(fetchSpy).toHaveBeenCalledWith("/api/strategies");
+    expect(fetchSpy).toHaveBeenCalledWith("/api/strategies?marketId=btc");
   });
 });

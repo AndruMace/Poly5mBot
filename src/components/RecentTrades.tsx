@@ -60,6 +60,7 @@ export function RecentTrades() {
             <thead>
               <tr className="text-[var(--text-secondary)]">
                 <th className="text-left py-1.5 px-2 font-medium">Time</th>
+                <th className="text-left py-1.5 px-2 font-medium">Market</th>
                 <th className="text-left py-1.5 px-2 font-medium">Strategy</th>
                 <th className="text-left py-1.5 px-2 font-medium">Side</th>
                 <th className="text-right py-1.5 px-2 font-medium">Price</th>
@@ -82,6 +83,11 @@ export function RecentTrades() {
                 >
                   <td className="py-1.5 px-2 font-mono text-[var(--text-secondary)]">
                     {new Date(t.timestamp).toLocaleTimeString()}
+                  </td>
+                  <td className="py-1.5 px-2">
+                    <span className="rounded bg-[var(--accent-blue)]/15 px-1.5 py-0.5 text-[10px] font-mono text-[var(--accent-blue)]">
+                      {(t.marketId ?? "btc").toUpperCase()}
+                    </span>
                   </td>
                   <td className="py-1.5 px-2">
                     {getStrategyDisplayName(t.strategy)}

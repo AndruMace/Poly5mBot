@@ -513,6 +513,9 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           }
 
           const parsed = inspectPostedOrder(fakResult.right);
+          // Extract fill details from the immediate FAK response (sizeMatched, avgPrice).
+          // These are available on the first response for FAK orders without polling.
+          const parsedNorm = normalizeOrderStatus(fakResult.right);
 
           // FAK resolves immediately, but handle the rare API race where status is
           // still "live" on the first response — poll once for the final status.
@@ -542,8 +545,9 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             return null as TradeRecord | null;
           }
 
-          const finalAvgPrice = resolvedAvgPrice ?? fakQ.price;
-          const finalShares = resolvedFilledShares ?? fakNorm.shares;
+          // Prefer polled data; fall back to what the initial FAK response reported.
+          const finalAvgPrice = resolvedAvgPrice ?? parsedNorm.avgPrice ?? fakQ.price;
+          const finalShares = resolvedFilledShares ?? parsedNorm.filledShares ?? fakNorm.shares;
           const fee = calculateFee(finalShares, finalAvgPrice);
           const record: TradeRecord = {
             id: `trade-${++tradeCounter}-${Date.now()}`,

@@ -631,11 +631,13 @@ export function useWebSocket() {
                 patchPerMarket(msgMarketId, "strategies", msg.data as any);
                 if (isActive) registry.set(strategiesRx, msg.data as any);
                 break;
-              case "trade":
+              case "trade": {
                 // Trades are global (all markets shown together in trades tab)
-                pendingTrades.set((msg.data as TradeRecord).id, msg.data as TradeRecord);
+                const trade = { ...(msg.data as TradeRecord), marketId: msgMarketId };
+                pendingTrades.set(trade.id, trade);
                 scheduleTradeFlush();
                 break;
+              }
               case "pnl":
                 {
                   const next = normalizePnlSummary(msg.data as PnLSummary);

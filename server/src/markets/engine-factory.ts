@@ -238,7 +238,7 @@ export function createStandaloneMarketEngine(
     const getAllTradeRecords = (shadow = false) =>
       Effect.gen(function* () {
         const all = yield* getStoreFor(shadow).getAllTrades;
-        return all.map(toTradeRecord);
+        return all.map((t) => ({ ...toTradeRecord(t), marketId }));
       });
 
     const getTradeById = (id: string, shadow = false) => getStoreFor(shadow).getTrade(id);
@@ -256,8 +256,8 @@ export function createStandaloneMarketEngine(
         const liveAll = yield* liveStore.getAllTrades;
         const shadowAll = yield* shadowStore.getAllTrades;
         let combined: TradeRecord[] = [];
-        if (mode === "all" || mode === "live") combined.push(...liveAll.map(toTradeRecord));
-        if (mode === "all" || mode === "shadow") combined.push(...shadowAll.map(toTradeRecord));
+        if (mode === "all" || mode === "live") combined.push(...liveAll.map((t) => ({ ...toTradeRecord(t), marketId })));
+        if (mode === "all" || mode === "shadow") combined.push(...shadowAll.map((t) => ({ ...toTradeRecord(t), marketId })));
         if (typeof query.sinceMs === "number" && Number.isFinite(query.sinceMs)) {
           combined = combined.filter((t) => t.timestamp >= query.sinceMs!);
         }

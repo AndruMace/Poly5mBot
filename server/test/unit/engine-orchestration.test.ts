@@ -221,6 +221,16 @@ function makeHarness(opts: {
   switchWindowAtMarketCall?: number;
   dualBuyIncident?: boolean;
   files?: Map<string, string>;
+  /** Include this clobOrderId in submitted trades so reconcile can process them */
+  orderClobId?: string;
+  /** What getOrderStatusById returns when called (default: all nulls) */
+  reconcileStatus?: {
+    mappedStatus: string | null;
+    rawStatus: string | null;
+    avgPrice: number | null;
+    filledShares: number | null;
+    reason: string | null;
+  };
 }): EngineHarness {
   let marketCalls = 0;
   let executeSignalCalls = 0;
@@ -300,6 +310,7 @@ function makeHarness(opts: {
           shadow: false,
           conditionId,
           priceToBeatAtEntry,
+          ...(opts.orderClobId ? { clobOrderId: opts.orderClobId } : {}),
         };
         return trade;
       }),
@@ -335,13 +346,15 @@ function makeHarness(opts: {
         asks: [{ price: "0.55", size: "100" }],
       }),
     getOrderStatusById: () =>
-      Effect.succeed({
-        mappedStatus: null,
-        rawStatus: null,
-        avgPrice: null,
-        filledShares: null,
-        reason: null,
-      }),
+      Effect.succeed(
+        opts.reconcileStatus ?? {
+          mappedStatus: null,
+          rawStatus: null,
+          avgPrice: null,
+          filledShares: null,
+          reason: null,
+        },
+      ),
     listRecentOrders: () => Effect.succeed([]),
   } as any);
 
@@ -508,6 +521,60 @@ describe("TradingEngine orchestration", () => {
         expect(harness.executeDualCalls).toBeGreaterThan(0);
         const active = yield* engine.isTradingActive;
         expect(active).toBe(false);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("reconcile transitions submitted trade to filled when order is filled", async () => {
+    const harness = makeHarness({
+      window1: "cond-rec-fill",
+      orderClobId: "clob-fill-1",
+      reconcileStatus: {
+        mappedStatus: "filled",
+        rawStatus: "MATCHED",
+        avgPrice: 0.55,
+        filledShares: 9,
+        reason: null,
+      },
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        yield* engine.setTradingActive(true);
+        // Allow enough ticks: first tick submits the trade, next ticks reconcile it
+        yield* TestClock.adjust("2 seconds");
+
+        const trades = yield* engine.tracker.getTrades(50);
+        const filled = trades.filter((t: TradeRecord) => t.status === "filled");
+        expect(filled.length).toBeGreaterThan(0);
+        expect(filled[0]?.clobOrderId).toBe("clob-fill-1");
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("reconcile marks submitted trade as cancelled when order is cancelled", async () => {
+    const harness = makeHarness({
+      window1: "cond-rec-cancel",
+      orderClobId: "clob-cancel-1",
+      reconcileStatus: {
+        mappedStatus: "cancelled",
+        rawStatus: "CANCELLED",
+        avgPrice: null,
+        filledShares: null,
+        reason: "order cancelled",
+      },
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        yield* engine.setTradingActive(true);
+        yield* TestClock.adjust("2 seconds");
+
+        const trades = yield* engine.tracker.getTrades(50);
+        const cancelled = trades.filter((t: TradeRecord) => t.status === "cancelled");
+        expect(cancelled.length).toBeGreaterThan(0);
       }).pipe(Effect.scoped, Effect.provide(harness.layer)),
     );
   });

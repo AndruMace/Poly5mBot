@@ -39,6 +39,8 @@ export const TestAppConfig = Layer.succeed(AppConfig, {
     staleDataMs: 5000,
     maxSpreadCents: 15,
     maxSignalAgeMs: 2000,
+    maxWindowSpend: 15,
+    maxWindowTrades: 6,
   },
   trading: { mode: "shadow" },
   redemption: {
@@ -51,6 +53,7 @@ export const TestAppConfig = Layer.succeed(AppConfig, {
     backend: "file",
     databaseUrl: "",
   },
+  markets: { enabledIds: ["btc"] },
   test: {
     ciLiveIntegration: false,
     liveTestTimeoutMs: 5000,
@@ -115,6 +118,8 @@ export const makeTestConfigLayer = (
       staleDataMs: 5000,
       maxSpreadCents: 15,
       maxSignalAgeMs: 2000,
+      maxWindowSpend: 15,
+      maxWindowTrades: 6,
       ...(overrides.risk ?? {}),
     },
     trading: {
@@ -136,6 +141,10 @@ export const makeTestConfigLayer = (
       backend: "file" as const,
       databaseUrl: "",
       ...(overrides.storage ?? {}),
+    },
+    markets: {
+      enabledIds: ["btc"] as ReadonlyArray<string>,
+      ...(overrides.markets ?? {}),
     },
     test: {
       ciLiveIntegration: false,

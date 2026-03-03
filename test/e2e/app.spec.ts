@@ -215,11 +215,11 @@ test("dashboard boot + header controls", async ({ page }) => {
   await expect(page.getByRole("button", { name: /shadow/i })).toBeVisible();
   await expect(page.getByRole("button", { name: /start trading/i })).toBeVisible();
 
-  const modeReq = page.waitForRequest("**/api/mode");
+  const modeReq = page.waitForRequest("**/api/mode/**");
   await page.getByRole("button", { name: /shadow/i }).click();
   await modeReq;
 
-  const toggleReq = page.waitForRequest("**/api/trading/toggle");
+  const toggleReq = page.waitForRequest("**/api/trading/**/toggle");
   await page.getByRole("button", { name: /start trading/i }).click();
   await toggleReq;
 });
@@ -269,5 +269,5 @@ test("notes load and save roundtrip", async ({ page }) => {
   const request = await saveReq;
   expect(request.method()).toBe("PUT");
 
-  await expect(page.getByText(/saved/i)).toBeVisible();
+  await expect(page.getByText(/^Saved/)).toBeVisible();
 });

@@ -50,11 +50,11 @@ describe("Header", () => {
     });
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/mode",
+      "/api/mode/btc",
       expect.objectContaining({ method: "POST" }),
     );
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/trading/toggle",
+      "/api/trading/btc/toggle",
       expect.objectContaining({ method: "POST" }),
     );
   });

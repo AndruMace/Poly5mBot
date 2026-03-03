@@ -47,6 +47,121 @@ function makeContext(overrides: Partial<MarketContext> = {}): MarketContext {
 }
 
 describe("Strategies", () => {
+  it("arb emits UP signal after 4 persistence ticks with positive spread", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeArbStrategy;
+        const ctx = makeContext({
+          // Binance leads oracle by 0.2% — above 0.04% threshold
+          prices: {
+            binance: { exchange: "binance", price: 100_200, timestamp: Date.now() },
+            bybit: { exchange: "bybit", price: 100_180, timestamp: Date.now() },
+            coinbase: { exchange: "coinbase", price: 100_190, timestamp: Date.now() },
+            kraken: { exchange: "kraken", price: 100_175, timestamp: Date.now() },
+            okx: { exchange: "okx", price: 100_185, timestamp: Date.now() },
+          },
+          oracleEstimate: 100_000,
+          oracleTimestamp: Date.now(),
+          priceToBeat: 100_000,
+          windowElapsedMs: 120_000,
+        });
+        // 4 calls in quick succession builds the persistence history
+        yield* strategy.evaluate(ctx);
+        yield* strategy.evaluate(ctx);
+        yield* strategy.evaluate(ctx);
+        const signal = yield* strategy.evaluate(ctx);
+        expect(signal).not.toBeNull();
+        expect(signal?.strategy).toBe("arb");
+        expect(signal?.side).toBe("UP");
+      }),
+    ));
+
+  it("arb returns null when spread is below minimum threshold", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeArbStrategy;
+        const ctx = makeContext({
+          // Only 0.02% spread — below 0.04% minimum
+          prices: {
+            binance: { exchange: "binance", price: 100_020, timestamp: Date.now() },
+          },
+          oracleEstimate: 100_000,
+          oracleTimestamp: Date.now(),
+          priceToBeat: 100_000,
+        });
+        const signal = yield* strategy.evaluate(ctx);
+        expect(signal).toBeNull();
+      }),
+    ));
+
+  it("arb emits DOWN signal after 4 ticks with negative spread", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeArbStrategy;
+        const ctx = makeContext({
+          // Binance lags oracle by 0.3% (negative spread) AND btcDelta < 0
+          prices: {
+            binance: { exchange: "binance", price: 99_700, timestamp: Date.now() },
+            bybit: { exchange: "bybit", price: 99_720, timestamp: Date.now() },
+            coinbase: { exchange: "coinbase", price: 99_710, timestamp: Date.now() },
+            kraken: { exchange: "kraken", price: 99_705, timestamp: Date.now() },
+            okx: { exchange: "okx", price: 99_695, timestamp: Date.now() },
+          },
+          oracleEstimate: 100_000,
+          oracleTimestamp: Date.now(),
+          priceToBeat: 100_000,
+          windowElapsedMs: 120_000,
+        });
+        yield* strategy.evaluate(ctx);
+        yield* strategy.evaluate(ctx);
+        yield* strategy.evaluate(ctx);
+        const signal = yield* strategy.evaluate(ctx);
+        expect(signal).not.toBeNull();
+        expect(signal?.side).toBe("DOWN");
+      }),
+    ));
+
+  it("efficiency returns null when token sum equals or exceeds 1.0", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeEfficiencyStrategy;
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            orderBook: {
+              up: { bids: [], asks: [{ price: 0.51, size: 100 }] },
+              down: { bids: [], asks: [{ price: 0.50, size: 100 }] },
+              bestAskUp: 0.51,
+              bestAskDown: 0.50,
+              bestBidUp: 0.49,
+              bestBidDown: 0.48,
+            },
+          }),
+        );
+        expect(signal).toBeNull();
+      }),
+    ));
+
+  it("efficiency returns null when profit after fees is below min bps", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeEfficiencyStrategy;
+        // Sum = 0.999 < 1.0 but fees eat all the profit (minProfitBps = 8)
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            orderBook: {
+              up: { bids: [], asks: [{ price: 0.500, size: 100 }] },
+              down: { bids: [], asks: [{ price: 0.499, size: 100 }] },
+              bestAskUp: 0.500,
+              bestAskDown: 0.499,
+              bestBidUp: 0.49,
+              bestBidDown: 0.48,
+            },
+          }),
+        );
+        expect(signal).toBeNull();
+      }),
+    ));
+
   it("efficiency emits signal when market is mispriced", () =>
     runTest(
       Effect.gen(function* () {

@@ -124,7 +124,7 @@ describe("OrderService", () => {
     expect(record?.clobReason).toContain("invalid signature");
   });
 
-  it("falls back to IOC partial fills after FOK liquidity exhaustion", async () => {
+  it("falls back to FAK partial fills after FOK liquidity exhaustion", async () => {
     const client = {
       createAndPostOrder: async (
         _order: { price: number; size: number },

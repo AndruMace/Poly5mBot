@@ -167,10 +167,10 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
 
         let combined: TradeRecord[] = [];
         if (mode === "all" || mode === "live") {
-          combined.push(...liveAll.map(toTradeRecord));
+          combined.push(...liveAll.map((t) => ({ ...toTradeRecord(t), marketId: "btc" })));
         }
         if (mode === "all" || mode === "shadow") {
-          combined.push(...shadowAll.map(toTradeRecord));
+          combined.push(...shadowAll.map((t) => ({ ...toTradeRecord(t), marketId: "btc" })));
         }
 
         if (typeof query.sinceMs === "number" && Number.isFinite(query.sinceMs)) {
