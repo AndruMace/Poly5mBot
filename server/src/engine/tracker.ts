@@ -146,8 +146,8 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
         settlementWinnerSide: details?.settlementWinnerSide ?? null,
       });
 
-    const expireTrade = (id: string, closingBtcPrice: number, shadow = false) =>
-      getStore(shadow).appendEvent(id, "expired", { closingBtcPrice });
+    const expireTrade = (id: string, closingAssetPrice: number, shadow = false) =>
+      getStore(shadow).appendEvent(id, "expired", { closingAssetPrice });
 
     const cancelTrade = (id: string, reason: string, shadow = false) =>
       Effect.gen(function* () {

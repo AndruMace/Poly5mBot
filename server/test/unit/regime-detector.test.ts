@@ -42,7 +42,8 @@ describe("RegimeDetector", () => {
           windowElapsedMs: 1000,
           windowRemainingMs: 10_000,
           priceToBeat: 100_000,
-          currentBtcPrice: 100_050,
+          currentAssetPrice: 100_050,
+          marketId: "btc",
         });
         const regime = yield* detector.getRegime;
         expect(regime.liquidityRegime).toBeDefined();

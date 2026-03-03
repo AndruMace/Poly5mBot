@@ -9,6 +9,7 @@ import { AccountActivityStore } from "../../src/activity/store.js";
 import { CriticalIncidentStore } from "../../src/incident/store.js";
 import { PostgresStorage } from "../../src/storage/postgres.js";
 import { ObservabilityStore } from "../../src/observability/store.js";
+import { MarketOrchestrator } from "../../src/markets/orchestrator.js";
 import { AppConfig } from "../../src/config.js";
 import type { AppConfigShape } from "../../src/config.js";
 import type { WSStatusSnapshot } from "../../src/types.js";
@@ -52,6 +53,9 @@ const baseConfig: AppConfigShape = {
   storage: {
     backend: "file",
     databaseUrl: "",
+  },
+  markets: {
+    enabledIds: ["btc"],
   },
   test: {
     ciLiveIntegration: false,
@@ -152,7 +156,7 @@ const fakeEngine = {
 const fakeFeedService = {
   getLatestPrices: Effect.succeed({}),
   getOracleEstimate: Effect.succeed(0),
-  getCurrentBtcPrice: Effect.succeed(0),
+  getCurrentAssetPrice: Effect.succeed(0),
   getFeedHealth: Effect.succeed({
     sources: [],
     healthyCount: 0,
@@ -248,6 +252,34 @@ const fakeObservabilityStore = {
   latest: (_limit = 200) => Effect.succeed([]),
 };
 
+const fakeMarketEngine = {
+  marketId: "btc",
+  displayName: "BTC",
+  feedManager: {
+    marketId: "btc",
+    getLatestPrices: fakeFeedService.getLatestPrices,
+    getOracleEstimate: fakeFeedService.getOracleEstimate,
+    getOracleTimestamp: Effect.succeed(0),
+    getCurrentAssetPrice: fakeFeedService.getCurrentAssetPrice,
+    getFeedHealth: fakeFeedService.getFeedHealth,
+    getRecentPrices: Effect.succeed([]),
+    priceChanges: Effect.succeed({ "1m": 0, "5m": 0 }),
+  },
+  ...fakeEngine,
+  listTrades: fakeEngine.tracker.listTrades,
+  getTradeRecords: (_limit?: number) => Effect.succeed([]),
+  getPnLSummary: fakeEngine.tracker.getSummary(false),
+  getShadowPnLSummary: fakeEngine.tracker.getSummary(true),
+  getFeedHealth: fakeFeedService.getFeedHealth,
+};
+
+const fakeOrchestrator = {
+  getEngine: (id: string) => (id === "btc" ? fakeMarketEngine : null),
+  getAllEngines: () => [fakeMarketEngine],
+  getEnabledMarketIds: () => ["btc"],
+  getEnabledMarkets: () => [{ id: "btc", displayName: "BTC" }],
+};
+
 const testLayer = Layer.mergeAll(
   Layer.succeed(AppConfig, baseConfig as any),
   Layer.succeed(TradingEngine, fakeEngine as any),
@@ -258,6 +290,7 @@ const testLayer = Layer.mergeAll(
   Layer.succeed(CriticalIncidentStore, fakeIncidentStore as any),
   Layer.succeed(ObservabilityStore, fakeObservabilityStore as any),
   Layer.succeed(PostgresStorage, fakePostgresStorage as any),
+  Layer.succeed(MarketOrchestrator, fakeOrchestrator as any),
 );
 
 describe("API handler integration", () => {

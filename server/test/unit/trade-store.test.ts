@@ -38,7 +38,7 @@ const sampleEntryContext: EntryContext = {
     bestBidUp: 0.53,
     bestBidDown: 0.46,
     oracleEstimate: 64010,
-    currentBtcPrice: 64015,
+    currentAssetPrice: 64015,
   },
   riskAtEntry: {
     openPositions: 2,

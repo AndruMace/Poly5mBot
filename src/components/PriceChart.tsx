@@ -5,6 +5,8 @@ import {
   pricesRx,
   oracleEstimateRx,
   currentMarketRx,
+  activeMarketIdRx,
+  enabledMarketsRx,
 } from "../store/index.js";
 import {
   LineChart,
@@ -40,6 +42,9 @@ export function PriceChart() {
   const prices = useRxValue(pricesRx);
   const oracleEstimate = useRxValue(oracleEstimateRx);
   const currentMarket = useRxValue(currentMarketRx);
+  const activeMarketId = useRxValue(activeMarketIdRx);
+  const enabledMarkets = useRxValue(enabledMarketsRx);
+  const activeDisplayName = enabledMarkets.find((m) => m.id === activeMarketId)?.displayName ?? activeMarketId.toUpperCase();
   const priceToBeat = currentMarket?.priceToBeat ?? 0;
 
   const latestPrice = useMemo(() => {
@@ -99,7 +104,7 @@ export function PriceChart() {
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-4">
           <span className="text-sm text-[var(--text-secondary)]">
-            BTC Price
+            {activeDisplayName} Price
           </span>
           {displayPrice > 0 && (
             <div className="flex items-center gap-2">

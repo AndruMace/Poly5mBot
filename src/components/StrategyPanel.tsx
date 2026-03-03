@@ -1,5 +1,5 @@
 import { useRxValue, useRxSet } from "@effect-rx/rx-react";
-import { strategiesRx } from "../store/index.js";
+import { strategiesRx, activeMarketIdRx } from "../store/index.js";
 import { StrategyCard } from "./StrategyCard.js";
 import { Brain } from "lucide-react";
 import type { RegimeFilter } from "../types/index.js";
@@ -7,10 +7,11 @@ import type { RegimeFilter } from "../types/index.js";
 export function StrategyPanel() {
   const strategies = useRxValue(strategiesRx);
   const setStrategies = useRxSet(strategiesRx);
+  const activeMarketId = useRxValue(activeMarketIdRx);
 
   async function handleToggle(name: string) {
     try {
-      await fetch(`/api/strategies/${name}/toggle`, { method: "POST" });
+      await fetch(`/api/strategies/${activeMarketId}/${name}/toggle`, { method: "POST" });
     } catch (err) {
       console.error("Failed to toggle strategy:", err);
     }
@@ -21,13 +22,13 @@ export function StrategyPanel() {
     config: Record<string, number>,
   ): Promise<boolean> {
     try {
-      const res = await fetch(`/api/strategies/${name}/config`, {
+      const res = await fetch(`/api/strategies/${activeMarketId}/${name}/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
       });
       if (!res.ok) return false;
-      const latest = await fetch("/api/strategies");
+      const latest = await fetch(`/api/strategies?marketId=${activeMarketId}`);
       if (latest.ok) {
         const data = await latest.json();
         setStrategies(data);
@@ -44,13 +45,13 @@ export function StrategyPanel() {
     filter: RegimeFilter,
   ): Promise<boolean> {
     try {
-      const res = await fetch(`/api/strategies/${name}/regime-filter`, {
+      const res = await fetch(`/api/strategies/${activeMarketId}/${name}/regime-filter`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(filter),
       });
       if (!res.ok) return false;
-      const latest = await fetch("/api/strategies");
+      const latest = await fetch(`/api/strategies?marketId=${activeMarketId}`);
       if (latest.ok) {
         const data = await latest.json();
         setStrategies(data);

@@ -25,6 +25,8 @@ import {
   wsLastMessageTsRx,
   incidentsRx,
   observabilityEventsRx,
+  activeMarketIdRx,
+  enabledMarketsRx,
   MAX_PRICE_HISTORY,
   MAX_PNL_HISTORY,
   emptyOrderBook,
@@ -453,6 +455,10 @@ export function useWebSocket() {
         observabilityEventsRx,
         (prev) => mergeObservability(prev, [...(data.observabilityEvents ?? [])]),
       );
+      // Multi-market: set enabled markets list from snapshot
+      if (data.enabledMarkets && data.enabledMarkets.length > 0) {
+        registry.set(enabledMarketsRx, [...data.enabledMarkets]);
+      }
       fetchIncidents();
     }
 

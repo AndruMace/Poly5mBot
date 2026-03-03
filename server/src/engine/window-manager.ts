@@ -8,7 +8,7 @@ interface WindowManagerDeps {
   stateRef: Ref.Ref<EngineState>;
   strategies: ReadonlyArray<Strategy>;
   fetchCurrentWindow: Effect.Effect<MarketWindow | null, never, never>;
-  fetchCurrentBtcPrice: Effect.Effect<number, never, never>;
+  fetchCurrentAssetPrice: Effect.Effect<number, never, never>;
   isConnected: Effect.Effect<boolean, never, never>;
   onNewWindow: (conditionId: string) => Effect.Effect<void, never, never>;
   emit: (event: EngineEvent) => Effect.Effect<void, never, never>;
@@ -26,7 +26,7 @@ export function makeMarketPoller(deps: WindowManagerDeps) {
     if (current && current.conditionId !== st.currentWindow?.conditionId) {
       let ptb = current.priceToBeat;
       if (ptb === null) {
-        const openPrice = yield* deps.fetchCurrentBtcPrice;
+        const openPrice = yield* deps.fetchCurrentAssetPrice;
         if (openPrice > 0) {
           ptb = openPrice;
           yield* Effect.logWarning(

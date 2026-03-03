@@ -139,6 +139,65 @@ function computeSpread(ctx: MarketContext): { regime: RegimeState["spreadRegime"
   return { regime: "blowout", value: maxSpread };
 }
 
+/** Factory that creates a standalone (non-DI) regime detector instance. Same logic as RegimeDetector.effect. */
+export function createRegimeDetector(): Effect.Effect<{
+  readonly addPrice: (p: PricePoint) => Effect.Effect<void>;
+  readonly update: (ctx: MarketContext) => Effect.Effect<void>;
+  readonly getRegime: Effect.Effect<RegimeState>;
+}> {
+  return Effect.gen(function* () {
+    const priceBufferRef = yield* Ref.make<PricePoint[]>([]);
+    const smoothedVolRef = yield* Ref.make<number | null>(null);
+    const regimeRef = yield* Ref.make<RegimeState>({
+      volatilityRegime: "normal",
+      trendRegime: "chop",
+      liquidityRegime: "normal",
+      spreadRegime: "normal",
+      volatilityValue: 0,
+      trendStrength: 0,
+      liquidityDepth: 0,
+      spreadValue: 0,
+    });
+
+    const addPrice = (p: PricePoint) =>
+      Ref.update(priceBufferRef, (buf) => {
+        if (!Number.isFinite(p.price) || p.price <= 0 || !Number.isFinite(p.timestamp)) return buf;
+        const next = [...buf, p];
+        if (next.length > 5000) {
+          const cutoff = Date.now() - 600_000;
+          return next.filter((pp) => pp.timestamp >= cutoff);
+        }
+        return next;
+      });
+
+    const update = (ctx: MarketContext) =>
+      Effect.gen(function* () {
+        const buf = yield* Ref.get(priceBufferRef);
+        const smoothed = yield* Ref.get(smoothedVolRef);
+        const volResult = computeVolatility(buf, smoothed);
+        const trendResult = computeTrend(buf);
+        const liqResult = computeLiquidity(ctx);
+        const spreadResult = computeSpread(ctx);
+
+        yield* Ref.set(smoothedVolRef, volResult.smoothed);
+        yield* Ref.set(regimeRef, {
+          volatilityRegime: volResult.regime,
+          trendRegime: trendResult.regime,
+          liquidityRegime: liqResult.regime,
+          spreadRegime: spreadResult.regime,
+          volatilityValue: volResult.vol,
+          trendStrength: trendResult.strength,
+          liquidityDepth: liqResult.depth,
+          spreadValue: spreadResult.value,
+        });
+      });
+
+    const getRegime = Ref.get(regimeRef);
+
+    return { addPrice, update, getRegime } as const;
+  });
+}
+
 export class RegimeDetector extends Effect.Service<RegimeDetector>()("RegimeDetector", {
   effect: Effect.gen(function* () {
     const priceBufferRef = yield* Ref.make<PricePoint[]>([]);

@@ -1,10 +1,4 @@
-import { Effect, Ref, Stream, SubscriptionRef, Schedule } from "effect";
-import { binanceFeed } from "./binance.js";
-import { bybitFeed } from "./bybit.js";
-import { coinbaseFeed } from "./coinbase.js";
-import { krakenFeed } from "./kraken.js";
-import { bitstampFeed } from "./bitstamp.js";
-import { okxFeed } from "./okx.js";
+import { Effect, Ref, Scope, Stream, SubscriptionRef } from "effect";
 import { computeOracleEstimate } from "./oracle.js";
 import type { PricePoint, FeedHealthSnapshot, FeedSourceHealth } from "../types.js";
 
@@ -20,20 +14,31 @@ interface FeedState {
   readonly oracleSourceCount: number;
 }
 
-const initialFeedState: FeedState = {
-  latestByExchange: new Map(),
-  connectionByExchange: new Map([
-    ["binance", false], ["bybit", false], ["coinbase", false],
-    ["kraken", false], ["bitstamp", false], ["okx", false],
-  ]),
-  oracleEstimate: 0,
-  oracleTimestamp: 0,
-  oracleSourceCount: 0,
-};
+export interface MarketFeedInstance {
+  readonly marketId: string;
+  readonly getLatestPrices: Effect.Effect<Record<string, PricePoint>>;
+  readonly getOracleEstimate: Effect.Effect<number>;
+  readonly getOracleTimestamp: Effect.Effect<number>;
+  readonly getCurrentAssetPrice: Effect.Effect<number>;
+  readonly getFeedHealth: Effect.Effect<FeedHealthSnapshot>;
+  readonly getRecentPrices: (lookbackMs: number, exchange?: string) => Effect.Effect<PricePoint[]>;
+  readonly priceChanges: SubscriptionRef.SubscriptionRef<FeedState>["changes"];
+}
 
-export class FeedService extends Effect.Service<FeedService>()("FeedService", {
-  scoped: Effect.gen(function* () {
-    const stateRef = yield* SubscriptionRef.make<FeedState>(initialFeedState);
+export function createMarketFeedManager(
+  marketId: string,
+  feedStreams: Stream.Stream<PricePoint, never, never>[],
+  feedNames: string[],
+): Effect.Effect<MarketFeedInstance, never, Scope.Scope> {
+  return Effect.gen(function* () {
+    const initialConnections = new Map<string, boolean>(feedNames.map((n) => [n, false]));
+    const stateRef = yield* SubscriptionRef.make<FeedState>({
+      latestByExchange: new Map(),
+      connectionByExchange: initialConnections,
+      oracleEstimate: 0,
+      oracleTimestamp: 0,
+      oracleSourceCount: 0,
+    });
     const historyRef = yield* Ref.make<PricePoint[]>([]);
 
     const updatePrice = (point: PricePoint) =>
@@ -59,10 +64,7 @@ export class FeedService extends Effect.Service<FeedService>()("FeedService", {
         });
       });
 
-    const allFeeds = Stream.mergeAll(
-      [binanceFeed, bybitFeed, coinbaseFeed, krakenFeed, bitstampFeed, okxFeed],
-      { concurrency: "unbounded" },
-    );
+    const allFeeds = Stream.mergeAll(feedStreams, { concurrency: "unbounded" });
 
     yield* allFeeds.pipe(
       Stream.tap(updatePrice),
@@ -70,7 +72,7 @@ export class FeedService extends Effect.Service<FeedService>()("FeedService", {
       Effect.forkScoped,
     );
 
-    yield* Effect.log(`[FeedService] 6 feeds started`);
+    yield* Effect.log(`[FeedManager:${marketId}] ${feedStreams.length} feeds started`);
 
     const getLatestPrices = SubscriptionRef.get(stateRef).pipe(
       Effect.map((s) => {
@@ -101,7 +103,6 @@ export class FeedService extends Effect.Service<FeedService>()("FeedService", {
     const getFeedHealth: Effect.Effect<FeedHealthSnapshot> = SubscriptionRef.get(stateRef).pipe(
       Effect.map((s) => {
         const now = Date.now();
-        const feedNames = ["binance", "bybit", "coinbase", "kraken", "bitstamp", "okx"];
         const sources: FeedSourceHealth[] = feedNames.map((name) => {
           const latest = s.latestByExchange.get(name) ?? null;
           const lastUpdateTs = latest?.timestamp ?? null;
@@ -155,6 +156,7 @@ export class FeedService extends Effect.Service<FeedService>()("FeedService", {
     const priceChanges = stateRef.changes;
 
     return {
+      marketId,
       getLatestPrices,
       getOracleEstimate,
       getOracleTimestamp,
@@ -163,5 +165,5 @@ export class FeedService extends Effect.Service<FeedService>()("FeedService", {
       getRecentPrices,
       priceChanges,
     } as const;
-  }),
-}) {}
+  });
+}

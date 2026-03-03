@@ -40,7 +40,7 @@ export const makeWhaleHuntStrategy = Effect.gen(function* () {
 
       yield* Ref.update(ref, (st) => ({ ...st, status: "watching" as const }));
 
-      const priceMove = ((ctx.currentBtcPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
+      const priceMove = ((ctx.currentAssetPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
       const absMove = Math.abs(priceMove);
       const baseEntryWindowSec = s.config["entryWindowSec"]!;
       const maxDynamicEntryWindowSec = Math.max(baseEntryWindowSec, s.config["maxDynamicEntryWindowSec"]!);

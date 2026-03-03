@@ -126,6 +126,15 @@ export const emptyStorageHealth: StorageHealthStatus = {
   ok: true,
 };
 
+export interface EnabledMarket {
+  id: string;
+  displayName: string;
+}
+
+// Writable Rx atoms — multi-market
+export const activeMarketIdRx = Rx.make("btc");
+export const enabledMarketsRx = Rx.make<EnabledMarket[]>([{ id: "btc", displayName: "BTC" }]);
+
 // Writable Rx atoms
 export const connectedRx = Rx.make(false);
 export const exchangeConnectedRx = Rx.make(false);

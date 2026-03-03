@@ -92,7 +92,7 @@ const CONFIG_HELP: Record<string, { description: string }> = {
   },
   minPriceMovePct: {
     description:
-      "Minimum BTC move vs price-to-beat required before the strategy can trigger.",
+      "Minimum asset price move vs price-to-beat required before the strategy can trigger.",
   },
   minEarlyGapPct: {
     description:

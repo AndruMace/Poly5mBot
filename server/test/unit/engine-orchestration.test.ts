@@ -254,7 +254,7 @@ function makeHarness(opts: {
     })),
     getOracleEstimate: Effect.succeed(100_000),
     getOracleTimestamp: Effect.sync(() => Date.now()),
-    getCurrentBtcPrice: Effect.succeed(100_000),
+    getCurrentAssetPrice: Effect.succeed(100_000),
     getFeedHealth: Effect.succeed({
       sources: [],
       healthyCount: 1,

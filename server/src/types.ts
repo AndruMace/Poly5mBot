@@ -98,7 +98,8 @@ export interface TradeRecord {
   shadow?: boolean;
   conditionId: string;
   priceToBeatAtEntry: number;
-  closingBtcPrice?: number;
+  closingAssetPrice?: number;
+  marketId?: string;
   lastEventType?: TradeEventType;
   clobOrderId?: string;
   clobResult?: string;
@@ -138,7 +139,7 @@ export interface EntryContext {
     bestBidUp: number | null;
     bestBidDown: number | null;
     oracleEstimate: number;
-    currentBtcPrice: number;
+    currentAssetPrice: number;
   };
 
   riskAtEntry: {
@@ -186,7 +187,7 @@ export interface Trade {
   outcome: TradeOutcome | null;
   resolutionSource?: ResolutionSource;
   settlementWinnerSide?: Side | null;
-  closingBtcPrice?: number;
+  closingAssetPrice?: number;
   clobOrderId?: string;
   clobResult?: string;
   clobReason?: string;
@@ -441,7 +442,8 @@ export interface MarketContext {
   windowElapsedMs: number;
   windowRemainingMs: number;
   priceToBeat: number | null;
-  currentBtcPrice: number;
+  currentAssetPrice: number;
+  marketId: string;
 }
 
 // ── WebSocket types ──
@@ -470,6 +472,27 @@ export interface WSMessage {
   type: WSMessageType;
   data: unknown;
   timestamp: number;
+  marketId?: string;
+}
+
+export interface WSMarketSnapshot {
+  marketId: string;
+  displayName: string;
+  tradingActive: boolean;
+  mode: TradingMode;
+  strategies: ReadonlyArray<StrategyState>;
+  market: MarketWindow | null;
+  orderbook: OrderBookState;
+  prices: Record<string, PricePoint>;
+  oracleEstimate: number;
+  feedHealth: FeedHealthSnapshot;
+  pnl: PnLSummary;
+  shadowPnl: PnLSummary;
+  trades: ReadonlyArray<TradeRecord>;
+  regime: RegimeState;
+  killSwitches: ReadonlyArray<KillSwitchStatus>;
+  risk: RiskSnapshot;
+  metrics: EngineMetrics;
 }
 
 export interface WSStatusSnapshot {
@@ -492,6 +515,10 @@ export interface WSStatusSnapshot {
   metrics: EngineMetrics;
   storage?: StorageHealthStatus;
   observabilityEvents?: ReadonlyArray<ObservabilityEvent>;
+  /** Multi-market snapshots keyed by market ID */
+  markets?: Record<string, WSMarketSnapshot>;
+  /** List of enabled market IDs */
+  enabledMarkets?: ReadonlyArray<{ id: string; displayName: string }>;
 }
 
 // ── API pagination/query contracts ──

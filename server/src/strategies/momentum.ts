@@ -51,7 +51,7 @@ export const makeMomentumStrategy = Effect.gen(function* () {
       const rsi = computeRSI(candles, s.config["rsiPeriod"]!);
       if (rsi === null) return null;
 
-      const priceMove = ((ctx.currentBtcPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
+      const priceMove = ((ctx.currentAssetPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
       const absMove = Math.abs(priceMove);
       if (absMove < s.config["minPriceMovePct"]!) return null;
 

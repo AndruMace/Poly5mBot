@@ -22,7 +22,9 @@ import { AccountActivityStore } from "./activity/store.js";
 import { CriticalIncidentStore } from "./incident/store.js";
 import { PostgresStorage } from "./storage/postgres.js";
 import { ObservabilityStore } from "./observability/store.js";
+import { GlobalRiskManager } from "./engine/global-risk.js";
 import { WebSocketService } from "./ws/server.js";
+import { MarketOrchestrator } from "./markets/orchestrator.js";
 import { handleRequest } from "./api.js";
 
 // Always resolve env from workspace root regardless of cwd (server/src or server/dist).
@@ -31,6 +33,7 @@ dotenv.config({
 });
 
 const AppLive = WebSocketService.Default.pipe(
+  Layer.provideMerge(MarketOrchestrator.Default),
   Layer.provideMerge(TradingEngine.Default),
   Layer.provideMerge(AutoRedeemer.Default),
   Layer.provideMerge(PnLTracker.Default),
@@ -44,6 +47,7 @@ const AppLive = WebSocketService.Default.pipe(
   Layer.provideMerge(EventBus.Default),
   Layer.provideMerge(OrderService.Default),
   Layer.provideMerge(MarketService.Default),
+  Layer.provideMerge(GlobalRiskManager.Default),
 ).pipe(
   Layer.provideMerge(PolymarketClient.Default),
   Layer.provideMerge(NotesStore.Default),
@@ -60,7 +64,7 @@ const program = Effect.gen(function* () {
   const wsService = yield* WebSocketService;
   const polyClient = yield* PolymarketClient;
   const runtime = yield* Effect.runtime<
-    TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | ObservabilityStore | PostgresStorage | AppConfig
+    TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | ObservabilityStore | PostgresStorage | AppConfig | MarketOrchestrator
   >();
   const runFork = Runtime.runFork(runtime);
 

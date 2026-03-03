@@ -40,7 +40,8 @@ function makeContext(overrides: Partial<MarketContext> = {}): MarketContext {
     windowElapsedMs: 120_000,
     windowRemainingMs: 40_000,
     priceToBeat: 100_000,
-    currentBtcPrice: 100_200,
+    currentAssetPrice: 100_200,
+    marketId: "btc",
     ...overrides,
   };
 }
@@ -105,7 +106,7 @@ describe("Strategies", () => {
 
         const signal = yield* strategy.evaluate(
           makeContext({
-            currentBtcPrice: 100_220,
+            currentAssetPrice: 100_220,
             windowElapsedMs: 180_000,
             windowRemainingMs: 70_000,
           }),
