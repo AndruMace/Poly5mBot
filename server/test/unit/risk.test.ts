@@ -41,7 +41,8 @@ function makeContext(overrides: Partial<MarketContext> = {}): MarketContext {
     windowElapsedMs: 0,
     windowRemainingMs: 0,
     priceToBeat: 100_000,
-    currentBtcPrice: 100_000,
+    currentAssetPrice: 100_000,
+    marketId: "btc",
     ...overrides,
   };
 }

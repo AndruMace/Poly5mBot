@@ -151,12 +151,124 @@ export function inferSettlementWinnerFromMarket(market: GammaMarket): Settlement
 }
 
 export function formatWindowTitle(window: MarketWindow): string {
-  const start = new Date(window.startTime);
-  const end = new Date(window.endTime);
-  const fmt = (d: Date) =>
-    d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
-  const date = start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  return `BTC Up or Down — ${date}, ${fmt(start)}–${fmt(end)} ET`;
+  return formatWindowTitleForAsset("BTC Up or Down")(window);
+}
+
+export function formatWindowTitleForAsset(prefix: string) {
+  return (window: MarketWindow): string => {
+    const start = new Date(window.startTime);
+    const end = new Date(window.endTime);
+    const fmt = (d: Date) =>
+      d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+    const date = start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    return `${prefix} — ${date}, ${fmt(start)}–${fmt(end)} ET`;
+  };
+}
+
+export interface MarketPollerInstance {
+  readonly fetchCurrentWindow: Effect.Effect<MarketWindow | null, never, never>;
+  readonly fetchSettlementByCondition: (conditionId: string) => Effect.Effect<SettlementResult | null, never, never>;
+  readonly formatWindowTitle: (window: MarketWindow) => string;
+}
+
+export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string): Effect.Effect<MarketPollerInstance> {
+  return Effect.gen(function* () {
+    const cacheRef = yield* Ref.make<{ window: MarketWindow | null; lastFetch: number }>({
+      window: null,
+      lastFetch: 0,
+    });
+
+    const fetchCurrentWindow = Effect.gen(function* () {
+      const now = Date.now();
+      const cache = yield* Ref.get(cacheRef);
+
+      if (cache.window && now - cache.lastFetch < CACHE_TTL && cache.window.endTime > now) {
+        return cache.window;
+      }
+
+      const nowSec = Math.floor(now / 1000);
+      const currentStart = Math.floor(nowSec / FIVE_MIN_S) * FIVE_MIN_S;
+      const slugs = [
+        `${slugPrefix}-${currentStart}`,
+        `${slugPrefix}-${currentStart + FIVE_MIN_S}`,
+      ];
+
+      for (const slug of slugs) {
+        const result = yield* Effect.tryPromise({
+          try: async () => {
+            const url = `${GAMMA_API}/events?slug=${slug}`;
+            const res = await fetch(url);
+            if (!res.ok) return null;
+            const events = (await res.json()) as GammaEvent[];
+            if (!events || events.length === 0) return null;
+            const evt = events[0]!;
+            if (evt.closed || !evt.markets || evt.markets.length === 0) return null;
+            const mkt = evt.markets[0]!;
+            return { market: parseGammaMarket(mkt, evt), slug, title: evt.title };
+          },
+          catch: (err) => new PolymarketError({ message: `Error fetching ${slug}: ${err}`, cause: err }),
+        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+        if (result && result.market.endTime > now) {
+          const isNew = cache.window?.conditionId !== result.market.conditionId;
+          yield* Ref.set(cacheRef, { window: result.market, lastFetch: now });
+          if (isNew) {
+            yield* Effect.log(`[Markets:${slugPrefix}] Found: ${result.title} (${result.slug})`);
+          }
+          return result.market;
+        }
+      }
+
+      yield* Ref.update(cacheRef, (c) => {
+        const updated = { ...c, lastFetch: now };
+        if (c.window && c.window.endTime <= now) {
+          return { ...updated, window: null };
+        }
+        return updated;
+      });
+      const final = yield* Ref.get(cacheRef);
+      return final.window;
+    });
+
+    const fmtTitle = formatWindowTitleForAsset(windowTitlePrefix);
+
+    return {
+      fetchCurrentWindow,
+      fetchSettlementByCondition: fetchSettlementByConditionImpl,
+      formatWindowTitle: fmtTitle,
+    } as const;
+  });
+}
+
+function fetchSettlementByConditionImpl(conditionId: string) {
+  return Effect.gen(function* () {
+    const cid = conditionId.toLowerCase();
+    const endpoints = [
+      `${GAMMA_API}/markets?conditionId=${cid}`,
+      `${GAMMA_API}/markets?condition_id=${cid}`,
+      `${GAMMA_API}/markets?condition_ids=${cid}`,
+    ];
+
+    for (const url of endpoints) {
+      const candidate = yield* Effect.tryPromise({
+        try: async () => {
+          const res = await fetch(url);
+          if (!res.ok) return null;
+          const body = (await res.json()) as unknown;
+          const markets = Array.isArray(body) ? body : [];
+          const match = (markets as GammaMarket[]).find(
+            (m) => (m.conditionId ?? "").toLowerCase() === cid,
+          );
+          return match ?? null;
+        },
+        catch: () => null,
+      }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+      if (!candidate) continue;
+      return inferSettlementWinnerFromMarket(candidate);
+    }
+    return null;
+  });
 }
 
 const CACHE_TTL = 8_000;
@@ -220,36 +332,6 @@ export class MarketService extends Effect.Service<MarketService>()("MarketServic
       return final.window;
     });
 
-    const fetchSettlementByCondition = (conditionId: string) =>
-      Effect.gen(function* () {
-        const cid = conditionId.toLowerCase();
-        const endpoints = [
-          `${GAMMA_API}/markets?conditionId=${cid}`,
-          `${GAMMA_API}/markets?condition_id=${cid}`,
-          `${GAMMA_API}/markets?condition_ids=${cid}`,
-        ];
-
-        for (const url of endpoints) {
-          const candidate = yield* Effect.tryPromise({
-            try: async () => {
-              const res = await fetch(url);
-              if (!res.ok) return null;
-              const body = (await res.json()) as unknown;
-              const markets = Array.isArray(body) ? body : [];
-              const match = (markets as GammaMarket[]).find(
-                (m) => (m.conditionId ?? "").toLowerCase() === cid,
-              );
-              return match ?? null;
-            },
-            catch: () => null,
-          }).pipe(Effect.catchAll(() => Effect.succeed(null)));
-
-          if (!candidate) continue;
-          return inferSettlementWinnerFromMarket(candidate);
-        }
-        return null;
-      });
-
-    return { fetchCurrentBtc5mWindow, fetchSettlementByCondition, formatWindowTitle } as const;
+    return { fetchCurrentBtc5mWindow, fetchSettlementByCondition: fetchSettlementByConditionImpl, formatWindowTitle } as const;
   }),
 }) {}

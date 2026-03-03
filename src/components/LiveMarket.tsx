@@ -5,6 +5,8 @@ import {
   orderBookRx,
   tradingActiveRx,
   regimeRx,
+  activeMarketIdRx,
+  enabledMarketsRx,
 } from "../store/index.js";
 import {
   ExternalLink,
@@ -37,6 +39,9 @@ export function LiveMarket() {
   const orderBook = useRxValue(orderBookRx);
   const tradingActive = useRxValue(tradingActiveRx);
   const regime = useRxValue(regimeRx);
+  const activeMarketId = useRxValue(activeMarketIdRx);
+  const enabledMarkets = useRxValue(enabledMarketsRx);
+  const activeDisplayName = enabledMarkets.find((m) => m.id === activeMarketId)?.displayName ?? activeMarketId.toUpperCase();
   const [remaining, setRemaining] = useState(0);
 
   useEffect(() => {
@@ -87,7 +92,7 @@ export function LiveMarket() {
             className={remaining > 0 ? "text-[var(--accent-green)] animate-pulse" : "text-[var(--text-secondary)]"}
           />
           <span className="text-sm font-semibold">
-            {currentMarket?.title ?? "BTC Up or Down — 5 Minutes"}
+            {currentMarket?.title ?? `${activeDisplayName} Up or Down — 5 Minutes`}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -113,7 +118,7 @@ export function LiveMarket() {
         {noMarket ? (
           <div className="text-center py-4">
             <p className="text-sm text-[var(--text-secondary)]">
-              Waiting for next 5-minute BTC market window...
+              Waiting for next 5-minute {activeDisplayName} market window...
             </p>
             <p className="text-xs text-[var(--text-secondary)] mt-1 opacity-60">
               Markets refresh every ~10 seconds

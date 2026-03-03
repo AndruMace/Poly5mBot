@@ -44,6 +44,9 @@ export interface AppConfigShape {
     readonly backend: "file" | "dual" | "postgres";
     readonly databaseUrl: string;
   };
+  readonly markets: {
+    readonly enabledIds: ReadonlyArray<string>;
+  };
   readonly test: {
     readonly ciLiveIntegration: boolean;
     readonly liveTestTimeoutMs: number;
@@ -105,6 +108,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
     const testOperatorToken = yield* Config.string("TEST_OPERATOR_TOKEN").pipe(
       Config.withDefault("test-operator-token"),
     );
+    const enabledMarkets = yield* Config.string("ENABLED_MARKETS").pipe(
+      Config.withDefault("btc"),
+      Config.map((v) => v.split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0)),
+    );
 
     const cfg: AppConfigShape = {
       poly: {
@@ -142,6 +149,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
       },
       server: { port: serverPort, operatorToken },
       storage: { backend: storageBackend, databaseUrl },
+      markets: { enabledIds: enabledMarkets },
       test: {
         ciLiveIntegration,
         liveTestTimeoutMs,

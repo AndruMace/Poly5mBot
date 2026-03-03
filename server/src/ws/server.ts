@@ -8,8 +8,10 @@ import { EventBus } from "../engine/event-bus.js";
 import { ObservabilityStore } from "../observability/store.js";
 import { PostgresStorage } from "../storage/postgres.js";
 import { AppConfig } from "../config.js";
-import type { WSMessage, EngineEvent, WSStatusSnapshot } from "../types.js";
+import { MarketOrchestrator } from "../markets/orchestrator.js";
+import type { WSMessage, EngineEvent, WSStatusSnapshot, WSMarketSnapshot } from "../types.js";
 import type { PnLSummary } from "../types.js";
+import type { MarketEngineInstance } from "../markets/market-engine.js";
 
 const WS_BOOTSTRAP_TRADES = 200;
 
@@ -43,12 +45,54 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
     const observability = yield* ObservabilityStore;
     const postgres = yield* PostgresStorage;
     const config = yield* AppConfig;
+    const orchestrator = yield* MarketOrchestrator;
 
     let wss: WebSocketServer | null = null;
     let lastExchangeConnected: boolean | null = null;
     let lastWalletAddress: string | null = null;
     let lastLivePnlSig: string | null = null;
     let lastShadowPnlSig: string | null = null;
+
+    /** Build a per-market snapshot from a MarketEngineInstance. */
+    const buildMarketSnapshot = (mkt: MarketEngineInstance): Effect.Effect<WSMarketSnapshot, unknown> =>
+      Effect.gen(function* () {
+        const [tradingActive, mode, strategies, market, orderbook, prices, oracleEst, feedHealth, pnl, shadowPnl, trades, regime, killSwitches, risk, metrics] = yield* Effect.all([
+          mkt.isTradingActive,
+          mkt.getMode,
+          mkt.getStrategyStates,
+          mkt.getCurrentWindow,
+          mkt.getOrderBookState,
+          mkt.feedManager.getLatestPrices,
+          mkt.feedManager.getOracleEstimate,
+          mkt.getFeedHealth,
+          mkt.getPnLSummary,
+          mkt.getShadowPnLSummary,
+          mkt.getTradeRecords(WS_BOOTSTRAP_TRADES),
+          mkt.getRegime,
+          mkt.getKillSwitchStatus,
+          mkt.getRiskSnapshot,
+          mkt.getMetrics,
+        ]);
+        return {
+          marketId: mkt.marketId,
+          displayName: mkt.displayName,
+          tradingActive,
+          mode,
+          strategies,
+          market,
+          orderbook,
+          prices,
+          oracleEstimate: oracleEst,
+          feedHealth,
+          pnl,
+          shadowPnl,
+          trades,
+          regime,
+          killSwitches,
+          risk,
+          metrics,
+        } satisfies WSMarketSnapshot;
+      });
 
     const attach = (server: http.Server) =>
       Effect.gen(function* () {
@@ -62,22 +106,21 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
             Effect.gen(function* () {
               yield* Effect.log("[WS] Client connected");
 
-              const [tradingActive, mode, strategies, market, orderbook, prices, oracleEst, feedHealth, pnl, shadowPnl, trades, regime, killSwitches, risk, metrics, connected, walletAddr, observabilityEvents, storageHealth] = yield* Effect.all([
-                engine.isTradingActive,
-                engine.getMode,
-                engine.getStrategyStates,
-                engine.getCurrentWindow,
-                engine.getOrderBookState,
-                feedService.getLatestPrices,
-                feedService.getOracleEstimate,
-                feedService.getFeedHealth,
-                engine.tracker.getSummary(false),
-                engine.tracker.getSummary(true),
-                engine.tracker.getTrades(WS_BOOTSTRAP_TRADES),
-                engine.getRegime,
-                engine.getKillSwitchStatus,
-                engine.getRiskSnapshot,
-                engine.getMetrics,
+              // Build per-market snapshots for all enabled markets
+              const allEngines = orchestrator.getAllEngines();
+              const marketSnapshots: Record<string, WSMarketSnapshot> = {};
+              for (const mkt of allEngines) {
+                const snap = yield* buildMarketSnapshot(mkt).pipe(
+                  Effect.catchAll(() => Effect.succeed(null)),
+                );
+                if (snap) marketSnapshots[mkt.marketId] = snap;
+              }
+
+              // Use first market as the "primary" for backward-compat top-level fields
+              const primaryId = orchestrator.getEnabledMarketIds()[0] ?? "btc";
+              const primary = marketSnapshots[primaryId];
+
+              const [connected, walletAddr, observabilityEvents, storageHealth] = yield* Effect.all([
                 polyClient.isConnected,
                 polyClient.getWalletAddress,
                 observability.latest(300),
@@ -85,28 +128,30 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
               ]);
 
               const snapshot: WSStatusSnapshot = {
-                tradingActive,
-                mode,
+                tradingActive: primary?.tradingActive ?? false,
+                mode: primary?.mode ?? "shadow",
                 exchangeConnected: connected,
                 walletAddress: walletAddr,
-                strategies,
-                market,
-                orderbook,
-                prices,
-                oracleEstimate: oracleEst,
-                feedHealth,
-                pnl,
-                shadowPnl,
-                trades,
-                regime,
-                killSwitches,
-                risk,
-                metrics,
+                strategies: primary?.strategies ?? [],
+                market: primary?.market ?? null,
+                orderbook: primary?.orderbook ?? { bids: [], asks: [], bestBid: null, bestAsk: null, spread: null, midpoint: null, timestamp: 0 },
+                prices: primary?.prices ?? {},
+                oracleEstimate: primary?.oracleEstimate ?? 0,
+                feedHealth: primary?.feedHealth ?? { feeds: [], healthyCount: 0, totalCount: 0, overallStatus: "unhealthy" as any },
+                pnl: primary?.pnl ?? { totalPnl: 0, todayPnl: 0, totalTrades: 0, winRate: 0, avgPnl: 0, maxDrawdown: 0, sharpe: 0, history: [] },
+                shadowPnl: primary?.shadowPnl ?? { totalPnl: 0, todayPnl: 0, totalTrades: 0, winRate: 0, avgPnl: 0, maxDrawdown: 0, sharpe: 0, history: [] },
+                trades: primary?.trades ?? [],
+                regime: primary?.regime ?? { current: "unknown", confidence: 0, volatility: 0, trend: 0, timestamp: 0 },
+                killSwitches: primary?.killSwitches ?? [],
+                risk: primary?.risk ?? { currentExposure: 0, maxExposure: 0, windowLoss: 0, windowSpend: 0, consecutiveLosses: 0, dailyPnl: 0, holdingPeriodMs: 0 },
+                metrics: primary?.metrics ?? { totalCycles: 0, signalsGenerated: 0, tradesAttempted: 0, avgCycleMs: 0, uptimeMs: 0 },
                 storage: {
                   backend: config.storage.backend,
                   ...storageHealth,
                 },
                 observabilityEvents,
+                markets: marketSnapshots,
+                enabledMarkets: orchestrator.getEnabledMarkets(),
               };
 
               const initial: WSMessage = {
@@ -145,7 +190,7 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
                 if (sig === lastShadowPnlSig) continue;
                 lastShadowPnlSig = sig;
               }
-              broadcast(wss, { type, data: event.data, timestamp: Date.now() });
+              broadcast(wss, { type, data: event.data, marketId: event.marketId ?? "btc", timestamp: Date.now() });
             }
           }
         }).pipe(
@@ -157,18 +202,24 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
         // Throttled price + feed health broadcasts
         yield* Effect.gen(function* () {
           if (!wss) return;
-          const [prices, oracleEst, feedHealth, connected, walletAddr] = yield* Effect.all([
-            feedService.getLatestPrices,
-            feedService.getOracleEstimate,
+          // Broadcast prices per-market so the frontend can route to the right market
+          for (const mkt of orchestrator.getAllEngines()) {
+            const [prices, oracleEst] = yield* Effect.all([
+              mkt.feedManager.getLatestPrices,
+              mkt.feedManager.getOracleEstimate,
+            ]);
+            broadcast(wss, {
+              type: "prices",
+              data: { prices, oracleEstimate: oracleEst },
+              marketId: mkt.marketId,
+              timestamp: Date.now(),
+            });
+          }
+          const [feedHealth, connected, walletAddr] = yield* Effect.all([
             feedService.getFeedHealth,
             polyClient.isConnected,
             polyClient.getWalletAddress,
           ]);
-          broadcast(wss, {
-            type: "prices",
-            data: { prices, oracleEstimate: oracleEst },
-            timestamp: Date.now(),
-          });
           broadcast(wss, {
             type: "feedHealth",
             data: feedHealth,

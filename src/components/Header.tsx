@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { useRxValue } from "@effect-rx/rx-react";
+import { useRxValue, useRxSet } from "@effect-rx/rx-react";
 import {
   connectedRx,
   exchangeConnectedRx,
@@ -9,6 +9,8 @@ import {
   modeRx,
   wsLastMessageTsRx,
   storageHealthRx,
+  activeMarketIdRx,
+  enabledMarketsRx,
 } from "../store/index.js";
 import { Wifi, WifiOff, Wallet, Play, Square, Loader2, Eye, Radio } from "lucide-react";
 
@@ -21,6 +23,9 @@ export function Header() {
   const mode = useRxValue(modeRx);
   const wsLastMessageTs = useRxValue(wsLastMessageTsRx);
   const storageHealth = useRxValue(storageHealthRx);
+  const activeMarketId = useRxValue(activeMarketIdRx);
+  const enabledMarkets = useRxValue(enabledMarketsRx);
+  const setActiveMarketId = useRxSet(activeMarketIdRx);
   const [toggling, setToggling] = useState(false);
   const [switchingMode, setSwitchingMode] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
@@ -50,7 +55,7 @@ export function Header() {
     setToggling(true);
     setControlError(null);
     try {
-      const res = await fetch("/api/trading/toggle", { method: "POST" });
+      const res = await fetch(`/api/trading/${activeMarketId}/toggle`, { method: "POST" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error ?? "Failed to toggle trading");
@@ -69,7 +74,7 @@ export function Header() {
     setControlError(null);
     try {
       const newMode = mode === "live" ? "shadow" : "live";
-      const res = await fetch("/api/mode", {
+      const res = await fetch(`/api/mode/${activeMarketId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: newMode }),
@@ -93,9 +98,26 @@ export function Header() {
         <h1 className="text-lg font-bold tracking-tight">
           <span className="text-[var(--accent-blue)]">5m</span>Tracker
         </h1>
+        {enabledMarkets.length > 1 && (
+          <div className="flex items-center gap-1">
+            {enabledMarkets.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setActiveMarketId(m.id)}
+                className={`px-2.5 py-1 rounded text-xs font-medium transition-all ${
+                  activeMarketId === m.id
+                    ? "bg-[var(--accent-blue)]/20 text-[var(--accent-blue)] border border-[var(--accent-blue)]/40"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-card)]"
+                }`}
+              >
+                {m.displayName}
+              </button>
+            ))}
+          </div>
+        )}
         {latestPrice !== null && (
           <div className="flex items-center gap-2 px-3 py-1 rounded-md bg-[var(--bg-card)] text-sm">
-            <span className="text-[var(--text-secondary)]">BTC</span>
+            <span className="text-[var(--text-secondary)]">{enabledMarkets.find((m) => m.id === activeMarketId)?.displayName ?? activeMarketId.toUpperCase()}</span>
             <span className="font-mono font-semibold">
               ${latestPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>

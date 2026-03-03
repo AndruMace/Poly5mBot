@@ -243,7 +243,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       });
     }
 
-    const emit = (event: EngineEvent) => eventBus.publish(event);
+    const emit = (event: EngineEvent) => eventBus.publish({ ...event, marketId: "btc" });
     const obs = (
       input: Parameters<NonNullable<typeof observability>["append"]>[0],
     ) =>
@@ -472,11 +472,11 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       }
     });
 
-    const didTradeWin = (trade: TradeRecord, st: EngineState, currentBtcPrice: number) => {
-      const btcPrice = trade.closingBtcPrice ?? st.windowEndPriceSnapshot ?? currentBtcPrice;
+    const didTradeWin = (trade: TradeRecord, st: EngineState, currentAssetPrice: number) => {
+      const assetPrice = trade.closingAssetPrice ?? st.windowEndPriceSnapshot ?? currentAssetPrice;
       const ptb = trade.priceToBeatAtEntry;
-      if (ptb <= 0 || btcPrice <= 0) return false;
-      return trade.side === "UP" ? btcPrice >= ptb : btcPrice < ptb;
+      if (ptb <= 0 || assetPrice <= 0) return false;
+      return trade.side === "UP" ? assetPrice >= ptb : assetPrice < ptb;
     };
 
     const refreshOrderBook = (window: MarketWindow) =>
@@ -518,7 +518,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       stateRef,
       strategies,
       fetchCurrentWindow: marketService.fetchCurrentBtc5mWindow,
-      fetchCurrentBtcPrice: feedService.getCurrentBtcPrice,
+      fetchCurrentAssetPrice: feedService.getCurrentAssetPrice,
       isConnected: polyClient.isConnected,
       onNewWindow: (conditionId) => riskManager.onNewWindow(conditionId),
       emit,
@@ -546,18 +546,18 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* runAccountReconciliation;
         yield* Ref.update(stateRef, (s) => ({ ...s, lastReconcileAt: Date.now() }));
       }
-      const liveBtcPrice = yield* feedService.getCurrentBtcPrice;
+      const liveAssetPrice = yield* feedService.getCurrentAssetPrice;
       const connected = yield* polyClient.isConnected;
 
-      if (st.currentWindow && liveBtcPrice > 0 && now >= st.currentWindow.endTime - 5_000) {
-        if (st.windowEndPriceSnapshot === null || (now <= st.currentWindow.endTime + 2_000 && liveBtcPrice > 0)) {
-          yield* Ref.update(stateRef, (s) => ({ ...s, windowEndPriceSnapshot: liveBtcPrice, windowEndSnapshotTs: now }));
+      if (st.currentWindow && liveAssetPrice > 0 && now >= st.currentWindow.endTime - 5_000) {
+        if (st.windowEndPriceSnapshot === null || (now <= st.currentWindow.endTime + 2_000 && liveAssetPrice > 0)) {
+          yield* Ref.update(stateRef, (s) => ({ ...s, windowEndPriceSnapshot: liveAssetPrice, windowEndSnapshotTs: now }));
         }
       }
 
       const sNow = yield* Ref.get(stateRef);
-      const closingBtcPrice = sNow.windowEndPriceSnapshot && sNow.windowEndPriceSnapshot > 0
-        ? sNow.windowEndPriceSnapshot : liveBtcPrice;
+      const closingAssetPrice = sNow.windowEndPriceSnapshot && sNow.windowEndPriceSnapshot > 0
+        ? sNow.windowEndPriceSnapshot : liveAssetPrice;
 
       // Resolve expired trades for both live and shadow books.
       // Risk manager only tracks live exposure, so shadow expiries must
@@ -572,14 +572,14 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           now >= trade.windowEnd,
       );
       for (const trade of expired) {
-        if (closingBtcPrice <= 0) {
+        if (closingAssetPrice <= 0) {
           yield* Effect.logWarning(`[Engine] Skipping resolution of ${trade.id} — no valid settlement price`);
           continue;
         }
         const tradeShadow = trade.shadow === true;
         const tradeRecord = yield* tracker.getTradeRecordById(trade.id, tradeShadow);
         if (!tradeRecord) continue;
-        yield* tracker.expireTrade(trade.id, closingBtcPrice, tradeShadow);
+        yield* tracker.expireTrade(trade.id, closingAssetPrice, tradeShadow);
         const settlement = yield* marketService.fetchSettlementByCondition(trade.conditionId).pipe(
           Effect.catchAll(() => Effect.succeed(null)),
         );
@@ -587,9 +587,9 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const won = hasVenueWinner
           ? trade.side === settlement!.winnerSide
           : didTradeWin(
-            { ...tradeRecord, closingBtcPrice },
+            { ...tradeRecord, closingAssetPrice },
             sNow,
-            liveBtcPrice,
+            liveAssetPrice,
           );
         const outcomeSource: "venue" | "estimated" = hasVenueWinner ? "venue" : "estimated";
         yield* tracker.resolveTrade(trade.id, won, tradeShadow, {
@@ -604,7 +604,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
             resolutionSource: outcomeSource,
             settlementWinnerSide: settlement?.winnerSide ?? null,
             pnl: 0,
-            closingBtcPrice,
+            closingAssetPrice,
           };
         for (const s of strategies) {
           yield* s.onTrade(resolved);
@@ -640,7 +640,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       const prices = yield* feedService.getLatestPrices;
       const oracleEst = yield* feedService.getOracleEstimate;
       const oracleTs = yield* feedService.getOracleTimestamp;
-      const currentBtc = yield* feedService.getCurrentBtcPrice;
+      const currentAsset = yield* feedService.getCurrentAssetPrice;
       const currentOB = (yield* Ref.get(stateRef)).orderBook;
       const latestPriceTs = Object.values(prices).reduce((max, p) => Math.max(max, p.timestamp), 0);
       yield* Ref.update(stateRef, (s) => ({
@@ -664,7 +664,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         windowElapsedMs: now - sNow.currentWindow.startTime,
         windowRemainingMs: sNow.currentWindow.endTime - now,
         priceToBeat: sNow.currentWindow.priceToBeat,
-        currentBtcPrice: currentBtc,
+        currentAssetPrice: currentAsset,
+        marketId: "btc",
       };
 
       yield* regimeDetector.update(ctx);

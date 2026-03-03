@@ -14,9 +14,22 @@ import type {
 } from "../types.js";
 
 const DATA_DIR = "data";
-const LIVE_FILE = "data/events.jsonl";
-const SHADOW_FILE = "data/shadow-events.jsonl";
 const PNL_HISTORY_MAX_POINTS = 300;
+
+function resolveFilePath(shadow: boolean, marketId = "btc"): string {
+  if (marketId === "btc") {
+    // Backward-compatible: existing BTC files use original names
+    return shadow ? "data/shadow-events.jsonl" : "data/events.jsonl";
+  }
+  return shadow ? `data/${marketId}-shadow-events.jsonl` : `data/${marketId}-events.jsonl`;
+}
+
+function resolveStream(shadow: boolean, marketId = "btc"): string {
+  if (marketId === "btc") {
+    return shadow ? "shadow" : "live";
+  }
+  return shadow ? `${marketId}-shadow` : `${marketId}-live`;
+}
 
 function uid(): string {
   return crypto.randomBytes(8).toString("hex");
@@ -72,7 +85,7 @@ function applyEventToTrade(trade: Trade, event: TradeEvent): void {
     }
     case "expired":
       trade.status = "expired";
-      trade.closingBtcPrice = Number(event.data.closingBtcPrice ?? 0);
+      trade.closingAssetPrice = Number(event.data.closingAssetPrice ?? 0);
       break;
     case "resolved": {
       trade.status = "resolved";
@@ -146,7 +159,7 @@ export function toTradeRecord(t: Trade): TradeRecord {
     shadow: t.shadow,
     conditionId: t.conditionId,
     priceToBeatAtEntry: t.priceToBeatAtEntry,
-    closingBtcPrice: t.closingBtcPrice,
+    closingAssetPrice: t.closingAssetPrice,
     lastEventType: t.events[t.events.length - 1]?.type,
     clobOrderId: t.clobOrderId,
     clobResult: t.clobResult,
@@ -248,7 +261,7 @@ export interface TradeStoreService {
   readonly getSummary: Effect.Effect<PnLSummary>;
 }
 
-export const makeTradeStore = (shadow: boolean) =>
+export const makeTradeStore = (shadow: boolean, marketId = "btc") =>
   Effect.gen(function* () {
     const configOpt = yield* Effect.serviceOption(AppConfig);
     const postgresOpt = yield* Effect.serviceOption(PostgresStorage);
@@ -260,8 +273,8 @@ export const makeTradeStore = (shadow: boolean) =>
     const postgres = Option.getOrUndefined(postgresOpt);
     const observability = Option.getOrUndefined(observabilityOpt);
     const fs = yield* FileSystem.FileSystem;
-    const filePath = shadow ? SHADOW_FILE : LIVE_FILE;
-    const stream = shadow ? "shadow" : "live";
+    const filePath = resolveFilePath(shadow, marketId);
+    const stream = resolveStream(shadow, marketId);
     const useFile = backend === "file" || backend === "dual";
     const usePostgres = !!postgres && (backend === "postgres" || backend === "dual");
     const tradesRef = yield* Ref.make(new Map<string, Trade>());

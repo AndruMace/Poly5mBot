@@ -9,6 +9,7 @@ import { AccountActivityStore } from "./activity/store.js";
 import { CriticalIncidentStore } from "./incident/store.js";
 import { PostgresStorage } from "./storage/postgres.js";
 import { ObservabilityStore } from "./observability/store.js";
+import { MarketOrchestrator } from "./markets/orchestrator.js";
 import {
   OBSERVABILITY_CATEGORIES,
   OBSERVABILITY_ENTITY_TYPES,
@@ -21,6 +22,7 @@ import type {
   ObservabilityEntityType,
   TradingMode,
 } from "./types.js";
+import type { MarketEngineInstance } from "./markets/market-engine.js";
 
 interface RouteResult {
   status: number;
@@ -116,7 +118,7 @@ export const handleRequest = (
 ): Effect.Effect<
   RouteResult,
   never,
-  TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | ObservabilityStore | PostgresStorage | AppConfig
+  TradingEngine | FeedService | PolymarketClient | NotesStore | AccountActivityStore | CriticalIncidentStore | ObservabilityStore | PostgresStorage | AppConfig | MarketOrchestrator
 > =>
   Effect.gen(function* () {
     const config = yield* AppConfig;
@@ -128,6 +130,7 @@ export const handleRequest = (
     const incidentStore = yield* CriticalIncidentStore;
     const observability = yield* ObservabilityStore;
     const postgres = yield* PostgresStorage;
+    const orchestrator = yield* MarketOrchestrator;
     yield* Effect.annotateCurrentSpan("http.method", method);
     yield* Effect.annotateCurrentSpan("http.url", url);
 
@@ -152,21 +155,48 @@ export const handleRequest = (
     const parsedUrl = new URL(url, "http://localhost");
     const searchParams = parsedUrl.searchParams;
 
+    /** Resolve market engine from query param or path segment; defaults to first enabled market */
+    const resolveMarketId = (pathMarketId?: string): string => {
+      const raw = pathMarketId ?? searchParams.get("marketId");
+      if (raw) {
+        const mkt = orchestrator.getEngine(raw);
+        if (mkt) return raw;
+      }
+      return orchestrator.getEnabledMarketIds()[0] ?? "btc";
+    };
+    const resolveEngine = (pathMarketId?: string): MarketEngineInstance | null => {
+      const id = resolveMarketId(pathMarketId);
+      return orchestrator.getEngine(id);
+    };
+
     if ((method === "POST" || method === "PUT") && bodyParseError) {
       return { status: 400, body: { error: "Invalid JSON body" } };
     }
 
     if (method === "GET") {
+      if (path === "/api/markets") {
+        return { status: 200, body: orchestrator.getEnabledMarkets() };
+      }
       if (path === "/api/status") {
+        const mktEngine = resolveEngine();
         const [tradingActive, mode, currentWindow, windowTitle, regime, killSwitches, risk, metrics, oracleEst, btcPrice, feedHealth, connected, walletAddr, storageHealth] = yield* Effect.all([
-          engine.isTradingActive, engine.getMode, engine.getCurrentWindow, engine.getWindowTitle,
-          engine.getRegime, engine.getKillSwitchStatus, engine.getRiskSnapshot, engine.getMetrics,
-          feedService.getOracleEstimate, feedService.getCurrentBtcPrice,
-          feedService.getFeedHealth, polyClient.isConnected, polyClient.getWalletAddress, postgres.health,
+          mktEngine ? mktEngine.isTradingActive : Effect.succeed(false),
+          mktEngine ? mktEngine.getMode : Effect.succeed("shadow" as const),
+          mktEngine ? mktEngine.getCurrentWindow : Effect.succeed(null),
+          mktEngine ? mktEngine.getWindowTitle : Effect.succeed(""),
+          mktEngine ? mktEngine.getRegime : engine.getRegime,
+          mktEngine ? mktEngine.getKillSwitchStatus : engine.getKillSwitchStatus,
+          mktEngine ? mktEngine.getRiskSnapshot : engine.getRiskSnapshot,
+          mktEngine ? mktEngine.getMetrics : engine.getMetrics,
+          mktEngine ? mktEngine.feedManager.getOracleEstimate : feedService.getOracleEstimate,
+          mktEngine ? mktEngine.feedManager.getCurrentAssetPrice : feedService.getCurrentAssetPrice,
+          mktEngine ? mktEngine.getFeedHealth : feedService.getFeedHealth,
+          polyClient.isConnected, polyClient.getWalletAddress, postgres.health,
         ]);
         return {
           status: 200,
           body: {
+            marketId: resolveMarketId(),
             connected,
             walletAddress: walletAddr,
             tradingActive,
@@ -180,6 +210,7 @@ export const handleRequest = (
             killSwitches,
             risk,
             metrics,
+            enabledMarkets: orchestrator.getEnabledMarkets(),
             storage: {
               backend: config.storage.backend,
               ...storageHealth,
@@ -188,7 +219,8 @@ export const handleRequest = (
         };
       }
       if (path === "/api/strategies") {
-        const states = yield* engine.getStrategyStates;
+        const mktEngine = resolveEngine();
+        const states = mktEngine ? yield* mktEngine.getStrategyStates : yield* engine.getStrategyStates;
         return { status: 200, body: states };
       }
       if (path === "/api/trades") {
@@ -197,12 +229,10 @@ export const handleRequest = (
         const limit = parsePositiveInt(searchParams.get("limit"), 100, 500);
         const cursor = searchParams.get("cursor") ?? undefined;
         const sinceMs = timeframeToSinceMs(timeframe);
-        const result = yield* engine.tracker.listTrades({
-          mode,
-          limit,
-          cursor,
-          sinceMs,
-        });
+        const mktEngine = resolveEngine();
+        const result = mktEngine
+          ? yield* mktEngine.listTrades({ mode, limit, cursor, sinceMs })
+          : yield* engine.tracker.listTrades({ mode, limit, cursor, sinceMs });
         return {
           status: 200,
           body: {
@@ -219,15 +249,13 @@ export const handleRequest = (
         const mode = parseTradeMode(searchParams.get("mode"));
         const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
         const sinceMs = timeframeToSinceMs(timeframe);
+        const mktEngine = resolveEngine();
         const allItems: TradeRecord[] = [];
         let cursor: string | undefined;
         for (let i = 0; i < 200; i++) {
-          const page = yield* engine.tracker.listTrades({
-            mode,
-            limit: 500,
-            sinceMs,
-            cursor,
-          });
+          const page = mktEngine
+            ? yield* mktEngine.listTrades({ mode, limit: 500, sinceMs, cursor })
+            : yield* engine.tracker.listTrades({ mode, limit: 500, sinceMs, cursor });
           allItems.push(...page.items);
           if (!page.hasMore || !page.nextCursor) break;
           cursor = page.nextCursor;
@@ -357,23 +385,28 @@ export const handleRequest = (
         };
       }
       if (path === "/api/pnl") {
-        const summary = yield* engine.tracker.getSummary(false);
+        const mktEngine = resolveEngine();
+        const summary = mktEngine ? yield* mktEngine.getPnLSummary : yield* engine.tracker.getSummary(false);
         return { status: 200, body: summary };
       }
       if (path === "/api/shadow/summary") {
-        const summary = yield* engine.tracker.getSummary(true);
+        const mktEngine = resolveEngine();
+        const summary = mktEngine ? yield* mktEngine.getShadowPnLSummary : yield* engine.tracker.getSummary(true);
         return { status: 200, body: summary };
       }
       if (path === "/api/regime") {
-        const regime = yield* engine.getRegime;
+        const mktEngine = resolveEngine();
+        const regime = mktEngine ? yield* mktEngine.getRegime : yield* engine.getRegime;
         return { status: 200, body: regime };
       }
       if (path === "/api/killswitches") {
-        const status = yield* engine.getKillSwitchStatus;
-        return { status: 200, body: status };
+        const mktEngine = resolveEngine();
+        const ks = mktEngine ? yield* mktEngine.getKillSwitchStatus : yield* engine.getKillSwitchStatus;
+        return { status: 200, body: ks };
       }
       if (path === "/api/orderbook") {
-        const ob = yield* engine.getOrderBookState;
+        const mktEngine = resolveEngine();
+        const ob = mktEngine ? yield* mktEngine.getOrderBookState : yield* engine.getOrderBookState;
         return { status: 200, body: ob };
       }
       if (path === "/api/incidents") {
@@ -467,23 +500,29 @@ export const handleRequest = (
     }
 
     if (method === "POST") {
-      if (path === "/api/trading/toggle") {
+      const tradingToggleMatch = path.match(/^\/api\/trading(?:\/([^/]+))?\/toggle$/);
+      if (tradingToggleMatch) {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
-        const current = yield* engine.isTradingActive;
-        yield* engine.setTradingActive(!current);
-        const updated = yield* engine.isTradingActive;
-        yield* audit("api_trading_toggle", { previous: current, updated });
-        return { status: 200, body: { tradingActive: updated } };
+        const mktEngine = resolveEngine(tradingToggleMatch[1]);
+        if (!mktEngine) return { status: 404, body: { error: "Market not found" } };
+        const current = yield* mktEngine.isTradingActive;
+        yield* mktEngine.setTradingActive(!current);
+        const updated = yield* mktEngine.isTradingActive;
+        yield* audit("api_trading_toggle", { marketId: mktEngine.marketId, previous: current, updated });
+        return { status: 200, body: { tradingActive: updated, marketId: mktEngine.marketId } };
       }
-      if (path === "/api/mode") {
+      const modeMatch = path.match(/^\/api\/mode(?:\/([^/]+))?$/);
+      if (modeMatch) {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
         const mode = body?.mode;
         if (mode !== "live" && mode !== "shadow") {
           return { status: 400, body: { error: 'mode must be "live" or "shadow"' } };
         }
-        yield* engine.setMode(mode);
-        yield* audit("api_mode_set", { mode });
-        return { status: 200, body: { mode } };
+        const mktEngine = resolveEngine(modeMatch[1]);
+        if (!mktEngine) return { status: 404, body: { error: "Market not found" } };
+        yield* mktEngine.setMode(mode);
+        yield* audit("api_mode_set", { marketId: mktEngine.marketId, mode });
+        return { status: 200, body: { mode, marketId: mktEngine.marketId } };
       }
       if (path === "/api/connect") {
         const result = yield* Effect.gen(function* () {
@@ -510,12 +549,15 @@ export const handleRequest = (
         yield* audit("api_activity_import_csv", result as Record<string, unknown>);
         return { status: 200, body: result };
       }
-      if (path === "/api/killswitches/reset") {
+      const killswitchResetMatch = path.match(/^\/api\/killswitches(?:\/([^/]+))?\/reset$/);
+      if (killswitchResetMatch) {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
-        yield* engine.resetKillSwitchPause;
-        const status = yield* engine.getKillSwitchStatus;
-        yield* audit("api_killswitches_reset", { ok: true, count: status.length });
-        return { status: 200, body: { ok: true, killSwitches: status } };
+        const mktEngine = resolveEngine(killswitchResetMatch[1]);
+        if (!mktEngine) return { status: 404, body: { error: "Market not found" } };
+        yield* mktEngine.resetKillSwitchPause;
+        const ks = yield* mktEngine.getKillSwitchStatus;
+        yield* audit("api_killswitches_reset", { marketId: mktEngine.marketId, ok: true, count: ks.length });
+        return { status: 200, body: { ok: true, killSwitches: ks, marketId: mktEngine.marketId } };
       }
       const incidentResolve = path.match(/^\/api\/incidents\/([^/]+)\/resolve$/);
       if (incidentResolve) {
@@ -527,23 +569,32 @@ export const handleRequest = (
         return { status: 200, body: { ok: true, incident: updated } };
       }
 
-      const stratToggle = path.match(/^\/api\/strategies\/([^/]+)\/toggle$/);
+      // Strategy endpoints support /api/strategies/:name/toggle or /api/strategies/:marketId/:name/toggle
+      const stratToggle = path.match(/^\/api\/strategies\/([^/]+)\/toggle$/) ?? path.match(/^\/api\/strategies\/([^/]+)\/([^/]+)\/toggle$/);
       if (stratToggle) {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
-        const name = decodeURIComponent(stratToggle[1]!);
-        const enabled = yield* engine.toggleStrategy(name);
-        yield* audit("api_strategy_toggle", { name, enabled });
-        return { status: 200, body: { name, enabled } };
+        const hasMarketId = stratToggle.length > 2;
+        const marketIdSeg = hasMarketId ? stratToggle[1] : undefined;
+        const name = decodeURIComponent(hasMarketId ? stratToggle[2]! : stratToggle[1]!);
+        const mktEngine = resolveEngine(marketIdSeg);
+        if (!mktEngine) return { status: 404, body: { error: "Market not found" } };
+        const enabled = yield* mktEngine.toggleStrategy(name);
+        yield* audit("api_strategy_toggle", { marketId: mktEngine.marketId, name, enabled });
+        return { status: 200, body: { name, enabled, marketId: mktEngine.marketId } };
       }
 
-      const stratConfig = path.match(/^\/api\/strategies\/([^/]+)\/config$/);
+      const stratConfig = path.match(/^\/api\/strategies\/([^/]+)\/config$/) ?? path.match(/^\/api\/strategies\/([^/]+)\/([^/]+)\/config$/);
       if (stratConfig) {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
-        const name = decodeURIComponent(stratConfig[1]!);
+        const hasMarketId = stratConfig.length > 2;
+        const marketIdSeg = hasMarketId ? stratConfig[1] : undefined;
+        const name = decodeURIComponent(hasMarketId ? stratConfig[2]! : stratConfig[1]!);
         if (!body || typeof body !== "object" || Object.keys(body).length === 0) {
           return { status: 400, body: { error: "Empty config payload", rejectedKeys: [] } };
         }
-        const result = yield* engine.updateStrategyConfig(name, body ?? {});
+        const mktEngine = resolveEngine(marketIdSeg);
+        if (!mktEngine) return { status: 404, body: { error: "Market not found" } };
+        const result = yield* mktEngine.updateStrategyConfig(name, body ?? {});
         if (result.status === "not_found") return { status: 404, body: { error: "Strategy not found" } };
         if (result.status === "invalid") {
           return {
@@ -555,17 +606,21 @@ export const handleRequest = (
             },
           };
         }
-        yield* audit("api_strategy_config_update", { name, keys: Object.keys(body ?? {}) });
+        yield* audit("api_strategy_config_update", { marketId: mktEngine.marketId, name, keys: Object.keys(body ?? {}) });
         return { status: 200, body: { ok: true } };
       }
 
-      const stratRegime = path.match(/^\/api\/strategies\/([^/]+)\/regime-filter$/);
+      const stratRegime = path.match(/^\/api\/strategies\/([^/]+)\/regime-filter$/) ?? path.match(/^\/api\/strategies\/([^/]+)\/([^/]+)\/regime-filter$/);
       if (stratRegime) {
         if (!checkAuth()) return { status: 401, body: { error: "Unauthorized" } };
-        const name = decodeURIComponent(stratRegime[1]!);
-        const result = yield* engine.updateStrategyRegimeFilter(name, body ?? {});
+        const hasMarketId = stratRegime.length > 2;
+        const marketIdSeg = hasMarketId ? stratRegime[1] : undefined;
+        const name = decodeURIComponent(hasMarketId ? stratRegime[2]! : stratRegime[1]!);
+        const mktEngine = resolveEngine(marketIdSeg);
+        if (!mktEngine) return { status: 404, body: { error: "Market not found" } };
+        const result = yield* mktEngine.updateStrategyRegimeFilter(name, body ?? {});
         if (result === "not_found") return { status: 404, body: { error: "Strategy not found" } };
-        yield* audit("api_strategy_regime_filter_update", { name, keys: Object.keys(body ?? {}) });
+        yield* audit("api_strategy_regime_filter_update", { marketId: mktEngine.marketId, name, keys: Object.keys(body ?? {}) });
         return { status: 200, body: { ok: true } };
       }
     }

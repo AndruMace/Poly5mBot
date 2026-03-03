@@ -227,7 +227,7 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             bestBidUp: ctx.orderBook.bestBidUp,
             bestBidDown: ctx.orderBook.bestBidDown,
             oracleEstimate: ctx.oracleEstimate,
-            currentBtcPrice: ctx.currentBtcPrice,
+            currentAssetPrice: ctx.currentAssetPrice,
           },
           riskAtEntry: {
             openPositions: riskSnap.openPositions,

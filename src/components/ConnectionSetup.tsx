@@ -5,6 +5,7 @@ import {
   exchangeConnectedRx,
   walletAddressRx,
   killSwitchesRx,
+  activeMarketIdRx,
 } from "../store/index.js";
 import {
   Settings,
@@ -22,6 +23,7 @@ export function ConnectionSetup() {
   const exchangeConnected = useRxValue(exchangeConnectedRx);
   const walletAddress = useRxValue(walletAddressRx);
   const killSwitches = useRxValue(killSwitchesRx);
+  const activeMarketId = useRxValue(activeMarketIdRx);
 
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +57,7 @@ export function ConnectionSetup() {
 
   async function resetKillSwitches() {
     try {
-      const res = await fetch("/api/killswitches/reset", { method: "POST" });
+      const res = await fetch(`/api/killswitches/${activeMarketId}/reset`, { method: "POST" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error ?? "Could not reset kill switches");
