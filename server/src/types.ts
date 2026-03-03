@@ -587,7 +587,7 @@ export interface RiskApproval {
 
 // ── Engine event bus ──
 
-export type EngineEvent =
+export type EngineEvent = (
   | { readonly _tag: "Market"; readonly data: MarketWindow }
   | { readonly _tag: "OrderBook"; readonly data: OrderBookState }
   | { readonly _tag: "Strategies"; readonly data: ReadonlyArray<StrategyState> }
@@ -601,7 +601,8 @@ export type EngineEvent =
   | { readonly _tag: "Regime"; readonly data: RegimeState }
   | { readonly _tag: "Metrics"; readonly data: EngineMetrics }
   | { readonly _tag: "CriticalIncident"; readonly data: CriticalIncident }
-  | { readonly _tag: "Observability"; readonly data: ObservabilityEvent };
+  | { readonly _tag: "Observability"; readonly data: ObservabilityEvent }
+) & { readonly marketId?: string };
 
 // ── Schema definitions for serialization boundaries ──
 

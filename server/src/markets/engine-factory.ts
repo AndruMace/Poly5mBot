@@ -357,7 +357,7 @@ export function createStandaloneMarketEngine(
 
     // ── Helper functions ────────────────────────────────────────────────────
 
-    const emit = (event: EngineEvent) => eventBus.publish(event);
+    const emit = (event: EngineEvent) => eventBus.publish({ ...event, marketId });
 
     const obs = (input: ObservabilityEventInput) =>
       observability
@@ -871,5 +871,5 @@ export function createStandaloneMarketEngine(
       getShadowPnLSummary: shadowStore.getSummary,
       getFeedHealth,
     } satisfies MarketEngineInstance;
-  });
+  }) as unknown as Effect.Effect<MarketEngineInstance, never, FileSystem.FileSystem | Scope.Scope>;
 }

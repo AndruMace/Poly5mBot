@@ -243,7 +243,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       });
     }
 
-    const emit = (event: EngineEvent) => eventBus.publish(event);
+    const emit = (event: EngineEvent) => eventBus.publish({ ...event, marketId: "btc" });
     const obs = (
       input: Parameters<NonNullable<typeof observability>["append"]>[0],
     ) =>

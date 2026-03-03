@@ -1,6 +1,6 @@
-import { useEffect, useContext } from "react";
+import { useEffect, useLayoutEffect, useContext } from "react";
 import { Rx } from "@effect-rx/rx";
-import { RegistryContext } from "@effect-rx/rx-react";
+import { RegistryContext, useRxValue } from "@effect-rx/rx-react";
 import {
   connectedRx,
   exchangeConnectedRx,
@@ -10,7 +10,6 @@ import {
   pricesRx,
   oracleEstimateRx,
   priceHistoryRx,
-  currentMarketRx,
   orderBookRx,
   strategiesRx,
   tradesRx,
@@ -27,6 +26,7 @@ import {
   observabilityEventsRx,
   activeMarketIdRx,
   enabledMarketsRx,
+  perMarketStateRx,
   MAX_PRICE_HISTORY,
   MAX_PNL_HISTORY,
   emptyOrderBook,
@@ -37,7 +37,7 @@ import {
   emptyFeedHealth,
   emptyStorageHealth,
 } from "../store/index.js";
-import type { PriceHistory } from "../store/index.js";
+import type { PriceHistory, PerMarketSnapshot } from "../store/index.js";
 import type {
   WSMessage,
   PricePoint,
@@ -138,6 +138,48 @@ function equalPnlSummary(a: PnLSummary, b: PnLSummary): boolean {
 
 export function useWebSocket() {
   const registry = useContext(RegistryContext);
+  const activeMarketId = useRxValue(activeMarketIdRx);
+
+  // Restore per-market state when the user switches tabs.
+  // useLayoutEffect fires synchronously after DOM mutation, before paint — no flash of wrong data.
+  useLayoutEffect(() => {
+    const perMarket = registry.get(perMarketStateRx);
+    // Skip if we have no per-market data yet (WS hasn't connected) — handleInitialState will populate
+    if (Object.keys(perMarket).length === 0) return;
+    const snap = perMarket[activeMarketId] ?? {
+      tradingActive: false,
+      mode: "shadow" as const,
+      strategies: [] as import("../types/index.js").StrategyState[],
+      market: null,
+      orderbook: { ...emptyOrderBook },
+      prices: {} as Record<string, import("../types/index.js").PricePoint>,
+      oracleEstimate: 0,
+      feedHealth: { ...emptyFeedHealth },
+      pnl: { ...emptyPnl },
+      shadowPnl: { ...emptyPnl },
+      trades: [] as import("../types/index.js").TradeRecord[],
+      regime: { ...defaultRegime },
+      killSwitches: [] as import("../types/index.js").KillSwitchStatus[],
+      risk: { ...emptyRisk },
+      metrics: { ...emptyMetrics },
+    };
+    Rx.batch(() => {
+      registry.set(tradingActiveRx, snap.tradingActive);
+      registry.set(modeRx, snap.mode);
+      registry.set(strategiesRx, [...snap.strategies]);
+      registry.set(orderBookRx, snap.orderbook ?? { ...emptyOrderBook });
+      registry.set(pnlRx, normalizePnlSummary(snap.pnl));
+      registry.set(shadowPnlRx, normalizePnlSummary(snap.shadowPnl));
+      registry.set(pricesRx, snap.prices);
+      registry.set(oracleEstimateRx, snap.oracleEstimate);
+      registry.set(regimeRx, { ...defaultRegime, ...snap.regime });
+      registry.set(killSwitchesRx, [...snap.killSwitches]);
+      registry.set(riskRx, { ...emptyRisk, ...snap.risk });
+      registry.set(metricsRx, { ...emptyMetrics, ...snap.metrics });
+      registry.set(feedHealthRx, { ...emptyFeedHealth, ...snap.feedHealth });
+    });
+    registry.set(priceHistoryRx, []);
+  }, [activeMarketId, registry]);
 
   useEffect(() => {
     let destroyed = false;
@@ -203,7 +245,60 @@ export function useWebSocket() {
         .slice(0, limit);
     };
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    // ── Per-market helpers ────────────────────────────────────────────────────
+
+    function emptyPerMarket(): PerMarketSnapshot {
+      return {
+        tradingActive: false,
+        mode: "shadow",
+        strategies: [],
+        market: null,
+        orderbook: { ...emptyOrderBook },
+        prices: {},
+        oracleEstimate: 0,
+        feedHealth: { ...emptyFeedHealth },
+        pnl: { ...emptyPnl },
+        shadowPnl: { ...emptyPnl },
+        trades: [],
+        regime: { ...defaultRegime },
+        killSwitches: [],
+        risk: { ...emptyRisk },
+        metrics: { ...emptyMetrics },
+      };
+    }
+
+    /** Apply a stored per-market snapshot to all display atoms (used on tab switch). */
+    function applyMarketSnapshot(snap: PerMarketSnapshot) {
+      registry.set(tradingActiveRx, snap.tradingActive);
+      registry.set(modeRx, snap.mode);
+      registry.set(strategiesRx, [...snap.strategies]);
+      registry.set(orderBookRx, snap.orderbook ?? { ...emptyOrderBook });
+      registry.set(pnlRx, normalizePnlSummary(snap.pnl));
+      registry.set(shadowPnlRx, normalizePnlSummary(snap.shadowPnl));
+      // Always overwrite prices/oracle so switching markets clears stale values
+      registry.set(pricesRx, snap.prices);
+      registry.set(oracleEstimateRx, snap.oracleEstimate);
+      registry.set(regimeRx, { ...defaultRegime, ...snap.regime });
+      registry.set(killSwitchesRx, [...snap.killSwitches]);
+      registry.set(riskRx, { ...emptyRisk, ...snap.risk });
+      registry.set(metricsRx, { ...emptyMetrics, ...snap.metrics });
+      registry.set(feedHealthRx, { ...emptyFeedHealth, ...snap.feedHealth });
+    }
+
+    /** Patch one field in the per-market state store.
+     *  Creates a default entry for the market if it hasn't been seen before. */
+    function patchPerMarket<K extends keyof PerMarketSnapshot>(
+      mid: string,
+      key: K,
+      value: PerMarketSnapshot[K],
+    ) {
+      registry.update(perMarketStateRx, (prev) => {
+        const ex = prev[mid] ?? emptyPerMarket();
+        return { ...prev, [mid]: { ...ex, [key]: value } };
+      });
+    }
+
+    const protocol = window.location.protocol === "https:" ? "wss:"  : "ws:";
     const url = `${protocol}//${window.location.host}/ws`;
 
     const flushPriceHistory = () => {
@@ -251,9 +346,6 @@ export function useWebSocket() {
         .then(async (res) => {
           if (!res.ok) return null;
           return (await res.json()) as {
-            currentWindow?: any;
-            tradingActive?: boolean;
-            mode?: "live" | "shadow";
             storage?: {
               backend: "file" | "dual" | "postgres";
               enabled: boolean;
@@ -263,15 +355,7 @@ export function useWebSocket() {
         })
         .then((data) => {
           if (!data || destroyed) return;
-          if (data.currentWindow) {
-            registry.set(currentMarketRx, data.currentWindow);
-          }
-          if (typeof data.tradingActive === "boolean") {
-            registry.set(tradingActiveRx, data.tradingActive);
-          }
-          if (data.mode === "live" || data.mode === "shadow") {
-            registry.set(modeRx, data.mode);
-          }
+          // Don't set tradingActive/mode — per-market; WS events handle them.
           if (data.storage) {
             registry.set(storageHealthRx, {
               ...emptyStorageHealth,
@@ -363,9 +447,18 @@ export function useWebSocket() {
       })();
     };
 
-    function handlePrices(data: any) {
+    function handlePrices(data: any, msgMarketId: string) {
       const prices = data.prices as Record<string, PricePoint>;
       const oracleEstimate = data.oracleEstimate as number;
+
+      // Always store in per-market state
+      patchPerMarket(msgMarketId, "prices", prices);
+      if (oracleEstimate > 0) patchPerMarket(msgMarketId, "oracleEstimate", oracleEstimate);
+
+      // Only update display atoms for the active market
+      const activeId = registry.get(activeMarketIdRx);
+      if (msgMarketId !== activeId) return;
+
       const prevPrices = registry.get(pricesRx);
       if (!shallowEqualPrices(prevPrices, prices)) {
         registry.set(pricesRx, prices);
@@ -399,66 +492,91 @@ export function useWebSocket() {
     }
 
     function handleInitialState(data: WSStatusSnapshot) {
-      registry.set(tradingActiveRx, data.tradingActive ?? false);
-      registry.set(modeRx, data.mode ?? "shadow");
       registry.set(exchangeConnectedRx, data.exchangeConnected ?? false);
       if (data.walletAddress)
         registry.set(walletAddressRx, data.walletAddress);
-      registry.set(strategiesRx, [...(data.strategies ?? [])]);
-      if (data.market) {
-        registry.set(currentMarketRx, data.market);
-      } else if (registry.get(currentMarketRx) === null) {
-        registry.set(currentMarketRx, null);
-        rehydrateFromHttpStatus();
-      }
-      registry.set(
-        orderBookRx,
-        data.orderbook ?? { ...emptyOrderBook },
-      );
-      registry.set(pnlRx, normalizePnlSummary(data.pnl));
-      registry.set(shadowPnlRx, normalizePnlSummary(data.shadowPnl));
-      registry.update(tradesRx, (prev) => mergeTrades(prev, [...(data.trades ?? [])]));
-      backfillTrades();
-      if (data.prices) registry.set(pricesRx, data.prices);
-      if (data.oracleEstimate > 0)
-        registry.set(oracleEstimateRx, data.oracleEstimate);
-      registry.set(
-        regimeRx,
-        data.regime
-          ? { ...defaultRegime, ...data.regime }
-          : { ...defaultRegime },
-      );
-      registry.set(killSwitchesRx, [...(data.killSwitches ?? [])]);
-      registry.set(
-        riskRx,
-        data.risk ? { ...emptyRisk, ...data.risk } : { ...emptyRisk },
-      );
-      registry.set(
-        metricsRx,
-        data.metrics
-          ? { ...emptyMetrics, ...data.metrics }
-          : { ...emptyMetrics },
-      );
-      registry.set(
-        feedHealthRx,
-        data.feedHealth
-          ? { ...emptyFeedHealth, ...data.feedHealth }
-          : { ...emptyFeedHealth },
-      );
       if (data.storage) {
-        registry.set(storageHealthRx, {
-          ...emptyStorageHealth,
-          ...data.storage,
-        });
+        registry.set(storageHealthRx, { ...emptyStorageHealth, ...data.storage });
       }
       registry.update(
         observabilityEventsRx,
         (prev) => mergeObservability(prev, [...(data.observabilityEvents ?? [])]),
       );
-      // Multi-market: set enabled markets list from snapshot
+
+      // Multi-market: populate perMarketStateRx from all market snapshots
+      if (data.markets && Object.keys(data.markets).length > 0) {
+        const perMarket: Record<string, PerMarketSnapshot> = {};
+        for (const [mid, snap] of Object.entries(data.markets)) {
+          perMarket[mid] = {
+            tradingActive: snap.tradingActive,
+            mode: snap.mode,
+            strategies: [...(snap.strategies ?? [])],
+            market: snap.market,
+            orderbook: snap.orderbook ?? { ...emptyOrderBook },
+            prices: snap.prices ?? {},
+            oracleEstimate: snap.oracleEstimate ?? 0,
+            feedHealth: snap.feedHealth ? { ...emptyFeedHealth, ...snap.feedHealth } : { ...emptyFeedHealth },
+            pnl: normalizePnlSummary(snap.pnl),
+            shadowPnl: normalizePnlSummary(snap.shadowPnl),
+            trades: [...(snap.trades ?? [])],
+            regime: { ...defaultRegime, ...snap.regime },
+            killSwitches: [...(snap.killSwitches ?? [])],
+            risk: { ...emptyRisk, ...snap.risk },
+            metrics: { ...emptyMetrics, ...snap.metrics },
+          };
+        }
+        registry.set(perMarketStateRx, perMarket);
+
+        // Apply active market's snapshot to display atoms
+        const activeId = registry.get(activeMarketIdRx);
+        const activeSnap = perMarket[activeId] ?? perMarket["btc"];
+        if (activeSnap) {
+          applyMarketSnapshot(activeSnap);
+          registry.update(tradesRx, (prev) => mergeTrades(prev, activeSnap.trades));
+        }
+      } else {
+        // Fallback: single-market path (backward compat)
+        registry.set(tradingActiveRx, data.tradingActive ?? false);
+        registry.set(modeRx, data.mode ?? "shadow");
+        registry.set(strategiesRx, [...(data.strategies ?? [])]);
+        if (data.market) {
+          patchPerMarket("btc", "market", data.market);
+        } else {
+          rehydrateFromHttpStatus();
+        }
+        registry.set(orderBookRx, data.orderbook ?? { ...emptyOrderBook });
+        registry.set(pnlRx, normalizePnlSummary(data.pnl));
+        registry.set(shadowPnlRx, normalizePnlSummary(data.shadowPnl));
+        registry.update(tradesRx, (prev) => mergeTrades(prev, [...(data.trades ?? [])]));
+        if (data.prices) registry.set(pricesRx, data.prices);
+        if (data.oracleEstimate > 0) registry.set(oracleEstimateRx, data.oracleEstimate);
+        registry.set(regimeRx, data.regime ? { ...defaultRegime, ...data.regime } : { ...defaultRegime });
+        registry.set(killSwitchesRx, [...(data.killSwitches ?? [])]);
+        registry.set(riskRx, data.risk ? { ...emptyRisk, ...data.risk } : { ...emptyRisk });
+        registry.set(metricsRx, data.metrics ? { ...emptyMetrics, ...data.metrics } : { ...emptyMetrics });
+        registry.set(feedHealthRx, data.feedHealth ? { ...emptyFeedHealth, ...data.feedHealth } : { ...emptyFeedHealth });
+      }
+
+      // Set enabled markets list and pre-seed per-market state for every market
       if (data.enabledMarkets && data.enabledMarkets.length > 0) {
         registry.set(enabledMarketsRx, [...data.enabledMarkets]);
+        // Ensure all enabled markets have an entry in perMarketStateRx so events
+        // and tab switches work even if buildMarketSnapshot failed for a market
+        registry.update(perMarketStateRx, (prev) => {
+          const next = { ...prev };
+          for (const { id } of data.enabledMarkets!) {
+            if (!next[id]) next[id] = emptyPerMarket();
+          }
+          return next;
+        });
+        // If activeMarketId is not in the enabled list, reset to first
+        const activeId = registry.get(activeMarketIdRx);
+        if (!data.enabledMarkets.find((m) => m.id === activeId)) {
+          registry.set(activeMarketIdRx, data.enabledMarkets[0]!.id);
+        }
       }
+
+      backfillTrades();
       fetchIncidents();
     }
 
@@ -491,73 +609,85 @@ export function useWebSocket() {
           const msg = JSON.parse(event.data) as WSMessage;
           registry.set(wsLastMessageTsRx, Date.now());
           Rx.batch(() => {
+            const msgMarketId = (msg as any).marketId ?? "btc";
+            const activeId = registry.get(activeMarketIdRx);
+            const isActive = msgMarketId === activeId;
+
             switch (msg.type) {
               case "status":
                 handleInitialState(msg.data as WSStatusSnapshot);
                 break;
               case "prices":
-                handlePrices(msg.data);
+                handlePrices(msg.data, msgMarketId);
                 break;
               case "market":
-                registry.set(currentMarketRx, msg.data as any);
+                patchPerMarket(msgMarketId, "market", msg.data as any);
                 break;
               case "orderbook":
-                registry.set(orderBookRx, msg.data as any);
+                patchPerMarket(msgMarketId, "orderbook", msg.data as any);
+                if (isActive) registry.set(orderBookRx, msg.data as any);
                 break;
               case "strategies":
-                registry.set(strategiesRx, msg.data as any);
+                patchPerMarket(msgMarketId, "strategies", msg.data as any);
+                if (isActive) registry.set(strategiesRx, msg.data as any);
                 break;
               case "trade":
+                // Trades are global (all markets shown together in trades tab)
                 pendingTrades.set((msg.data as TradeRecord).id, msg.data as TradeRecord);
                 scheduleTradeFlush();
                 break;
               case "pnl":
                 {
                   const next = normalizePnlSummary(msg.data as PnLSummary);
-                  const prev = registry.get(pnlRx);
-                  if (!equalPnlSummary(prev, next)) {
-                    registry.set(pnlRx, next);
+                  patchPerMarket(msgMarketId, "pnl", next);
+                  if (isActive) {
+                    const prev = registry.get(pnlRx);
+                    if (!equalPnlSummary(prev, next)) registry.set(pnlRx, next);
                   }
                 }
                 break;
               case "shadowPnl":
                 {
                   const next = normalizePnlSummary(msg.data as PnLSummary);
-                  const prev = registry.get(shadowPnlRx);
-                  if (!equalPnlSummary(prev, next)) {
-                    registry.set(shadowPnlRx, next);
+                  patchPerMarket(msgMarketId, "shadowPnl", next);
+                  if (isActive) {
+                    const prev = registry.get(shadowPnlRx);
+                    if (!equalPnlSummary(prev, next)) registry.set(shadowPnlRx, next);
                   }
                 }
                 break;
               case "tradingActive":
-                registry.set(
-                  tradingActiveRx,
-                  (msg.data as any).tradingActive,
-                );
+                patchPerMarket(msgMarketId, "tradingActive", (msg.data as any).tradingActive);
+                if (isActive) registry.set(tradingActiveRx, (msg.data as any).tradingActive);
                 break;
               case "mode":
-                registry.set(modeRx, (msg.data as any).mode);
+                patchPerMarket(msgMarketId, "mode", (msg.data as any).mode);
+                if (isActive) registry.set(modeRx, (msg.data as any).mode);
                 break;
               case "regime":
-                registry.set(regimeRx, {
-                  ...defaultRegime,
-                  ...(msg.data as any),
-                });
+                {
+                  const r = { ...defaultRegime, ...(msg.data as any) };
+                  patchPerMarket(msgMarketId, "regime", r);
+                  if (isActive) registry.set(regimeRx, r);
+                }
                 break;
               case "killswitch":
-                registry.set(killSwitchesRx, msg.data as any);
+                patchPerMarket(msgMarketId, "killSwitches", msg.data as any);
+                if (isActive) registry.set(killSwitchesRx, msg.data as any);
                 break;
               case "risk":
-                registry.set(riskRx, {
-                  ...emptyRisk,
-                  ...(msg.data as any),
-                });
+                {
+                  const r = { ...emptyRisk, ...(msg.data as any) };
+                  patchPerMarket(msgMarketId, "risk", r);
+                  if (isActive) registry.set(riskRx, r);
+                }
                 break;
               case "metrics":
-                registry.set(metricsRx, {
-                  ...emptyMetrics,
-                  ...(msg.data as any),
-                });
+                {
+                  const m = { ...emptyMetrics, ...(msg.data as any) };
+                  patchPerMarket(msgMarketId, "metrics", m);
+                  if (isActive) registry.set(metricsRx, m);
+                }
                 break;
               case "criticalIncident":
                 registry.update(incidentsRx, (prev) => mergeIncidents(prev, [msg.data as CriticalIncident]));
@@ -569,21 +699,15 @@ export function useWebSocket() {
                 );
                 break;
               case "feedHealth":
-                registry.set(feedHealthRx, {
-                  ...emptyFeedHealth,
-                  ...(msg.data as any),
-                });
+                // feedHealth broadcast is currently BTC-only (from feedService singleton)
+                if (isActive || msgMarketId === "btc") {
+                  registry.set(feedHealthRx, { ...emptyFeedHealth, ...(msg.data as any) });
+                }
                 break;
               case "exchangeStatus":
-                registry.set(
-                  exchangeConnectedRx,
-                  (msg.data as any).exchangeConnected,
-                );
+                registry.set(exchangeConnectedRx, (msg.data as any).exchangeConnected);
                 if ((msg.data as any).walletAddress)
-                  registry.set(
-                    walletAddressRx,
-                    (msg.data as any).walletAddress,
-                  );
+                  registry.set(walletAddressRx, (msg.data as any).walletAddress);
                 break;
             }
           });
@@ -635,9 +759,9 @@ export function useWebSocket() {
       const now = Date.now();
       const wsAgeMs = now - registry.get(wsLastMessageTsRx);
       const connected = registry.get(connectedRx);
-      const hasMarket = registry.get(currentMarketRx) !== null;
       const wsStale = !connected || wsAgeMs > STALE_WS_MS;
-      if (!wsStale && hasMarket) return;
+      // Don't use currentMarket as a staleness signal — XRP legitimately has null market.
+      if (!wsStale) return;
       if (now - lastResumeReconnectAt < RESUME_RECONNECT_COOLDOWN_MS) return;
       lastResumeReconnectAt = now;
       forceReconnect();
@@ -648,11 +772,16 @@ export function useWebSocket() {
     document.addEventListener("visibilitychange", onResume);
     window.addEventListener("focus", onResume);
     const statusRehydrateTimer = setInterval(() => {
-      if (registry.get(currentMarketRx) === null) {
+      // Only rehydrate if WS appears dead — don't use currentMarket as signal
+      // because XRP legitimately has a null market window between event windows.
+      const wsAge = Date.now() - registry.get(wsLastMessageTsRx);
+      const connected = registry.get(connectedRx);
+      if (!connected || wsAge > STALE_WS_MS) {
         rehydrateFromHttpStatus();
       }
     }, STATUS_REHYDRATE_COOLDOWN_MS);
     const storageHealthTimer = setInterval(refreshStorageHealth, 10000);
+
     connect();
 
     return () => {

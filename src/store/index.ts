@@ -131,9 +131,31 @@ export interface EnabledMarket {
   displayName: string;
 }
 
+/** Snapshot of one market's display state, used when switching tabs. */
+export interface PerMarketSnapshot {
+  tradingActive: boolean;
+  mode: "live" | "shadow";
+  strategies: StrategyState[];
+  market: MarketWindow | null;
+  orderbook: OrderBookState;
+  prices: Record<string, PricePoint>;
+  oracleEstimate: number;
+  feedHealth: FeedHealthSnapshot;
+  pnl: PnLSummary;
+  shadowPnl: PnLSummary;
+  trades: TradeRecord[];
+  regime: RegimeState;
+  killSwitches: KillSwitchStatus[];
+  risk: RiskSnapshot;
+  metrics: EngineMetrics;
+}
+
 // Writable Rx atoms — multi-market
-export const activeMarketIdRx = Rx.make("btc");
+export const activeMarketIdRx = Rx.make(
+  new URLSearchParams(window.location.search).get("market") ?? "btc"
+);
 export const enabledMarketsRx = Rx.make<EnabledMarket[]>([{ id: "btc", displayName: "BTC" }]);
+export const perMarketStateRx = Rx.make<Record<string, PerMarketSnapshot>>({});
 
 // Writable Rx atoms
 export const connectedRx = Rx.make(false);
@@ -144,7 +166,9 @@ export const modeRx = Rx.make<"live" | "shadow">("shadow");
 export const pricesRx = Rx.make<Record<string, PricePoint>>({});
 export const oracleEstimateRx = Rx.make(0);
 export const priceHistoryRx = Rx.make<PriceHistory[]>([]);
-export const currentMarketRx = Rx.make<MarketWindow | null>(null);
+export const currentMarketRx = Rx.make((get: Rx.Context) =>
+  get(perMarketStateRx)[get(activeMarketIdRx)]?.market ?? null
+);
 export const orderBookRx = Rx.make<OrderBookState>({ ...emptyOrderBook });
 export const strategiesRx = Rx.make<StrategyState[]>([]);
 export const tradesRx = Rx.make<TradeRecord[]>([]);

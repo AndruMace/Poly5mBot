@@ -190,7 +190,7 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
                 if (sig === lastShadowPnlSig) continue;
                 lastShadowPnlSig = sig;
               }
-              broadcast(wss, { type, data: event.data, timestamp: Date.now() });
+              broadcast(wss, { type, data: event.data, marketId: event.marketId ?? "btc", timestamp: Date.now() });
             }
           }
         }).pipe(
@@ -202,18 +202,24 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
         // Throttled price + feed health broadcasts
         yield* Effect.gen(function* () {
           if (!wss) return;
-          const [prices, oracleEst, feedHealth, connected, walletAddr] = yield* Effect.all([
-            feedService.getLatestPrices,
-            feedService.getOracleEstimate,
+          // Broadcast prices per-market so the frontend can route to the right market
+          for (const mkt of orchestrator.getAllEngines()) {
+            const [prices, oracleEst] = yield* Effect.all([
+              mkt.feedManager.getLatestPrices,
+              mkt.feedManager.getOracleEstimate,
+            ]);
+            broadcast(wss, {
+              type: "prices",
+              data: { prices, oracleEstimate: oracleEst },
+              marketId: mkt.marketId,
+              timestamp: Date.now(),
+            });
+          }
+          const [feedHealth, connected, walletAddr] = yield* Effect.all([
             feedService.getFeedHealth,
             polyClient.isConnected,
             polyClient.getWalletAddress,
           ]);
-          broadcast(wss, {
-            type: "prices",
-            data: { prices, oracleEstimate: oracleEst },
-            timestamp: Date.now(),
-          });
           broadcast(wss, {
             type: "feedHealth",
             data: feedHealth,
