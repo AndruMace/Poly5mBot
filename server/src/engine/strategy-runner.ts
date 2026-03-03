@@ -9,6 +9,7 @@ interface StrategyRunnerDeps {
   strategies: ReadonlyArray<Strategy>;
   strategyCooldownMs: Record<string, number>;
   maxEntriesPerWindow: Record<string, number>;
+  perSideStrategies: Set<string>;
   maxTradeSize: number;
   getRecentPrices: (windowMs: number, source: string) => Effect.Effect<any, any, never>;
   computeSize: (
@@ -38,6 +39,7 @@ interface StrategyRunnerDeps {
     signal: Signal,
     regime: RegimeState,
     ctx: MarketContext,
+    config: Record<string, number>,
   ) => number;
   bumpDiag: (
     st: EngineState,
@@ -81,12 +83,30 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         const lastExec = sCurrent.lastStrategyExecution.get(strategy.name) ?? 0;
         if (now - lastExec < cooldownMs) continue;
 
-        const maxEntries = deps.maxEntriesPerWindow[strategy.name] ?? 2;
+        // Read from the strategy's own config (set via UI) first; fall back to the hardcoded constant.
+        const maxEntries = (sState.config["maxEntriesPerWindow"] as number | undefined)
+          ?? deps.maxEntriesPerWindow[strategy.name]
+          ?? 2;
         const entries = sCurrent.entriesThisWindow.get(strategy.name) ?? 0;
         if (entries >= maxEntries) continue;
 
         const signal = yield* strategy.evaluate(ctx);
         if (!signal) continue;
+
+        // Per-side limit: for strategies in perSideStrategies, the entry budget is split evenly
+        // across UP and DOWN — perSideMax = ceil(totalMax / 2). Checked post-evaluate because
+        // we need the signal's side. Examples: totalMax=2→1/side, totalMax=4→2/side, totalMax=3→2/side.
+        if (deps.perSideStrategies.has(strategy.name)) {
+          const perSideMax = Math.ceil(maxEntries / 2);
+          const sideKey = `${strategy.name}:${signal.side}`;
+          const sideEntries = sCurrent.entriesThisWindow.get(sideKey) ?? 0;
+          if (sideEntries >= perSideMax) {
+            yield* Effect.log(
+              `[Engine] ${strategy.name} ${signal.side} skipped: side entry limit reached (${sideEntries}/${perSideMax})`,
+            );
+            continue;
+          }
+        }
         yield* deps.obs({
           category: "signal",
           source: "engine",
@@ -106,7 +126,22 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         });
 
         if (signal.strategy === "momentum") {
-          signal.maxPrice = deps.adjustMomentumMaxPrice(signal, regime, ctx);
+          signal.maxPrice = deps.adjustMomentumMaxPrice(signal, regime, ctx, sState.config);
+        }
+
+        // Skip signal immediately if our limit price is below the current best ask.
+        // The scale loop only reduces size, never price — all FOK/FAK attempts at
+        // this price would fail for the same reason, wasting CLOB calls and backoff.
+        const bestAskForSide = signal.side === "UP" ? ctx.orderBook.bestAskUp : ctx.orderBook.bestAskDown;
+        if (bestAskForSide !== null && signal.maxPrice < bestAskForSide) {
+          yield* Ref.update(deps.stateRef, (stUpd) => {
+            deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
+            return stUpd;
+          });
+          yield* Effect.log(
+            `[Engine] ${strategy.name} ${signal.side} skipped: maxPrice $${signal.maxPrice.toFixed(2)} < bestAsk $${bestAskForSide.toFixed(2)}`,
+          );
+          continue;
         }
 
         yield* Ref.update(deps.stateRef, (stUpd) => {
@@ -208,10 +243,10 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
           },
         };
 
-        yield* Ref.update(deps.stateRef, (s) => {
-          s.lastStrategyExecution.set(strategy.name, now);
-          return s;
-        });
+        yield* Ref.update(deps.stateRef, (s) => ({
+          ...s,
+          lastStrategyExecution: new Map([...s.lastStrategyExecution, [strategy.name, now]]),
+        }));
 
         const executed = yield* deps.executeStrategy(signal, isShadow, ctx, entryContext);
         yield* deps.obs({
@@ -231,8 +266,13 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         });
         if (executed) {
           yield* Ref.update(deps.stateRef, (s) => {
-            s.entriesThisWindow.set(strategy.name, (s.entriesThisWindow.get(strategy.name) ?? 0) + 1);
-            return s;
+            const newMap = new Map(s.entriesThisWindow);
+            newMap.set(strategy.name, (newMap.get(strategy.name) ?? 0) + 1);
+            if (deps.perSideStrategies.has(strategy.name)) {
+              const sideKey = `${strategy.name}:${signal.side}`;
+              newMap.set(sideKey, (newMap.get(sideKey) ?? 0) + 1);
+            }
+            return { ...s, entriesThisWindow: newMap };
           });
         }
       }

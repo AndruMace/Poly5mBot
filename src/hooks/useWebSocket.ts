@@ -21,6 +21,7 @@ import {
   riskRx,
   metricsRx,
   feedHealthRx,
+  storageHealthRx,
   wsLastMessageTsRx,
   incidentsRx,
   observabilityEventsRx,
@@ -32,6 +33,7 @@ import {
   emptyRisk,
   emptyMetrics,
   emptyFeedHealth,
+  emptyStorageHealth,
 } from "../store/index.js";
 import type { PriceHistory } from "../store/index.js";
 import type {
@@ -246,7 +248,16 @@ export function useWebSocket() {
       void fetch("/api/status")
         .then(async (res) => {
           if (!res.ok) return null;
-          return (await res.json()) as { currentWindow?: any; tradingActive?: boolean; mode?: "live" | "shadow" };
+          return (await res.json()) as {
+            currentWindow?: any;
+            tradingActive?: boolean;
+            mode?: "live" | "shadow";
+            storage?: {
+              backend: "file" | "dual" | "postgres";
+              enabled: boolean;
+              ok: boolean;
+            };
+          };
         })
         .then((data) => {
           if (!data || destroyed) return;
@@ -258,6 +269,12 @@ export function useWebSocket() {
           }
           if (data.mode === "live" || data.mode === "shadow") {
             registry.set(modeRx, data.mode);
+          }
+          if (data.storage) {
+            registry.set(storageHealthRx, {
+              ...emptyStorageHealth,
+              ...data.storage,
+            });
           }
         })
         .catch(() => {
@@ -278,6 +295,29 @@ export function useWebSocket() {
         .then((payload) => {
           if (!payload?.items || destroyed) return;
           registry.update(incidentsRx, (prev) => mergeIncidents(prev, payload.items ?? []));
+        })
+        .catch(() => {
+          /* best effort */
+        });
+    };
+
+    const refreshStorageHealth = () => {
+      if (destroyed) return;
+      void fetch("/api/storage/health")
+        .then(async (res) => {
+          if (!res.ok) return null;
+          return (await res.json()) as {
+            backend?: "file" | "dual" | "postgres";
+            enabled?: boolean;
+            ok?: boolean;
+          };
+        })
+        .then((payload) => {
+          if (!payload || destroyed) return;
+          registry.set(storageHealthRx, {
+            ...emptyStorageHealth,
+            ...payload,
+          });
         })
         .catch(() => {
           /* best effort */
@@ -403,6 +443,12 @@ export function useWebSocket() {
           ? { ...emptyFeedHealth, ...data.feedHealth }
           : { ...emptyFeedHealth },
       );
+      if (data.storage) {
+        registry.set(storageHealthRx, {
+          ...emptyStorageHealth,
+          ...data.storage,
+        });
+      }
       registry.update(
         observabilityEventsRx,
         (prev) => mergeObservability(prev, [...(data.observabilityEvents ?? [])]),
@@ -430,6 +476,7 @@ export function useWebSocket() {
         registry.set(connectedRx, true);
         registry.set(wsLastMessageTsRx, Date.now());
         fetchIncidents();
+        refreshStorageHealth();
       };
 
       ws.onmessage = (event) => {
@@ -599,6 +646,7 @@ export function useWebSocket() {
         rehydrateFromHttpStatus();
       }
     }, STATUS_REHYDRATE_COOLDOWN_MS);
+    const storageHealthTimer = setInterval(refreshStorageHealth, 10000);
     connect();
 
     return () => {
@@ -608,6 +656,7 @@ export function useWebSocket() {
       if (pendingPriceHistoryFlush) clearTimeout(pendingPriceHistoryFlush);
       if (tradeFlushTimer) clearTimeout(tradeFlushTimer);
       clearInterval(statusRehydrateTimer);
+      clearInterval(storageHealthTimer);
       clearReconnectTimer();
       if (activeSocket && activeSocket.readyState !== WebSocket.CLOSED) {
         activeSocket.close();

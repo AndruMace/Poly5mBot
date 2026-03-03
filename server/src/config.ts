@@ -25,6 +25,8 @@ export interface AppConfigShape {
     readonly staleDataMs: number;
     readonly maxSpreadCents: number;
     readonly maxSignalAgeMs: number;
+    readonly maxWindowSpend: number;
+    readonly maxWindowTrades: number;
   };
   readonly trading: {
     readonly mode: "live" | "shadow";
@@ -72,6 +74,8 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
     const staleDataMs = yield* Config.integer("STALE_DATA_MS").pipe(Config.withDefault(5000));
     const maxSpreadCents = yield* Config.integer("MAX_SPREAD_CENTS").pipe(Config.withDefault(15));
     const maxSignalAgeMs = yield* Config.integer("MAX_SIGNAL_AGE_MS").pipe(Config.withDefault(2000));
+    const maxWindowSpend = yield* Config.number("MAX_WINDOW_SPEND").pipe(Config.withDefault(15));
+    const maxWindowTrades = yield* Config.integer("MAX_WINDOW_TRADES").pipe(Config.withDefault(6));
 
     const tradingMode = yield* Config.literal("live", "shadow")("TRADING_MODE").pipe(Config.withDefault("shadow" as const));
 
@@ -127,6 +131,8 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
         staleDataMs,
         maxSpreadCents,
         maxSignalAgeMs,
+        maxWindowSpend,
+        maxWindowTrades,
       },
       trading: { mode: tradingMode },
       redemption: {

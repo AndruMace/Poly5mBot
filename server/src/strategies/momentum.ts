@@ -13,6 +13,8 @@ const DEFAULT_CONFIG: Record<string, number> = {
   maxSharePrice: 0.65,
   tradeSize: 8,
   maxEntriesPerWindow: 2,
+  thinLiquidityDiscount: 0.02,
+  blowoutSpreadDiscount: 0.03,
 };
 
 const DEFAULT_REGIME_FILTER = {

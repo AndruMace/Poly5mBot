@@ -1,11 +1,13 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type http from "http";
-import { Effect, Queue, Chunk, Schedule } from "effect";
+import { Effect, Queue, Chunk, Schedule, Runtime } from "effect";
 import { TradingEngine } from "../engine/engine.js";
 import { FeedService } from "../feeds/manager.js";
 import { PolymarketClient } from "../polymarket/client.js";
 import { EventBus } from "../engine/event-bus.js";
 import { ObservabilityStore } from "../observability/store.js";
+import { PostgresStorage } from "../storage/postgres.js";
+import { AppConfig } from "../config.js";
 import type { WSMessage, EngineEvent, WSStatusSnapshot } from "../types.js";
 import type { PnLSummary } from "../types.js";
 
@@ -39,6 +41,8 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
     const polyClient = yield* PolymarketClient;
     const eventBus = yield* EventBus;
     const observability = yield* ObservabilityStore;
+    const postgres = yield* PostgresStorage;
+    const config = yield* AppConfig;
 
     let wss: WebSocketServer | null = null;
     let lastExchangeConnected: boolean | null = null;
@@ -49,63 +53,75 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
     const attach = (server: http.Server) =>
       Effect.gen(function* () {
         wss = new WebSocketServer({ server, path: "/ws" });
+        // Capture the current Effect runtime so we can run effects inside
+        // plain Node.js callbacks (e.g. the WS "connection" event handler).
+        const runtime = yield* Effect.runtime();
 
         wss.on("connection", (ws) => {
-          Effect.gen(function* () {
-            yield* Effect.log("[WS] Client connected");
+          Runtime.runPromise(runtime)(
+            Effect.gen(function* () {
+              yield* Effect.log("[WS] Client connected");
 
-            const [tradingActive, mode, strategies, market, orderbook, prices, oracleEst, feedHealth, pnl, shadowPnl, trades, regime, killSwitches, risk, metrics, connected, walletAddr, observabilityEvents] = yield* Effect.all([
-              engine.isTradingActive,
-              engine.getMode,
-              engine.getStrategyStates,
-              engine.getCurrentWindow,
-              engine.getOrderBookState,
-              feedService.getLatestPrices,
-              feedService.getOracleEstimate,
-              feedService.getFeedHealth,
-              engine.tracker.getSummary(false),
-              engine.tracker.getSummary(true),
-              engine.tracker.getTrades(WS_BOOTSTRAP_TRADES),
-              engine.getRegime,
-              engine.getKillSwitchStatus,
-              engine.getRiskSnapshot,
-              engine.getMetrics,
-              polyClient.isConnected,
-              polyClient.getWalletAddress,
-              observability.latest(300),
-            ]);
+              const [tradingActive, mode, strategies, market, orderbook, prices, oracleEst, feedHealth, pnl, shadowPnl, trades, regime, killSwitches, risk, metrics, connected, walletAddr, observabilityEvents, storageHealth] = yield* Effect.all([
+                engine.isTradingActive,
+                engine.getMode,
+                engine.getStrategyStates,
+                engine.getCurrentWindow,
+                engine.getOrderBookState,
+                feedService.getLatestPrices,
+                feedService.getOracleEstimate,
+                feedService.getFeedHealth,
+                engine.tracker.getSummary(false),
+                engine.tracker.getSummary(true),
+                engine.tracker.getTrades(WS_BOOTSTRAP_TRADES),
+                engine.getRegime,
+                engine.getKillSwitchStatus,
+                engine.getRiskSnapshot,
+                engine.getMetrics,
+                polyClient.isConnected,
+                polyClient.getWalletAddress,
+                observability.latest(300),
+                postgres.health,
+              ]);
 
-            const snapshot: WSStatusSnapshot = {
-              tradingActive,
-              mode,
-              exchangeConnected: connected,
-              walletAddress: walletAddr,
-              strategies,
-              market,
-              orderbook,
-              prices,
-              oracleEstimate: oracleEst,
-              feedHealth,
-              pnl,
-              shadowPnl,
-              trades,
-              regime,
-              killSwitches,
-              risk,
-              metrics,
-              observabilityEvents,
-            };
+              const snapshot: WSStatusSnapshot = {
+                tradingActive,
+                mode,
+                exchangeConnected: connected,
+                walletAddress: walletAddr,
+                strategies,
+                market,
+                orderbook,
+                prices,
+                oracleEstimate: oracleEst,
+                feedHealth,
+                pnl,
+                shadowPnl,
+                trades,
+                regime,
+                killSwitches,
+                risk,
+                metrics,
+                storage: {
+                  backend: config.storage.backend,
+                  ...storageHealth,
+                },
+                observabilityEvents,
+              };
 
-            const initial: WSMessage = {
-              type: "status",
-              data: snapshot,
-              timestamp: Date.now(),
-            };
-            ws.send(JSON.stringify(initial));
-          }).pipe(Effect.runSync);
+              const initial: WSMessage = {
+                type: "status",
+                data: snapshot,
+                timestamp: Date.now(),
+              };
+              ws.send(JSON.stringify(initial));
+            }),
+          ).catch((err) => {
+            Runtime.runFork(runtime)(Effect.logError(`[WS] Failed to send initial status snapshot: ${err}`));
+          });
 
           ws.on("close", () => {
-            Effect.runSync(Effect.log("[WS] Client disconnected"));
+            Runtime.runFork(runtime)(Effect.log("[WS] Client disconnected"));
           });
         });
 

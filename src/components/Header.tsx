@@ -8,6 +8,7 @@ import {
   tradingActiveRx,
   modeRx,
   wsLastMessageTsRx,
+  storageHealthRx,
 } from "../store/index.js";
 import { Wifi, WifiOff, Wallet, Play, Square, Loader2, Eye, Radio } from "lucide-react";
 
@@ -19,6 +20,7 @@ export function Header() {
   const tradingActive = useRxValue(tradingActiveRx);
   const mode = useRxValue(modeRx);
   const wsLastMessageTs = useRxValue(wsLastMessageTsRx);
+  const storageHealth = useRxValue(storageHealthRx);
   const [toggling, setToggling] = useState(false);
   const [switchingMode, setSwitchingMode] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
@@ -177,6 +179,28 @@ export function Header() {
               }`}
             >
               {exchangeConnected ? "CLOB" : "CLOB Off"}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5" title="Database connection">
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${
+                !storageHealth.enabled
+                  ? "bg-[var(--text-secondary)]"
+                  : storageHealth.ok
+                    ? "bg-[var(--accent-green)]"
+                    : "bg-[var(--accent-red)]"
+              }`}
+            />
+            <span
+              className={`text-[10px] ${
+                !storageHealth.enabled
+                  ? "text-[var(--text-secondary)]"
+                  : storageHealth.ok
+                    ? "text-[var(--accent-green)]"
+                    : "text-[var(--accent-red)]"
+              }`}
+            >
+              {!storageHealth.enabled ? "DB N/A" : storageHealth.ok ? "DB" : "DB Off"}
             </span>
           </div>
         </div>

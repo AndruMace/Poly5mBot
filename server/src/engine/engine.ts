@@ -58,11 +58,16 @@ const STRATEGY_COOLDOWN_MS: Record<string, number> = {
 };
 
 const MAX_ENTRIES_PER_WINDOW: Record<string, number> = {
-  arb: 3,
-  efficiency: 2,
-  "whale-hunt": 2,
-  momentum: 2,
+  arb: 2,
+  efficiency: 1,
+  "whale-hunt": 1,
+  momentum: 2, // fallback: 1 UP + 1 DOWN. Overridden by sState.config["maxEntriesPerWindow"].
 };
+
+// Strategies in this set split their entry budget evenly across UP and DOWN directions.
+// Per-side limit = Math.ceil(totalMax / 2), so:
+//   totalMax=2 → 1 per side | totalMax=4 → 2 per side | totalMax=3 → 2 per side (total caps at 3)
+const PER_SIDE_STRATEGIES = new Set(["momentum"]);
 
 const MIN_FILL_RATIO_BY_STRATEGY: Record<string, number> = {
   arb: 0.5,
@@ -706,13 +711,15 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       strategies,
       strategyCooldownMs: STRATEGY_COOLDOWN_MS,
       maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
+      perSideStrategies: PER_SIDE_STRATEGIES,
       maxTradeSize: config.risk.maxTradeSize,
       getRecentPrices: (windowMs, source) => feedService.getRecentPrices(windowMs, source),
       computeSize: (signal, recentPrices, winRate) => positionSizer.computeSize(signal, recentPrices, winRate),
       approveRisk: (signal, ctx, posSlots) => riskManager.approve(signal, ctx, posSlots),
       getRiskSnapshot: riskManager.getSnapshot,
       executeStrategy,
-      adjustMomentumMaxPrice,
+      adjustMomentumMaxPrice: (signal, regime, ctx, config) =>
+        adjustMomentumMaxPrice(signal, regime, ctx, config),
       bumpDiag,
       obs,
     });
@@ -733,8 +740,6 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       Effect.forkScoped,
     );
 
-    yield* pollMarkets;
-
     yield* Effect.gen(function* () {
       const windowId = (yield* Ref.get(stateRef)).currentWindow?.conditionId ?? "";
       const liveTrades = yield* tracker.getAllTradeRecords(false);
@@ -743,6 +748,22 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       yield* Effect.log(
         `[Engine] Risk rehydrated: open=${snap.openPositions}, exposure=$${snap.openExposure.toFixed(2)}, dailyPnl=$${snap.dailyPnl.toFixed(2)}, hourlyPnl=$${snap.hourlyPnl.toFixed(2)}`,
       );
+
+      if (windowId) {
+        const windowTrades = liveTrades.filter((t) => t.conditionId === windowId);
+        const restoredEntries = new Map<string, number>();
+        for (const t of windowTrades) {
+          restoredEntries.set(t.strategy, (restoredEntries.get(t.strategy) ?? 0) + 1);
+          if (PER_SIDE_STRATEGIES.has(t.strategy)) {
+            const sideKey = `${t.strategy}:${t.side}`;
+            restoredEntries.set(sideKey, (restoredEntries.get(sideKey) ?? 0) + 1);
+          }
+        }
+        yield* Ref.update(stateRef, (s) => ({ ...s, entriesThisWindow: restoredEntries }));
+        yield* Effect.log(
+          `[Engine] Restored entriesThisWindow from ${windowTrades.length} existing trades: ${JSON.stringify(Object.fromEntries(restoredEntries))}`,
+        );
+      }
     });
 
     yield* tick.pipe(

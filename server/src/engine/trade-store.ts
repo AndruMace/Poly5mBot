@@ -449,7 +449,7 @@ export const makeTradeStore = (shadow: boolean) =>
     const getOpenTrades = Ref.get(tradesRef).pipe(
       Effect.map((trades) =>
         [...trades.values()].filter(
-          (t) => t.status !== "resolved" && t.status !== "cancelled" && t.status !== "rejected",
+          (t) => !["resolved", "cancelled", "rejected", "expired"].includes(t.status),
         ),
       ),
     );

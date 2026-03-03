@@ -129,18 +129,6 @@ const program = Effect.gen(function* () {
 
   yield* wsService.attach(httpServer);
 
-  if (config.poly.privateKey) {
-    yield* Effect.gen(function* () {
-      yield* polyClient.getClient;
-      const addr = yield* polyClient.getWalletAddress;
-      yield* Effect.log(`[Startup] Polymarket auto-connected: ${addr}`);
-    }).pipe(
-      Effect.catchAll((err) =>
-        Effect.logError(`[Startup] Polymarket auto-connect failed: ${err}`),
-      ),
-    );
-  }
-
   yield* Effect.async<void, never>((resume) => {
     httpServer.listen(config.server.port, "127.0.0.1", () => {
       resume(Effect.void);
@@ -148,6 +136,22 @@ const program = Effect.gen(function* () {
   });
 
   yield* Effect.log(`Server running on http://127.0.0.1:${config.server.port}`);
+
+  if (config.poly.privateKey) {
+    yield* Effect.gen(function* () {
+      yield* Effect.gen(function* () {
+        yield* polyClient.getClient;
+        const addr = yield* polyClient.getWalletAddress;
+        yield* Effect.log(`[Startup] Polymarket auto-connected: ${addr}`);
+      }).pipe(
+        Effect.catchAll((err) =>
+          Effect.logError(`[Startup] Polymarket auto-connect failed: ${err}`),
+        ),
+        Effect.forkDaemon,
+      );
+    });
+  }
+
   yield* Effect.never;
 });
 

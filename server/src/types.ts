@@ -353,6 +353,16 @@ export interface RiskSnapshot {
   windowLosses: number;
   maxLossPerWindow: number;
   pauseRemainingSec: number;
+  windowSpend: number;
+  maxWindowSpend: number;
+  windowTradeCount: number;
+  maxWindowTrades: number;
+}
+
+export interface StorageHealthStatus {
+  backend: "file" | "dual" | "postgres";
+  enabled: boolean;
+  ok: boolean;
 }
 
 // ── Critical incidents ──
@@ -480,6 +490,7 @@ export interface WSStatusSnapshot {
   killSwitches: ReadonlyArray<KillSwitchStatus>;
   risk: RiskSnapshot;
   metrics: EngineMetrics;
+  storage?: StorageHealthStatus;
   observabilityEvents?: ReadonlyArray<ObservabilityEvent>;
 }
 

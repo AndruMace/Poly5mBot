@@ -6,7 +6,6 @@ import type { Signal, TradeRecord, TradeStatus } from "../types.js";
 const FEE_RATE = 0.25;
 const FEE_EXPONENT = 2;
 const FOK_SIZE_SCALES = [1, 0.8, 0.6, 0.45];
-const IOC_SIZE_SCALES = [1, 0.8, 0.6, 0.45, 0.35, 0.25, 0.15];
 const FOK_BACKOFF_SIZE_SCALES = [0.45, 0.35, 0.25, 0.15];
 const MIN_SHARES = 5;
 const MIN_CLOB_NOTIONAL = 1.0;
@@ -221,6 +220,22 @@ function inspectPostedOrder(order: unknown) {
 
   const mappedStatus = mapClobStatusToTradeStatus(status ?? null);
 
+  // Trust an explicit fill/match status from the venue over any accompanying message text.
+  // Some CLOB responses include informational strings (e.g. "Order partially matched") that
+  // would otherwise trip the errorMsg guard below and mislabel a real fill as cancelled.
+  // Use mapClobStatusToTradeStatus (explicit TradeStatus return) rather than the bare literal
+  // "filled" to avoid string-widening in the inferred return type of this function.
+  const filledByStatus = status === "filled" || status === "matched";
+  if (filledByStatus) {
+    return {
+      accepted: true,
+      orderId,
+      status: status ?? null,
+      mappedStatus: mapClobStatusToTradeStatus(status),
+      reason: null,
+    };
+  }
+
   if (errorMsg || rejectedByStatus) {
     return {
       accepted: false,
@@ -418,16 +433,38 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             return record;
           }
 
-          const mappedStatus = parsed.mappedStatus;
-          const fee = mappedStatus === "filled" || mappedStatus === "partial" ? calculateFee(shares, price) : 0;
+          // FOK orders resolve immediately at the venue (filled or killed), but the API
+          // response sometimes returns status="accepted"/"live" before confirming the fill.
+          // Poll getOrderStatusById to get the definitive fill status when it's ambiguous.
+          let resolvedMappedStatus = parsed.mappedStatus;
+          let resolvedAvgPrice: number | null = null;
+          let resolvedFilledShares: number | null = null;
+          if (
+            resolvedMappedStatus !== "filled" &&
+            resolvedMappedStatus !== "rejected" &&
+            resolvedMappedStatus !== "cancelled" &&
+            parsed.orderId
+          ) {
+            const refreshed = yield* getOrderStatusById(parsed.orderId);
+            if (refreshed.mappedStatus) {
+              resolvedMappedStatus = refreshed.mappedStatus;
+              resolvedAvgPrice = refreshed.avgPrice;
+              resolvedFilledShares = refreshed.filledShares;
+            }
+          }
+
+          const finalAvgPrice = resolvedAvgPrice ?? price;
+          const finalShares = resolvedFilledShares ?? shares;
+          const mappedStatus = resolvedMappedStatus;
+          const fee = mappedStatus === "filled" || mappedStatus === "partial" ? calculateFee(finalShares, finalAvgPrice) : 0;
           const record: TradeRecord = {
             id: `trade-${++tradeCounter}-${Date.now()}`,
             strategy: signal.strategy,
             side: signal.side,
             tokenId,
-            entryPrice: price,
-            size: notional,
-            shares,
+            entryPrice: finalAvgPrice,
+            size: finalShares > 0 && finalAvgPrice > 0 ? floorTo(finalShares * finalAvgPrice, 2) : notional,
+            shares: finalShares,
             fee,
             status: mappedStatus,
             shadow: false,
@@ -443,144 +480,99 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           };
 
           yield* Effect.log(
-            `[Orders] Submitted ${signal.strategy} ${signal.side} @ $${price} for $${notional} (${shares} shares, status=${mappedStatus}, fee: $${fee.toFixed(4)}) [scale=${scale}]`,
+            `[Orders] Submitted ${signal.strategy} ${signal.side} @ $${finalAvgPrice} for $${record.size} (${finalShares} shares, status=${mappedStatus}, fee: $${fee.toFixed(4)}) [scale=${scale}]`,
           );
           fokBackoffByKey.delete(backoffKey);
           return record as TradeRecord | null;
         }
 
-        // FOK can fail in thin/fast books even when a partial instant fill
-        // would still be strategically valuable. Try IOC as a controlled fallback.
-        for (const scale of IOC_SIZE_SCALES) {
-          const q = quantizeBuyOrder(signal.size * scale, signal.maxPrice);
-          const price = q.price;
-          const normalized = enforceMinSharesSingleLeg(price, q.shares);
-          const shares = normalized.shares;
-          const notional = normalized.quote;
-          if (price <= 0 || shares <= 0 || notional <= 0) continue;
-          if (notional < MIN_CLOB_NOTIONAL) continue;
-          if (normalized.clamped) {
-            const requestedNotional = signal.size * scale;
-            const delta = notional - requestedNotional;
-            if (delta > 0.01) {
-              yield* Effect.logWarning(
-                `[Orders] Min-shares clamp applied for ${signal.strategy} ${signal.side} [IOC scale=${scale}]: requested=$${requestedNotional.toFixed(2)} -> effective=$${notional.toFixed(2)} (delta=$${delta.toFixed(2)}, shares=${shares.toFixed(4)})`,
-              );
-            }
-          }
+        yield* Effect.logWarning(
+          `[Orders] All FOK sizes exhausted for ${signal.strategy} ${signal.side}: ${lastReason ?? "order couldn't be fully filled"} — trying FAK fallback`,
+        );
 
-          const result = yield* Effect.tryPromise({
+        // FAK (Fill And Kill): fills whatever is immediately available, cancels the rest.
+        // A single full-size attempt extracts the maximum available fill at maxPrice.
+        // No resting order is created — safe to use without slot risk.
+        const fakQ = quantizeBuyOrder(signal.size, signal.maxPrice);
+        const fakNorm = enforceMinSharesSingleLeg(fakQ.price, fakQ.shares);
+        if (fakQ.price > 0 && fakNorm.shares > 0 && fakNorm.quote >= MIN_CLOB_NOTIONAL) {
+          const fakResult = yield* Effect.tryPromise({
             try: () =>
               (client as any).createAndPostOrder(
-                { tokenID: tokenId, price, side: "BUY", size: shares },
+                { tokenID: tokenId, price: fakQ.price, side: "BUY", size: fakNorm.shares },
                 { tickSize: "0.01", negRisk: false },
-                "IOC",
+                "FAK",
               ) as Promise<unknown>,
             catch: (err) => extractOrderError(err),
           }).pipe(Effect.either);
 
-          if (result._tag === "Left") {
-            const reason = result.left;
-            lastReason = reason;
-            if (isFokLiquidityReject(reason)) continue;
-            fokBackoffByKey.delete(backoffKey);
-            const record: TradeRecord = {
-              id: `trade-${++tradeCounter}-${Date.now()}`,
-              strategy: signal.strategy,
-              side: signal.side,
-              tokenId,
-              entryPrice: price,
-              size: notional,
-              shares,
-              fee: 0,
-              status: "rejected",
-              shadow: false,
-              outcome: null,
-              pnl: 0,
-              timestamp: Date.now(),
-              windowEnd,
-              conditionId,
-              priceToBeatAtEntry,
-              clobResult: "rejected",
-              clobReason: reason,
-            };
-            yield* Effect.logWarning(`[Orders] Live order rejected for ${signal.strategy} ${signal.side}: ${reason}`);
-            return record;
+          if (fakResult._tag === "Left") {
+            const reason = fakResult.left;
+            yield* Effect.logWarning(`[Orders] FAK fallback failed for ${signal.strategy} ${signal.side}: ${reason}`);
+            return null as TradeRecord | null;
           }
 
-          const parsed = inspectPostedOrder(result.right);
-          let observed = normalizeOrderStatus(result.right);
-          if ((observed.filledShares ?? 0) <= 0 && parsed.orderId) {
+          const parsed = inspectPostedOrder(fakResult.right);
+
+          // FAK resolves immediately, but handle the rare API race where status is
+          // still "live" on the first response — poll once for the final status.
+          let resolvedMappedStatus = parsed.mappedStatus;
+          let resolvedAvgPrice: number | null = null;
+          let resolvedFilledShares: number | null = null;
+          if (
+            resolvedMappedStatus !== "filled" &&
+            resolvedMappedStatus !== "partial" &&
+            resolvedMappedStatus !== "rejected" &&
+            resolvedMappedStatus !== "cancelled" &&
+            parsed.orderId
+          ) {
             const refreshed = yield* getOrderStatusById(parsed.orderId);
             if (refreshed.mappedStatus) {
-              observed = refreshed;
+              resolvedMappedStatus = refreshed.mappedStatus;
+              resolvedAvgPrice = refreshed.avgPrice;
+              resolvedFilledShares = refreshed.filledShares;
             }
           }
 
-          const observedStatus = observed.mappedStatus ?? parsed.mappedStatus;
-          const observedShares =
-            observed.filledShares ??
-            (observedStatus === "filled" ? shares : null);
-
-          if (
-            (observedStatus === "filled" || observedStatus === "partial") &&
-            observedShares !== null &&
-            observedShares > 0
-          ) {
-            const fillRatio = shares > 0 ? observedShares / shares : 0;
-            const avgPrice = observed.avgPrice ?? price;
-            const filledNotional = floorTo(observedShares * avgPrice, 2);
-            const fee = calculateFee(observedShares, avgPrice);
-            const status =
-              observedStatus === "filled" || fillRatio >= 0.995
-                ? "filled"
-                : "partial";
-            const record: TradeRecord = {
-              id: `trade-${++tradeCounter}-${Date.now()}`,
-              strategy: signal.strategy,
-              side: signal.side,
-              tokenId,
-              entryPrice: avgPrice,
-              size: filledNotional,
-              shares: observedShares,
-              fee,
-              status,
-              shadow: false,
-              outcome: null,
-              pnl: fee > 0 ? -fee : 0,
-              timestamp: Date.now(),
-              windowEnd,
-              conditionId,
-              priceToBeatAtEntry,
-              clobOrderId: parsed.orderId ?? undefined,
-              clobResult: observed.rawStatus ?? parsed.status ?? "ioc",
-              clobReason: parsed.reason ?? undefined,
-            };
-            yield* Effect.log(
-              `[Orders] IOC fallback filled ${signal.strategy} ${signal.side} @ $${avgPrice.toFixed(4)} for $${filledNotional.toFixed(2)} (${observedShares.toFixed(4)} shares, fillRatio=${(fillRatio * 100).toFixed(1)}%) [scale=${scale}]`,
+          const finalStatus = resolvedMappedStatus;
+          if (finalStatus !== "filled" && finalStatus !== "partial") {
+            yield* Effect.logWarning(
+              `[Orders] FAK fallback got no fill for ${signal.strategy} ${signal.side} (status=${finalStatus ?? "unknown"})`,
             );
-            fokBackoffByKey.delete(backoffKey);
-            return record;
+            return null as TradeRecord | null;
           }
 
-          const reason = parsed.reason ?? observed.reason;
-          if (isFokLiquidityReject(reason)) {
-            lastReason = reason;
-            continue;
-          }
-          if (isSizeBelowMinimum(reason)) {
-            // Smaller scales will also fail minimum — stop now
-            lastReason = reason;
-            break;
-          }
-          // For balance errors and other non-fill responses: let the loop
-          // try smaller scales (a smaller amount may fit within available balance).
-          lastReason = reason;
+          const finalAvgPrice = resolvedAvgPrice ?? fakQ.price;
+          const finalShares = resolvedFilledShares ?? fakNorm.shares;
+          const fee = calculateFee(finalShares, finalAvgPrice);
+          const record: TradeRecord = {
+            id: `trade-${++tradeCounter}-${Date.now()}`,
+            strategy: signal.strategy,
+            side: signal.side,
+            tokenId,
+            entryPrice: finalAvgPrice,
+            size: floorTo(finalShares * finalAvgPrice, 2),
+            shares: finalShares,
+            fee,
+            status: finalStatus,
+            shadow: false,
+            outcome: null,
+            pnl: fee > 0 ? -fee : 0,
+            timestamp: Date.now(),
+            windowEnd,
+            conditionId,
+            priceToBeatAtEntry,
+            clobOrderId: parsed.orderId ?? undefined,
+            clobResult: parsed.status ?? "fak",
+            clobReason: parsed.reason ?? undefined,
+          };
+          yield* Effect.log(
+            `[Orders] FAK fallback filled ${signal.strategy} ${signal.side} @ $${finalAvgPrice.toFixed(4)} for $${record.size} (${finalShares.toFixed(4)} shares) [${finalStatus}]`,
+          );
+          fokBackoffByKey.delete(backoffKey);
+          return record as TradeRecord | null;
         }
 
-        yield* Effect.logWarning(
-          `[Orders] All FOK sizes exhausted for ${signal.strategy} ${signal.side}: ${lastReason ?? "order couldn't be fully filled"} (IOC fallback also did not reach minimum fill threshold)`,
-        );
         return null as TradeRecord | null;
       }).pipe(
         Effect.withSpan("Orders.executeSignal", {
@@ -738,7 +730,10 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           if (result) return normalizeOrderStatus(result);
         }
         return { mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null };
-      }).pipe(Effect.catchAll(() => Effect.succeed({ mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null })));
+      }).pipe(
+        Effect.timeout("3 seconds"),
+        Effect.catchAll(() => Effect.succeed({ mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null })),
+      );
 
     const listRecentOrders = (sinceMs: number, limit = 300) =>
       Effect.gen(function* () {

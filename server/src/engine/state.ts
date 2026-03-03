@@ -15,28 +15,20 @@ function clamp(value: number, min: number, max: number): number {
 export function adjustMomentumMaxPrice(
   signal: Signal,
   regime: RegimeState,
-  ctx: MarketContext,
+  _ctx: MarketContext,
+  config: Record<string, number>,
 ): number {
   const base = signal.maxPrice;
   if (signal.strategy !== "momentum") return base;
 
   let allowance = 0;
-  if (
-    regime.trendRegime === "strong_up" ||
-    regime.trendRegime === "strong_down"
-  ) {
-    allowance += 0.05;
-  } else if (regime.trendRegime === "up" || regime.trendRegime === "down") {
-    allowance += 0.03;
-  }
+  const thinDiscount = (config["thinLiquidityDiscount"] as number | undefined) ?? 0.02;
+  const blowoutDiscount = (config["blowoutSpreadDiscount"] as number | undefined) ?? 0.03;
 
-  if (signal.confidence >= 0.75) allowance += 0.02;
-  if (ctx.windowRemainingMs <= 120_000) allowance += 0.02;
+  if (regime.liquidityRegime === "thin") allowance -= thinDiscount;
+  if (regime.spreadRegime === "blowout") allowance -= blowoutDiscount;
 
-  if (regime.liquidityRegime === "thin") allowance -= 0.02;
-  if (regime.spreadRegime === "blowout") allowance -= 0.03;
-
-  return Math.round(clamp(base + allowance, 0.5, 0.78) * 1000) / 1000;
+  return Math.round(clamp(base + allowance, 0.5, base) * 1000) / 1000;
 }
 
 export function zeroDiagnostics(): StrategyDiagnostics {

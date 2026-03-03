@@ -11,6 +11,9 @@ export default defineConfig({
     }),
     tailwindcss(),
   ],
+  optimizeDeps: {
+    include: ['effect', '@effect-rx/rx', '@effect-rx/rx-react'],
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:3001',

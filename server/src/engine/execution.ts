@@ -192,10 +192,11 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
           }
           yield* Ref.update(deps.stateRef, (s) => { deps.bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
           yield* deps.tracker.addTrade(trade);
-          if (trade.status === "filled" || trade.status === "partial") {
+          if (trade.status === "filled" || trade.status === "partial" || trade.status === "submitted") {
             yield* deps.riskManager.onTradeOpened(trade);
             yield* Ref.update(deps.stateRef, (s) => {
-              deps.bumpDiag(s, signal.strategy, trade.status === "partial" ? "partialFill" : "fullFill", 1, false);
+              const diagKey = trade.status === "partial" ? "partialFill" : trade.status === "submitted" ? "submitted" : "fullFill";
+              deps.bumpDiag(s, signal.strategy, diagKey, 1, false);
               return s;
             });
           } else if (trade.status === "cancelled" || trade.status === "rejected") {
@@ -204,7 +205,10 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
               return s;
             });
           }
-          yield* deps.emit({ _tag: "Trade", data: trade });
+          // Emit the stored record so the WS message timestamp matches what the
+          // API and cursor pagination return (both use the event-sourced timestamp).
+          const stored = yield* deps.tracker.getTradeRecordById(trade.id, false);
+          yield* deps.emit({ _tag: "Trade", data: stored ?? trade });
         }
         if (incident) {
           yield* Ref.update(deps.stateRef, (s) => ({
@@ -242,16 +246,20 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
         trade.entryContext = entryCtx;
         yield* Ref.update(deps.stateRef, (s) => { deps.bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
         yield* deps.tracker.addTrade(trade);
-        if (trade.status === "filled" || trade.status === "partial") {
+        if (trade.status === "filled" || trade.status === "partial" || trade.status === "submitted") {
           yield* deps.riskManager.onTradeOpened(trade);
           yield* Ref.update(deps.stateRef, (s) => {
-            deps.bumpDiag(s, signal.strategy, trade.status === "partial" ? "partialFill" : "fullFill", 1, false);
+            const diagKey = trade.status === "partial" ? "partialFill" : trade.status === "submitted" ? "submitted" : "fullFill";
+            deps.bumpDiag(s, signal.strategy, diagKey, 1, false);
             return s;
           });
         } else if (trade.status === "cancelled" || trade.status === "rejected") {
           yield* Ref.update(deps.stateRef, (s) => { deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false); return s; });
         }
-        yield* deps.emit({ _tag: "Trade", data: trade });
+        // Emit the stored record so the WS message timestamp matches what the
+        // API and cursor pagination return (both use the event-sourced timestamp).
+        const stored = yield* deps.tracker.getTradeRecordById(trade.id, false);
+        yield* deps.emit({ _tag: "Trade", data: stored ?? trade });
         return trade.status === "submitted" || trade.status === "partial" || trade.status === "filled";
       }
       yield* Ref.update(deps.stateRef, (s) => { deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false); return s; });

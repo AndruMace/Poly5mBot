@@ -30,6 +30,7 @@ describe("Header", () => {
 
     expect(screen.getByText("WS")).toBeInTheDocument();
     expect(screen.getByText("CLOB")).toBeInTheDocument();
+    expect(screen.getByText("DB N/A")).toBeInTheDocument();
     expect(screen.getByText(/0x1234...cdef/i)).toBeInTheDocument();
     expect(screen.getByText(/\$110,000.00/)).toBeInTheDocument();
   });

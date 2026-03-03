@@ -158,13 +158,34 @@ export const handleRequest = (
 
     if (method === "GET") {
       if (path === "/api/status") {
-        const [tradingActive, mode, currentWindow, windowTitle, regime, killSwitches, risk, metrics, oracleEst, btcPrice, feedHealth, connected, walletAddr] = yield* Effect.all([
+        const [tradingActive, mode, currentWindow, windowTitle, regime, killSwitches, risk, metrics, oracleEst, btcPrice, feedHealth, connected, walletAddr, storageHealth] = yield* Effect.all([
           engine.isTradingActive, engine.getMode, engine.getCurrentWindow, engine.getWindowTitle,
           engine.getRegime, engine.getKillSwitchStatus, engine.getRiskSnapshot, engine.getMetrics,
           feedService.getOracleEstimate, feedService.getCurrentBtcPrice,
-          feedService.getFeedHealth, polyClient.isConnected, polyClient.getWalletAddress,
+          feedService.getFeedHealth, polyClient.isConnected, polyClient.getWalletAddress, postgres.health,
         ]);
-        return { status: 200, body: { connected, walletAddress: walletAddr, tradingActive, mode, currentWindow, windowTitle, oracleEstimate: oracleEst, btcPrice, feedHealth, regime, killSwitches, risk, metrics } };
+        return {
+          status: 200,
+          body: {
+            connected,
+            walletAddress: walletAddr,
+            tradingActive,
+            mode,
+            currentWindow,
+            windowTitle,
+            oracleEstimate: oracleEst,
+            btcPrice,
+            feedHealth,
+            regime,
+            killSwitches,
+            risk,
+            metrics,
+            storage: {
+              backend: config.storage.backend,
+              ...storageHealth,
+            },
+          },
+        };
       }
       if (path === "/api/strategies") {
         const states = yield* engine.getStrategyStates;

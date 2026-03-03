@@ -16,6 +16,10 @@ export class PostgresStorage extends Effect.Service<PostgresStorage>()("Postgres
       const pool = new Pool({
         connectionString: config.storage.databaseUrl,
         max: 10,
+        // Keep startup responsive if Postgres is unreachable.
+        connectionTimeoutMillis: 2500,
+        query_timeout: 5000,
+        statement_timeout: 5000,
       });
       yield* Ref.set(poolRef, pool);
       return pool;

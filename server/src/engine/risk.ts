@@ -12,6 +12,8 @@ interface RiskState {
   currentWindowId: string;
   consecutiveLosses: number;
   pauseUntil: number;
+  windowSpend: number;
+  windowTradeCount: number;
 }
 
 function startOfDay(): number {
@@ -39,6 +41,8 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
       currentWindowId: "",
       consecutiveLosses: 0,
       pauseUntil: 0,
+      windowSpend: 0,
+      windowTradeCount: 0,
     });
 
     const rollover = Ref.update(stateRef, (s) => {
@@ -83,6 +87,12 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
         if (s.windowLosses >= config.risk.maxLossPerWindow) {
           return { approved: false, reason: `Window loss limit (${config.risk.maxLossPerWindow}) reached` };
         }
+        if (s.windowSpend + signal.size > config.risk.maxWindowSpend) {
+          return { approved: false, reason: `Window spend cap ($${s.windowSpend.toFixed(2)} / $${config.risk.maxWindowSpend})` };
+        }
+        if (s.windowTradeCount >= config.risk.maxWindowTrades) {
+          return { approved: false, reason: `Window trade count cap (${s.windowTradeCount} / ${config.risk.maxWindowTrades})` };
+        }
         if (s.consecutiveLosses >= config.risk.maxConsecutiveLosses) {
           yield* Ref.update(stateRef, (st) => ({ ...st, pauseUntil: Date.now() + 300_000 }));
           return { approved: false, reason: `${s.consecutiveLosses} consecutive losses, paused 5min` };
@@ -118,7 +128,12 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
       });
 
     const onTradeOpened = (trade: TradeRecord, shadow = false) =>
-      shadow ? Effect.void : Ref.update(stateRef, (s) => ({ ...s, openPositions: [...s.openPositions, trade] }));
+      shadow ? Effect.void : Ref.update(stateRef, (s) => ({
+        ...s,
+        openPositions: [...s.openPositions, trade],
+        windowSpend: s.windowSpend + trade.size,
+        windowTradeCount: s.windowTradeCount + 1,
+      }));
 
     const onTradeClosed = (trade: TradeRecord, shadow = false) =>
       Ref.update(stateRef, (s) => {
@@ -139,14 +154,14 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
     const onNewWindow = (conditionId: string) =>
       Ref.update(stateRef, (s) =>
         conditionId !== s.currentWindowId
-          ? { ...s, currentWindowId: conditionId, windowLosses: 0 }
+          ? { ...s, currentWindowId: conditionId, windowLosses: 0, windowSpend: 0, windowTradeCount: 0 }
           : s,
       );
 
     const resolveExpired = (now: number) =>
       Ref.modify(stateRef, (s) => {
         const expired = s.openPositions.filter(
-          (t) => (t.status === "filled" || t.status === "partial") && now >= t.windowEnd,
+          (t) => (t.status === "filled" || t.status === "partial" || t.status === "submitted") && now >= t.windowEnd,
         );
         return [expired, { ...s, openPositions: s.openPositions.filter((t) => !expired.includes(t)) }] as const;
       });
@@ -161,7 +176,7 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
         const liveTrades = trades.filter((t) => !t.shadow);
         const openPositions = liveTrades.filter(
           (t) =>
-            (t.status === "filled" || t.status === "partial") &&
+            (t.status === "filled" || t.status === "partial" || t.status === "submitted") &&
             t.windowEnd > now &&
             t.outcome === null,
         );
@@ -190,6 +205,9 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
           (t) => t.conditionId === currentWindowId && t.outcome === "loss",
         ).length;
 
+        const windowSpend = openPositions.reduce((sum, t) => sum + t.size, 0);
+        const windowTradeCount = openPositions.length;
+
         return {
           ...s,
           openPositions,
@@ -201,6 +219,8 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
           currentWindowId: currentWindowId || s.currentWindowId,
           consecutiveLosses,
           pauseUntil: 0,
+          windowSpend,
+          windowTradeCount,
         };
       });
 
@@ -219,6 +239,10 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
         windowLosses: s.windowLosses,
         maxLossPerWindow: config.risk.maxLossPerWindow,
         pauseRemainingSec: Date.now() < s.pauseUntil ? Math.ceil((s.pauseUntil - Date.now()) / 1000) : 0,
+        windowSpend: s.windowSpend,
+        maxWindowSpend: config.risk.maxWindowSpend,
+        windowTradeCount: s.windowTradeCount,
+        maxWindowTrades: config.risk.maxWindowTrades,
       })),
     );
 
@@ -229,6 +253,8 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
         { name: "Window Losses", active: s.windowLosses >= config.risk.maxLossPerWindow, reason: `${s.windowLosses} / ${config.risk.maxLossPerWindow}` },
         { name: "Consecutive Losses", active: s.consecutiveLosses >= config.risk.maxConsecutiveLosses, reason: `${s.consecutiveLosses} / ${config.risk.maxConsecutiveLosses}` },
         { name: "Auto-Pause", active: Date.now() < s.pauseUntil, reason: Date.now() < s.pauseUntil ? `${Math.ceil((s.pauseUntil - Date.now()) / 1000)}s remaining` : "Inactive" },
+        { name: "Window Spend", active: s.windowSpend >= config.risk.maxWindowSpend, reason: `$${s.windowSpend.toFixed(2)} / $${config.risk.maxWindowSpend}` },
+        { name: "Window Trades", active: s.windowTradeCount >= config.risk.maxWindowTrades, reason: `${s.windowTradeCount} / ${config.risk.maxWindowTrades}` },
       ]),
     );
 

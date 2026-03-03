@@ -11,6 +11,7 @@ import type {
   RiskSnapshot,
   EngineMetrics,
   FeedHealthSnapshot,
+  StorageHealthStatus,
   CriticalIncident,
   ObservabilityEvent,
 } from "../types/index.js";
@@ -113,6 +114,16 @@ export const emptyRisk: RiskSnapshot = {
   windowLosses: 0,
   maxLossPerWindow: 0,
   pauseRemainingSec: 0,
+  windowSpend: 0,
+  maxWindowSpend: 0,
+  windowTradeCount: 0,
+  maxWindowTrades: 0,
+};
+
+export const emptyStorageHealth: StorageHealthStatus = {
+  backend: "file",
+  enabled: false,
+  ok: true,
 };
 
 // Writable Rx atoms
@@ -135,6 +146,7 @@ export const killSwitchesRx = Rx.make<KillSwitchStatus[]>([]);
 export const riskRx = Rx.make<RiskSnapshot>({ ...emptyRisk });
 export const metricsRx = Rx.make<EngineMetrics>({ ...emptyMetrics });
 export const feedHealthRx = Rx.make<FeedHealthSnapshot>({ ...emptyFeedHealth });
+export const storageHealthRx = Rx.make<StorageHealthStatus>({ ...emptyStorageHealth });
 export const wsLastMessageTsRx = Rx.make(0);
 export const incidentsRx = Rx.make<CriticalIncident[]>([]);
 export const observabilityEventsRx = Rx.make<ObservabilityEvent[]>([]);
