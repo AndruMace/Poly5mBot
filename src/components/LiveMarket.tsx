@@ -66,6 +66,10 @@ export function LiveMarket() {
   const sec = totalSec % 60;
 
   const priceToBeat = currentMarket?.priceToBeat ?? 0;
+  const ptbDecimals = activeMarketId === "xrp" ? 4 : 3;
+  const priceToBeatStatus = currentMarket?.priceToBeatStatus ?? "pending";
+  const priceToBeatSource = currentMarket?.priceToBeatSource ?? "unavailable";
+  const priceToBeatReason = currentMarket?.priceToBeatReason ?? null;
 
   const upMid = orderBook.bestBidUp !== null && orderBook.bestAskUp !== null
     ? (orderBook.bestBidUp + orderBook.bestAskUp) / 2
@@ -171,12 +175,31 @@ export function LiveMarket() {
             </div>
 
             <div className="bg-[var(--bg-secondary)] rounded-lg px-3 py-2">
-              <div className="text-xs text-[var(--text-secondary)]">Price to Beat</div>
-              <div className="font-mono text-sm font-semibold">
-                {priceToBeat > 0
-                  ? `$${priceToBeat.toLocaleString(undefined, { minimumFractionDigits: 2 })}`
-                  : "—"}
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-[var(--text-secondary)]">Price to Beat</div>
+                <div className="text-[10px] text-[var(--text-secondary)] uppercase tracking-wide">
+                  {priceToBeatSource === "polymarket_page_json"
+                    ? "Polymarket"
+                    : priceToBeatSource === "polymarket_page_dom"
+                      ? "Polymarket Fallback"
+                      : priceToBeatSource === "gamma_metadata"
+                        ? "Gamma"
+                        : "Unavailable"}
+                </div>
               </div>
+              <div className="font-mono text-sm font-semibold">
+                {priceToBeatStatus === "exact" && priceToBeat > 0
+                  ? `$${priceToBeat.toLocaleString(undefined, {
+                      minimumFractionDigits: ptbDecimals,
+                      maximumFractionDigits: ptbDecimals,
+                    })}`
+                  : "Price to Beat unavailable (awaiting Polymarket page PTB)"}
+              </div>
+              {priceToBeatStatus !== "exact" && priceToBeatReason && (
+                <div className="text-[10px] text-[var(--text-secondary)] mt-1">
+                  Reason: {priceToBeatReason}
+                </div>
+              )}
             </div>
 
             <div className="mt-3 bg-[var(--bg-secondary)] rounded-lg px-3 py-2">

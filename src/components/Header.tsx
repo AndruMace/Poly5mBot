@@ -50,6 +50,7 @@ export function Header() {
 
   const wsAgeMs = wsLastMessageTs > 0 ? nowTs - wsLastMessageTs : Infinity;
   const isStale = !wsConnected || wsAgeMs > 8000;
+  const spotDecimals = activeMarketId === "xrp" ? 4 : 2;
 
   async function handleTradingToggle() {
     setToggling(true);
@@ -119,7 +120,7 @@ export function Header() {
           <div className="flex items-center gap-2 px-3 py-1 rounded-md bg-[var(--bg-card)] text-sm">
             <span className="text-[var(--text-secondary)]">{enabledMarkets.find((m) => m.id === activeMarketId)?.displayName ?? activeMarketId.toUpperCase()}</span>
             <span className="font-mono font-semibold">
-              ${latestPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              ${latestPrice.toLocaleString(undefined, { minimumFractionDigits: spotDecimals, maximumFractionDigits: spotDecimals })}
             </span>
           </div>
         )}

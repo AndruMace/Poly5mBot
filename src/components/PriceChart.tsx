@@ -46,6 +46,7 @@ export function PriceChart() {
   const enabledMarkets = useRxValue(enabledMarketsRx);
   const activeDisplayName = enabledMarkets.find((m) => m.id === activeMarketId)?.displayName ?? activeMarketId.toUpperCase();
   const priceToBeat = currentMarket?.priceToBeat ?? 0;
+  const priceDecimals = activeMarketId === "xrp" ? 4 : 2;
 
   const latestPrice = useMemo(() => {
     let best: number | null = null;
@@ -111,8 +112,8 @@ export function PriceChart() {
               <span className="font-mono text-lg font-bold">
                 $
                 {displayPrice.toLocaleString(undefined, {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
+                  minimumFractionDigits: priceDecimals,
+                  maximumFractionDigits: priceDecimals,
                 })}
               </span>
               {priceToBeat > 0 && (
@@ -167,7 +168,7 @@ export function PriceChart() {
               tickLine={false}
               axisLine={false}
               tickFormatter={(v: number) =>
-                `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                `$${v.toLocaleString(undefined, { maximumFractionDigits: activeMarketId === "xrp" ? 4 : 0 })}`
               }
               width={80}
             />
@@ -181,7 +182,8 @@ export function PriceChart() {
               labelStyle={{ color: "var(--text-secondary)" }}
               formatter={(value: number | string | undefined) => [
                 `$${Number(value ?? 0).toLocaleString(undefined, {
-                  minimumFractionDigits: 2,
+                  minimumFractionDigits: priceDecimals,
+                  maximumFractionDigits: priceDecimals,
                 })}`,
               ]}
             />

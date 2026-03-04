@@ -15,6 +15,8 @@ interface SnapshotEmitterDeps {
 }
 
 export function makeSnapshotEmitter(deps: SnapshotEmitterDeps) {
+  let lastMarketKey = "";
+
   return (isShadow: boolean) =>
     Effect.gen(function* () {
       const now = Date.now();
@@ -42,6 +44,15 @@ export function makeSnapshotEmitter(deps: SnapshotEmitterDeps) {
       yield* deps.emit({ _tag: "Risk", data: risk });
 
       const st = yield* Ref.get(deps.stateRef);
+
+      if (st.currentWindow) {
+        const key = `${st.currentWindow.conditionId}|${st.currentWindow.priceToBeat}`;
+        if (key !== lastMarketKey) {
+          lastMarketKey = key;
+          yield* deps.emit({ _tag: "Market", data: st.currentWindow });
+        }
+      }
+
       yield* deps.emit({
         _tag: "Metrics",
         data: { ...st.metrics, rolling: st.rollingDiagnostics, window: st.windowDiagnostics },

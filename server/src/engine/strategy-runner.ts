@@ -51,6 +51,8 @@ interface StrategyRunnerDeps {
   obs: (input: any) => Effect.Effect<void, never, never>;
 }
 
+const PTB_REQUIRED_STRATEGIES = new Set(["arb", "momentum", "whale-hunt"]);
+
 export function makeStrategyRunner(deps: StrategyRunnerDeps) {
   return (ctx: MarketContext, regime: RegimeState, isShadow: boolean, now: number) =>
     Effect.gen(function* () {
@@ -89,6 +91,34 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
           ?? 2;
         const entries = sCurrent.entriesThisWindow.get(strategy.name) ?? 0;
         if (entries >= maxEntries) continue;
+
+        if (PTB_REQUIRED_STRATEGIES.has(strategy.name) && ctx.priceToBeat === null) {
+          const reason = ctx.currentWindow?.priceToBeatReason ?? "price_to_beat_unavailable";
+          yield* Ref.update(deps.stateRef, (stUpd) => {
+            deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
+            return stUpd;
+          });
+          yield* deps.obs({
+            category: "signal",
+            source: "engine",
+            action: "signal_rejected_preflight",
+            entityType: "signal",
+            entityId: `${strategy.name}:${now}`,
+            status: "rejected",
+            strategy: strategy.name,
+            mode: isShadow ? "shadow" : "live",
+            payload: {
+              reason,
+              gate: "missing_price_to_beat",
+              priceToBeatStatus: ctx.currentWindow?.priceToBeatStatus ?? "pending",
+              priceToBeatSource: ctx.currentWindow?.priceToBeatSource ?? "unavailable",
+            },
+          });
+          yield* Effect.log(
+            `[Engine] ${strategy.name} skipped: priceToBeat unavailable (${reason})`,
+          );
+          continue;
+        }
 
         const signal = yield* strategy.evaluate(ctx);
         if (!signal) continue;

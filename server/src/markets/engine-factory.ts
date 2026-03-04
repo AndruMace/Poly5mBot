@@ -584,19 +584,11 @@ export function createStandaloneMarketEngine(
     const pollMarkets = makeMarketPoller({
       stateRef, strategies,
       fetchCurrentWindow: marketPoller.fetchCurrentWindow,
-      fetchCurrentAssetPrice: feedManager.getCurrentAssetPrice,
       isConnected: polyClient.isConnected,
       onNewWindow: (conditionId) => riskManager.onNewWindow(conditionId),
       emit, obs, refreshOrderBook,
       formatWindowTitle: marketPoller.formatWindowTitle,
     });
-
-    const didTradeWin = (trade: TradeRecord, st: import("../engine/state.js").EngineState, currentAssetPrice: number) => {
-      const assetPrice = trade.closingAssetPrice ?? st.windowEndPriceSnapshot ?? currentAssetPrice;
-      const ptb = trade.priceToBeatAtEntry;
-      if (ptb <= 0 || assetPrice <= 0) return false;
-      return trade.side === "UP" ? assetPrice >= ptb : assetPrice < ptb;
-    };
 
     const tick = Effect.gen(function* () {
       const st = yield* Ref.get(stateRef);
@@ -633,22 +625,24 @@ export function createStandaloneMarketEngine(
         (trade) => (trade.status === "filled" || trade.status === "partial") && now >= trade.windowEnd,
       );
       for (const trade of expired) {
-        if (closingAssetPrice <= 0) {
-          yield* Effect.logWarning(`[Engine:${marketId}] Skipping resolution of ${trade.id} — no valid settlement price`);
-          continue;
-        }
         const tradeShadow = trade.shadow === true;
         const tradeRecord = yield* getTradeRecordById(trade.id, tradeShadow);
         if (!tradeRecord) continue;
-        yield* expireTrade(trade.id, closingAssetPrice, tradeShadow);
         const settlement = yield* marketPoller.fetchSettlementByCondition(trade.conditionId).pipe(
           Effect.catchAll(() => Effect.succeed(null)),
         );
         const hasVenueWinner = settlement?.resolved === true && settlement.winnerSide !== null;
-        const won = hasVenueWinner
-          ? trade.side === settlement!.winnerSide
-          : didTradeWin({ ...tradeRecord, closingAssetPrice }, sNow, liveAssetPrice);
-        const outcomeSource: "venue" | "estimated" = hasVenueWinner ? "venue" : "estimated";
+        if (!hasVenueWinner) {
+          yield* Effect.log(
+            `[Engine:${marketId}] Settlement pending for ${trade.id} (${trade.conditionId}) — waiting for venue winner`,
+          );
+          continue;
+        }
+        if (closingAssetPrice > 0) {
+          yield* expireTrade(trade.id, closingAssetPrice, tradeShadow);
+        }
+        const won = trade.side === settlement!.winnerSide;
+        const outcomeSource: "venue" = "venue";
         yield* resolveTrade(trade.id, won, tradeShadow, { outcomeSource, settlementWinnerSide: settlement?.winnerSide ?? null });
         const resolved = (yield* getTradeRecordById(trade.id, tradeShadow)) ?? {
           ...tradeRecord, status: "resolved" as const,

@@ -472,13 +472,6 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       }
     });
 
-    const didTradeWin = (trade: TradeRecord, st: EngineState, currentAssetPrice: number) => {
-      const assetPrice = trade.closingAssetPrice ?? st.windowEndPriceSnapshot ?? currentAssetPrice;
-      const ptb = trade.priceToBeatAtEntry;
-      if (ptb <= 0 || assetPrice <= 0) return false;
-      return trade.side === "UP" ? assetPrice >= ptb : assetPrice < ptb;
-    };
-
     const refreshOrderBook = (window: MarketWindow) =>
       Effect.gen(function* () {
         if (!window.upTokenId || !window.downTokenId) return;
@@ -518,7 +511,6 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       stateRef,
       strategies,
       fetchCurrentWindow: marketService.fetchCurrentBtc5mWindow,
-      fetchCurrentAssetPrice: feedService.getCurrentAssetPrice,
       isConnected: polyClient.isConnected,
       onNewWindow: (conditionId) => riskManager.onNewWindow(conditionId),
       emit,
@@ -572,26 +564,24 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           now >= trade.windowEnd,
       );
       for (const trade of expired) {
-        if (closingAssetPrice <= 0) {
-          yield* Effect.logWarning(`[Engine] Skipping resolution of ${trade.id} — no valid settlement price`);
-          continue;
-        }
         const tradeShadow = trade.shadow === true;
         const tradeRecord = yield* tracker.getTradeRecordById(trade.id, tradeShadow);
         if (!tradeRecord) continue;
-        yield* tracker.expireTrade(trade.id, closingAssetPrice, tradeShadow);
         const settlement = yield* marketService.fetchSettlementByCondition(trade.conditionId).pipe(
           Effect.catchAll(() => Effect.succeed(null)),
         );
         const hasVenueWinner = settlement?.resolved === true && settlement.winnerSide !== null;
-        const won = hasVenueWinner
-          ? trade.side === settlement!.winnerSide
-          : didTradeWin(
-            { ...tradeRecord, closingAssetPrice },
-            sNow,
-            liveAssetPrice,
+        if (!hasVenueWinner) {
+          yield* Effect.log(
+            `[Engine] Settlement pending for ${trade.id} (${trade.conditionId}) — waiting for venue winner`,
           );
-        const outcomeSource: "venue" | "estimated" = hasVenueWinner ? "venue" : "estimated";
+          continue;
+        }
+        if (closingAssetPrice > 0) {
+          yield* tracker.expireTrade(trade.id, closingAssetPrice, tradeShadow);
+        }
+        const won = trade.side === settlement!.winnerSide;
+        const outcomeSource: "venue" = "venue";
         yield* tracker.resolveTrade(trade.id, won, tradeShadow, {
           outcomeSource,
           settlementWinnerSide: settlement?.winnerSide ?? null,

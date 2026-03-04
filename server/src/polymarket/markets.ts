@@ -1,6 +1,7 @@
 import { Effect, Ref } from "effect";
-import type { MarketWindow, Side } from "../types.js";
+import type { MarketWindow, PriceToBeatSource, PriceToBeatStatus, Side } from "../types.js";
 import { PolymarketError } from "../errors.js";
+import { fetchPriceToBeatFromPolymarketPage } from "./price-to-beat.js";
 
 const FIVE_MIN_S = 300;
 const FIVE_MIN_MS = FIVE_MIN_S * 1000;
@@ -73,6 +74,9 @@ function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
   const endTime = new Date(m.endDate).getTime();
   const startTime = endTime - FIVE_MIN_MS;
   const priceToBeat = extractPriceToBeat(evt.title, m.description);
+  const hasMetadataPtb = priceToBeat !== null;
+  const priceToBeatStatus: PriceToBeatStatus = hasMetadataPtb ? "exact" : "pending";
+  const priceToBeatSource: PriceToBeatSource = hasMetadataPtb ? "gamma_metadata" : "unavailable";
 
   return {
     conditionId: m.conditionId,
@@ -84,8 +88,55 @@ function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
     startTime,
     endTime,
     priceToBeat,
+    priceToBeatStatus,
+    priceToBeatSource,
+    priceToBeatObservedAt: hasMetadataPtb ? Date.now() : undefined,
+    priceToBeatReason: hasMetadataPtb ? undefined : "missing_in_gamma_metadata",
     resolved: m.closed,
   };
+}
+
+async function resolveWindowPriceToBeat(
+  window: MarketWindow,
+  cache: Map<string, MarketWindow>,
+): Promise<MarketWindow> {
+  if (window.priceToBeat !== null) return window;
+
+  const cached = cache.get(window.conditionId);
+  if (cached && cached.priceToBeat !== null) {
+    return {
+      ...window,
+      priceToBeat: cached.priceToBeat,
+      priceToBeatStatus: "exact",
+      priceToBeatSource: cached.priceToBeatSource ?? "polymarket_page_json",
+      priceToBeatObservedAt: cached.priceToBeatObservedAt,
+      priceToBeatReason: cached.priceToBeatReason,
+    };
+  }
+
+  const lookup = await fetchPriceToBeatFromPolymarketPage(window.slug, window.startTime);
+  if (lookup.priceToBeat !== null) {
+    const resolved: MarketWindow = {
+      ...window,
+      priceToBeat: lookup.priceToBeat,
+      priceToBeatStatus: "exact",
+      priceToBeatSource: lookup.source,
+      priceToBeatObservedAt: lookup.observedAt,
+      priceToBeatReason: undefined,
+    };
+    cache.set(window.conditionId, resolved);
+    return resolved;
+  }
+
+  const unresolved: MarketWindow = {
+    ...window,
+    priceToBeatStatus: "unavailable",
+    priceToBeatSource: "unavailable",
+    priceToBeatObservedAt: lookup.observedAt,
+    priceToBeatReason: lookup.reason ?? "unresolved",
+  };
+  cache.set(window.conditionId, unresolved);
+  return unresolved;
 }
 
 function parseArrayField<T = string>(value: unknown): T[] {
@@ -177,13 +228,46 @@ export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string
       window: null,
       lastFetch: 0,
     });
+    const ptbCache = new Map<string, MarketWindow>();
 
     const fetchCurrentWindow = Effect.gen(function* () {
       const now = Date.now();
       const cache = yield* Ref.get(cacheRef);
 
       if (cache.window && now - cache.lastFetch < CACHE_TTL && cache.window.endTime > now) {
-        return cache.window;
+        if (cache.window.priceToBeat !== null) return cache.window;
+
+        // PTB still unresolved — check ptbCache for a success that arrived since last poll
+        const ptbHit = ptbCache.get(cache.window.conditionId);
+        if (ptbHit && ptbHit.priceToBeat !== null) {
+          const merged: MarketWindow = {
+            ...cache.window,
+            priceToBeat: ptbHit.priceToBeat,
+            priceToBeatStatus: "exact",
+            priceToBeatSource: ptbHit.priceToBeatSource ?? "polymarket_page_json",
+            priceToBeatObservedAt: ptbHit.priceToBeatObservedAt,
+            priceToBeatReason: undefined,
+          };
+          yield* Ref.set(cacheRef, { window: merged, lastFetch: cache.lastFetch });
+          return merged;
+        }
+
+        // Rate-limit retries to avoid hammering polymarket.com
+        const lastAttempt = ptbHit?.priceToBeatObservedAt ?? 0;
+        if (lastAttempt && now - lastAttempt < PTB_RETRY_COOLDOWN_MS) {
+          return cache.window;
+        }
+
+        // Attempt PTB resolution without re-fetching Gamma
+        const resolved = yield* Effect.tryPromise({
+          try: () => resolveWindowPriceToBeat(cache.window!, ptbCache),
+          catch: () => null,
+        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+        if (resolved && resolved.priceToBeat !== null) {
+          yield* Ref.set(cacheRef, { window: resolved, lastFetch: cache.lastFetch });
+          return resolved;
+        }
+        return resolved ?? cache.window;
       }
 
       const nowSec = Math.floor(now / 1000);
@@ -204,7 +288,9 @@ export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string
             const evt = events[0]!;
             if (evt.closed || !evt.markets || evt.markets.length === 0) return null;
             const mkt = evt.markets[0]!;
-            return { market: parseGammaMarket(mkt, evt), slug, title: evt.title };
+            const parsed = parseGammaMarket(mkt, evt);
+            const market = await resolveWindowPriceToBeat(parsed, ptbCache);
+            return { market, slug, title: evt.title };
           },
           catch: (err) => new PolymarketError({ message: `Error fetching ${slug}: ${err}`, cause: err }),
         }).pipe(Effect.catchAll(() => Effect.succeed(null)));
@@ -272,6 +358,7 @@ function fetchSettlementByConditionImpl(conditionId: string) {
 }
 
 const CACHE_TTL = 8_000;
+const PTB_RETRY_COOLDOWN_MS = 30_000;
 
 export class MarketService extends Effect.Service<MarketService>()("MarketService", {
   effect: Effect.gen(function* () {
@@ -279,13 +366,46 @@ export class MarketService extends Effect.Service<MarketService>()("MarketServic
       window: null,
       lastFetch: 0,
     });
+    const ptbCache = new Map<string, MarketWindow>();
 
     const fetchCurrentBtc5mWindow = Effect.gen(function* () {
       const now = Date.now();
       const cache = yield* Ref.get(cacheRef);
 
       if (cache.window && now - cache.lastFetch < CACHE_TTL && cache.window.endTime > now) {
-        return cache.window;
+        if (cache.window.priceToBeat !== null) return cache.window;
+
+        // PTB still unresolved — check ptbCache for a success that arrived since last poll
+        const ptbHit = ptbCache.get(cache.window.conditionId);
+        if (ptbHit && ptbHit.priceToBeat !== null) {
+          const merged: MarketWindow = {
+            ...cache.window,
+            priceToBeat: ptbHit.priceToBeat,
+            priceToBeatStatus: "exact",
+            priceToBeatSource: ptbHit.priceToBeatSource ?? "polymarket_page_json",
+            priceToBeatObservedAt: ptbHit.priceToBeatObservedAt,
+            priceToBeatReason: undefined,
+          };
+          yield* Ref.set(cacheRef, { window: merged, lastFetch: cache.lastFetch });
+          return merged;
+        }
+
+        // Rate-limit retries to avoid hammering polymarket.com
+        const lastAttempt = ptbHit?.priceToBeatObservedAt ?? 0;
+        if (lastAttempt && now - lastAttempt < PTB_RETRY_COOLDOWN_MS) {
+          return cache.window;
+        }
+
+        // Attempt PTB resolution without re-fetching Gamma
+        const resolved = yield* Effect.tryPromise({
+          try: () => resolveWindowPriceToBeat(cache.window!, ptbCache),
+          catch: () => null,
+        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+        if (resolved && resolved.priceToBeat !== null) {
+          yield* Ref.set(cacheRef, { window: resolved, lastFetch: cache.lastFetch });
+          return resolved;
+        }
+        return resolved ?? cache.window;
       }
 
       const nowSec = Math.floor(now / 1000);
@@ -306,7 +426,9 @@ export class MarketService extends Effect.Service<MarketService>()("MarketServic
             const evt = events[0]!;
             if (evt.closed || !evt.markets || evt.markets.length === 0) return null;
             const mkt = evt.markets[0]!;
-            return { market: parseGammaMarket(mkt, evt), slug, title: evt.title };
+            const parsed = parseGammaMarket(mkt, evt);
+            const market = await resolveWindowPriceToBeat(parsed, ptbCache);
+            return { market, slug, title: evt.title };
           },
           catch: (err) => new PolymarketError({ message: `Error fetching ${slug}: ${err}`, cause: err }),
         }).pipe(Effect.catchAll(() => Effect.succeed(null)));

@@ -7,6 +7,12 @@ export type TradingMode = "live" | "shadow";
 export type TradeStatus = "pending" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "resolved";
 export type TradeOutcome = "win" | "loss";
 export type ResolutionSource = "venue" | "estimated";
+export type PriceToBeatSource =
+  | "gamma_metadata"
+  | "polymarket_page_json"
+  | "polymarket_page_dom"
+  | "unavailable";
+export type PriceToBeatStatus = "exact" | "pending" | "unavailable";
 export type TradeEventType =
   | "signal_generated"
   | "order_submitted"
@@ -39,6 +45,10 @@ export interface MarketWindow {
   startTime: number;
   endTime: number;
   priceToBeat: number | null;
+  priceToBeatStatus?: PriceToBeatStatus;
+  priceToBeatSource?: PriceToBeatSource;
+  priceToBeatObservedAt?: number;
+  priceToBeatReason?: string;
   resolved: boolean;
 }
 
