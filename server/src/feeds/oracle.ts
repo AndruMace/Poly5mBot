@@ -3,6 +3,15 @@ import type { PricePoint } from "../types.js";
 const STALE_MS = 10_000;
 const OUTLIER_PCT = 0.0015;
 
+const EXCHANGE_WEIGHTS: Record<string, number> = {
+  binance:  4.0,
+  bybit:    2.0,
+  coinbase: 2.0,
+  okx:      1.0,
+  kraken:   1.0,
+  bitstamp: 0.5,
+};
+
 function extractPrice(p: PricePoint): number {
   const bid = Number(p.bid);
   const ask = Number(p.ask);
@@ -10,6 +19,16 @@ function extractPrice(p: PricePoint): number {
     return (bid + ask) / 2;
   }
   return Number(p.price);
+}
+
+function weightedMean(pts: { exchange: string; price: number }[]): number {
+  let wSum = 0, wTotal = 0;
+  for (const { exchange, price } of pts) {
+    const w = EXCHANGE_WEIGHTS[exchange] ?? 1.0;
+    wSum += price * w;
+    wTotal += w;
+  }
+  return wSum / wTotal;
 }
 
 function median(sorted: number[]): number {
@@ -23,35 +42,27 @@ export function computeOracleEstimate(
   prices: Map<string, PricePoint>,
 ): { price: number; sourceCount: number } {
   const now = Date.now();
-  const recent: number[] = [];
+  const recent: { exchange: string; price: number }[] = [];
 
   for (const p of prices.values()) {
     if (now - p.timestamp < STALE_MS && p.price > 0) {
-      recent.push(extractPrice(p));
+      recent.push({ exchange: p.exchange, price: extractPrice(p) });
     }
   }
 
   if (recent.length === 0) return { price: 0, sourceCount: 0 };
 
-  recent.sort((a, b) => a - b);
-  const prelimMedian = median(recent);
+  recent.sort((a, b) => a.price - b.price);
+  const prices_ = recent.map((r) => r.price);
+  const prelimMedian = median(prices_);
 
-  const filtered = recent.filter((p) => {
-    const deviation = Math.abs(p - prelimMedian) / prelimMedian;
+  const filtered = recent.filter(({ price }) => {
+    const deviation = Math.abs(price - prelimMedian) / prelimMedian;
     return deviation < OUTLIER_PCT;
   });
 
   const vals = filtered.length >= 3 ? filtered : recent;
-
-  let result: number;
-  if (vals.length >= 5) {
-    const trimmed = vals.slice(1, -1);
-    result = trimmed.reduce((s, v) => s + v, 0) / trimmed.length;
-  } else if (vals.length >= 3) {
-    result = median(vals);
-  } else {
-    result = vals.length === 2 ? (vals[0]! + vals[1]!) / 2 : vals[0]!;
-  }
+  const result = weightedMean(vals);
 
   return { price: Math.round(result * 100) / 100, sourceCount: vals.length };
 }

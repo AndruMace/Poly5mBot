@@ -4,10 +4,10 @@ import { makeStrategyBase, makeInitialState, type Strategy, type StrategyInterna
 import type { MarketContext, Signal, PricePoint } from "../types.js";
 
 const DEFAULT_CONFIG: Record<string, number> = {
-  rsiPeriod: 7,
+  rsiPeriod: 14,
   rsiOverbought: 62,
   rsiOversold: 38,
-  minWindowElapsedSec: 60,
+  minWindowElapsedSec: 180,
   maxWindowElapsedSec: 270,
   minPriceMovePct: 0.03,
   maxSharePrice: 0.65,
@@ -19,7 +19,7 @@ const DEFAULT_CONFIG: Record<string, number> = {
 
 const DEFAULT_REGIME_FILTER = {
   allowedVolatility: ["low" as const, "normal" as const, "high" as const],
-  allowedTrend: ["chop" as const, "up" as const, "down" as const],
+  allowedTrend: ["strong_up" as const, "up" as const, "down" as const, "strong_down" as const],
 };
 
 export const makeMomentumStrategy = Effect.gen(function* () {
@@ -45,7 +45,7 @@ export const makeMomentumStrategy = Effect.gen(function* () {
       yield* Ref.update(ref, (st) => ({ ...st, status: "watching" as const }));
 
       const buffer = yield* Ref.get(priceBufferRef);
-      const candles = buildCandles(buffer, 60_000);
+      const candles = buildCandles(buffer, 30_000);
       if (candles.length < s.config["rsiPeriod"]! + 1) return null;
 
       const rsi = computeRSI(candles, s.config["rsiPeriod"]!);

@@ -10,6 +10,7 @@ import { PositionSizer } from "../engine/position-sizer.js";
 import { GlobalRiskManager } from "../engine/global-risk.js";
 import { CriticalIncidentStore } from "../incident/store.js";
 import { ObservabilityStore } from "../observability/store.js";
+import { PostgresStorage } from "../storage/postgres.js";
 import { getMarketConfig } from "./definitions.js";
 import type { MarketEngineInstance } from "./market-engine.js";
 import type { MarketFeedInstance } from "../feeds/market-feed-manager.js";
@@ -81,6 +82,8 @@ export class MarketOrchestrator extends Effect.Service<MarketOrchestrator>()("Ma
     const incidentStore = yield* CriticalIncidentStore;
     const observabilityOpt = yield* Effect.serviceOption(ObservabilityStore);
     const observability = Option.getOrUndefined(observabilityOpt);
+    const postgresOpt = yield* Effect.serviceOption(PostgresStorage);
+    const postgres = Option.getOrUndefined(postgresOpt);
 
     const engines = new Map<string, MarketEngineInstance>();
     const enabledIds = config.markets.enabledIds;
@@ -115,6 +118,7 @@ export class MarketOrchestrator extends Effect.Service<MarketOrchestrator>()("Ma
         positionSizer,
         incidentStore,
         observability,
+        postgres,
       }).pipe(
         Effect.catchAll((err) => {
           return Effect.logError(`[Orchestrator] Failed to start '${marketId}' engine: ${err}`).pipe(

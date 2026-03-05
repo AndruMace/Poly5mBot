@@ -32,6 +32,11 @@ import { makeArbStrategy } from "../strategies/arb.js";
 import { makeEfficiencyStrategy } from "../strategies/efficiency.js";
 import { makeWhaleHuntStrategy } from "../strategies/whale-hunt.js";
 import { makeMomentumStrategy } from "../strategies/momentum.js";
+import { makeOrderFlowImbalanceStrategy } from "../strategies/orderflow-imbalance.js";
+import {
+  mergeWhaleHuntConfig,
+  toWhaleHuntStrategyConfig,
+} from "../strategies/whale-hunt-config.js";
 import type { Strategy } from "../strategies/base.js";
 import { calculateFeeStatic } from "../polymarket/orders.js";
 import type {
@@ -51,6 +56,7 @@ const STRATEGY_COOLDOWN_MS: Record<string, number> = {
   efficiency: 5000,
   "whale-hunt": 6000,
   momentum: 4000,
+  "orderflow-imbalance": 4500,
 };
 
 const MAX_ENTRIES_PER_WINDOW: Record<string, number> = {
@@ -58,6 +64,7 @@ const MAX_ENTRIES_PER_WINDOW: Record<string, number> = {
   efficiency: 1,
   "whale-hunt": 1,
   momentum: 2,
+  "orderflow-imbalance": 1,
 };
 
 const PER_SIDE_STRATEGIES = new Set(["momentum"]);
@@ -67,6 +74,7 @@ const MIN_FILL_RATIO_BY_STRATEGY: Record<string, number> = {
   efficiency: 0.6,
   "whale-hunt": 0.5,
   momentum: 0.5,
+  "orderflow-imbalance": 0.5,
 };
 
 const SHADOW_SIM_OPTS_BY_STRATEGY: Record<string, { slippageBps: number; fillProbability: number; minLiquidityPct: number }> = {
@@ -74,6 +82,7 @@ const SHADOW_SIM_OPTS_BY_STRATEGY: Record<string, { slippageBps: number; fillPro
   efficiency: { slippageBps: 3, fillProbability: 0.82, minLiquidityPct: 0.1 },
   "whale-hunt": { slippageBps: 6, fillProbability: 0.75, minLiquidityPct: 0.08 },
   momentum: { slippageBps: 7, fillProbability: 0.86, minLiquidityPct: 0.05 },
+  "orderflow-imbalance": { slippageBps: 5, fillProbability: 0.82, minLiquidityPct: 0.08 },
 };
 
 const STRATEGY_FACTORIES: Record<string, Effect.Effect<Strategy>> = {
@@ -81,6 +90,7 @@ const STRATEGY_FACTORIES: Record<string, Effect.Effect<Strategy>> = {
   efficiency: makeEfficiencyStrategy,
   "whale-hunt": makeWhaleHuntStrategy,
   momentum: makeMomentumStrategy,
+  "orderflow-imbalance": makeOrderFlowImbalanceStrategy,
 };
 
 // ── Cursor helpers (mirrors tracker.ts) ──────────────────────────────────────
@@ -139,6 +149,10 @@ export interface StandaloneEngineSharedDeps {
   observability?: {
     append: (input: ObservabilityEventInput) => Effect.Effect<void, any, never>;
   };
+  postgres?: {
+    query: <T extends Record<string, unknown> = Record<string, unknown>>(text: string, values?: unknown[]) => Effect.Effect<T[], any, never>;
+    execute: (text: string, values?: unknown[]) => Effect.Effect<void, any, never>;
+  };
 }
 
 // ── Main factory ──────────────────────────────────────────────────────────────
@@ -150,12 +164,13 @@ export function createStandaloneMarketEngine(
   // TypeScript can struggle to infer the combined R type from a complex Effect.gen body,
   // so we double-cast to assert the correct requirement set.
   return Effect.gen(function* () {
-    const { config, orderService, polyClient, eventBus, fillSimulator, positionSizer, incidentStore, observability } = shared;
+    const { config, orderService, polyClient, eventBus, fillSimulator, positionSizer, incidentStore, observability, postgres } = shared;
     const marketId = marketConfig.id;
     const DATA_DIR = "data";
     const STRATEGY_STATE_FILE = `data/${marketId}-strategy-state.json`;
     const fs = yield* FileSystem.FileSystem;
     const useFileStorage = config.storage.backend === "file" || config.storage.backend === "dual";
+    const usePostgresStorage = !!postgres && (config.storage.backend === "postgres" || config.storage.backend === "dual");
 
     yield* Effect.log(`[Engine:${marketId}] Initializing standalone engine`);
 
@@ -246,7 +261,7 @@ export function createStandaloneMarketEngine(
     const getTradeRecordById = (id: string, shadow = false) =>
       Effect.gen(function* () {
         const trade = yield* getStoreFor(shadow).getTrade(id);
-        return trade ? toTradeRecord(trade) : undefined;
+        return trade ? { ...toTradeRecord(trade), marketId } : undefined;
       });
 
     const listTrades = (query: TradeListQuery = {}): Effect.Effect<TradeListResult> =>
@@ -286,6 +301,10 @@ export function createStandaloneMarketEngine(
       }
     }
     const strategyMap = new Map(strategies.map((s) => [s.name, s]));
+    const whaleHuntConfig = mergeWhaleHuntConfig(
+      config.trading.whaleHunt,
+      marketConfig.whaleHuntOverrides,
+    );
 
     // ── Per-market regime detector ──────────────────────────────────────────
 
@@ -310,15 +329,44 @@ export function createStandaloneMarketEngine(
     // ── Strategy state persistence ──────────────────────────────────────────
 
     const readPersistedStrategyState: Effect.Effect<PersistedStrategyState> = Effect.gen(function* () {
-      if (!useFileStorage) return {};
-      const exists = yield* fs.exists(STRATEGY_STATE_FILE);
-      if (!exists) return {};
-      const raw = yield* fs.readFileString(STRATEGY_STATE_FILE);
-      return yield* Effect.try({
-        try: () => JSON.parse(raw) as PersistedStrategyState,
-        catch: () => ({} as PersistedStrategyState),
-      });
-    }).pipe(Effect.catchAll(() => Effect.succeed({} as PersistedStrategyState)));
+      const fromDb: PersistedStrategyState = {};
+      if (usePostgresStorage) {
+        const rows = yield* postgres!.query<{ strategy_name: string; payload: unknown }>(
+          "select strategy_name, payload from strategy_state where market_id = $1",
+          [marketId],
+        ).pipe(Effect.catchAll(() => Effect.succeed([])));
+        for (const row of rows) {
+          if (typeof row.strategy_name === "string" && row.strategy_name.length > 0) {
+            fromDb[row.strategy_name] =
+              row.payload && typeof row.payload === "object" ? (row.payload as PersistedStrategyStateEntry) : {};
+          }
+        }
+      }
+      const fromFile: PersistedStrategyState = {};
+      if (useFileStorage) {
+        const exists = yield* fs.exists(STRATEGY_STATE_FILE);
+        if (exists) {
+          const raw = yield* fs.readFileString(STRATEGY_STATE_FILE);
+          const parsed = yield* Effect.try({
+            try: () => JSON.parse(raw),
+            catch: (err) => new Error(String(err)),
+          });
+          if (parsed && typeof parsed === "object") {
+            Object.assign(fromFile, parsed as PersistedStrategyState);
+          }
+        }
+      }
+      return {
+        ...fromFile,
+        ...fromDb,
+      } as PersistedStrategyState;
+    }).pipe(
+      Effect.catchAll((err) =>
+        Effect.logError(`[Engine:${marketId}] Failed to load strategy state from ${STRATEGY_STATE_FILE}: ${String(err)}`).pipe(
+          Effect.as({} as PersistedStrategyState),
+        ),
+      ),
+    );
 
     const persistStrategyStates: Effect.Effect<void> = Effect.gen(function* () {
       const entries = yield* Effect.forEach(strategies, (strategy) =>
@@ -330,6 +378,19 @@ export function createStandaloneMarketEngine(
       if (useFileStorage) {
         yield* fs.makeDirectory(DATA_DIR, { recursive: true }).pipe(Effect.catchAll(() => Effect.void));
         yield* fs.writeFileString(STRATEGY_STATE_FILE, JSON.stringify(payload, null, 2)).pipe(Effect.catchAll(() => Effect.void));
+      }
+      if (usePostgresStorage) {
+        yield* Effect.forEach(
+          Object.entries(payload),
+          ([name, entry]) =>
+            postgres!.execute(
+              `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
+               values ($1, $2, $3::jsonb, $4)
+               on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+              [marketId, name, JSON.stringify(entry ?? {}), Date.now()],
+            ).pipe(Effect.catchAll(() => Effect.void)),
+          { discard: true },
+        );
       }
     });
 
@@ -351,8 +412,20 @@ export function createStandaloneMarketEngine(
         }),
       ).pipe(Effect.asVoid);
 
+    const applyWhaleHuntRuntimeConfig = Effect.gen(function* () {
+      const strategy = strategyMap.get("whale-hunt");
+      if (!strategy) return;
+      const result = yield* strategy.updateConfig(toWhaleHuntStrategyConfig(whaleHuntConfig));
+      if (!result.ok) {
+        yield* Effect.logWarning(
+          `[Engine:${marketId}] Failed to apply whale-hunt runtime config: ${result.error ?? "invalid values"}`,
+        );
+      }
+    });
+
     const persistedStrategyState = yield* readPersistedStrategyState;
     yield* applyPersistedStrategyState(persistedStrategyState);
+    yield* applyWhaleHuntRuntimeConfig;
     yield* persistStrategyStates;
 
     // ── Helper functions ────────────────────────────────────────────────────
@@ -543,6 +616,8 @@ export function createStandaloneMarketEngine(
 
     // ── Tick wiring ─────────────────────────────────────────────────────────
 
+    const settlementPendingLastLog = new Map<string, number>();
+
     const emitTick = makeSnapshotEmitter({
       stateRef, strategies, emit, recomputeReconciliation,
       getLiveSummary: liveStore.getSummary,
@@ -563,6 +638,8 @@ export function createStandaloneMarketEngine(
       bumpDiag,
       recordSignalLatency,
       haltTradingWithIncident,
+      whaleHuntConfig,
+      logPrefix: `[Engine:${marketId}]`,
     });
 
     const runStrategies = makeStrategyRunner({
@@ -579,6 +656,8 @@ export function createStandaloneMarketEngine(
       adjustMomentumMaxPrice: (signal, regime, ctx, cfg) => adjustMomentumMaxPrice(signal, regime, ctx, cfg),
       bumpDiag,
       obs,
+      whaleHuntConfig,
+      logPrefix: `[Engine:${marketId}]`,
     });
 
     const pollMarkets = makeMarketPoller({
@@ -588,6 +667,7 @@ export function createStandaloneMarketEngine(
       onNewWindow: (conditionId) => riskManager.onNewWindow(conditionId),
       emit, obs, refreshOrderBook,
       formatWindowTitle: marketPoller.formatWindowTitle,
+      logPrefix: `[Engine:${marketId}]`,
     });
 
     const tick = Effect.gen(function* () {
@@ -633,11 +713,17 @@ export function createStandaloneMarketEngine(
         );
         const hasVenueWinner = settlement?.resolved === true && settlement.winnerSide !== null;
         if (!hasVenueWinner) {
-          yield* Effect.log(
-            `[Engine:${marketId}] Settlement pending for ${trade.id} (${trade.conditionId}) — waiting for venue winner`,
-          );
+          const lastLog = settlementPendingLastLog.get(trade.id) ?? 0;
+          const pendingMs = now - trade.windowEnd;
+          const logInterval = pendingMs > 5 * 60_000 ? 60_000 : pendingMs > 60_000 ? 30_000 : 0;
+          if (now - lastLog >= logInterval) {
+            settlementPendingLastLog.set(trade.id, now);
+            const msg = `[Engine:${marketId}] Settlement pending for ${trade.id} (${trade.conditionId}) — waiting for venue winner`;
+            yield* pendingMs > 5 * 60_000 ? Effect.logWarning(msg) : Effect.log(msg);
+          }
           continue;
         }
+        settlementPendingLastLog.delete(trade.id);
         if (closingAssetPrice > 0) {
           yield* expireTrade(trade.id, closingAssetPrice, tradeShadow);
         }

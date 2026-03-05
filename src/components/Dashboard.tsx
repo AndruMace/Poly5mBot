@@ -1,4 +1,4 @@
-import { PriceChart } from "./PriceChart.js";
+import { SpreadPanel } from "./SpreadPanel.js";
 import { OrderBook } from "./OrderBook.js";
 import { LiveMarket } from "./LiveMarket.js";
 import { PnLCard } from "./PnLCard.js";
@@ -15,7 +15,7 @@ export function Dashboard() {
         <LiveMarket />
       </div>
       <div className="col-span-12">
-        <PriceChart />
+        <SpreadPanel />
       </div>
       <div className="col-span-12">
         <RecentTrades />

@@ -21,6 +21,8 @@ const STRATEGY_DESCRIPTIONS: Record<string, string> = {
     "In the final seconds of a window, buys the near-certain winning side at 94-97\u00A2 for a small but consistent yield.",
   momentum:
     "Uses RSI to confirm strong directional momentum mid-window and bets that the trend will persist through market close.",
+  "orderflow-imbalance":
+    "Reads micro-structure pressure in Polymarket books and enters when one side shows sustained local bid-vs-ask dominance near the spread.",
 };
 
 const CONFIG_LABELS: Record<string, string> = {
@@ -48,6 +50,16 @@ const CONFIG_LABELS: Record<string, string> = {
   minWindowElapsedSec: "Min Window Elapsed (s)",
   maxWindowElapsedSec: "Max Window Elapsed (s)",
   maxEntriesPerWindow: "Max Entries / Window",
+  orderBookBandPct: "Book Band %",
+  minImbalanceRatio: "Min Imbalance Ratio",
+  maxImbalanceRatioForConfidence: "Max Ratio for Conf",
+  maxSpreadPct: "Max Spread %",
+  minWindowRemainingSec: "Min Remaining (s)",
+  minPtbDistancePct: "Min PTB Distance %",
+  lookbackSec: "Lookback (s)",
+  minRatioDelta10s: "Min Ratio Delta",
+  maxRatioDelta10sForConfidence: "Max Delta for Conf",
+  minBookNotional: "Min Book Notional ($)",
 };
 
 const CONFIG_HELP: Record<string, { description: string }> = {
@@ -139,6 +151,46 @@ const CONFIG_HELP: Record<string, { description: string }> = {
     description:
       "Maximum successful entries this strategy can place in a single 5-minute window.",
   },
+  orderBookBandPct: {
+    description:
+      "Price-distance band around mid-price used to measure local pressure. Only levels inside this +/- band are counted, so lower values focus on immediate liquidity near the spread.",
+  },
+  minImbalanceRatio: {
+    description:
+      "Minimum bid-notional / ask-notional ratio required to trigger a side. For example 3.5 means near-touch bids must be at least 3.5x asks to qualify.",
+  },
+  maxImbalanceRatioForConfidence: {
+    description:
+      "Upper anchor used for confidence scaling. Ratios at or above this value are treated as full-strength pressure in the ratio portion of confidence.",
+  },
+  maxSpreadPct: {
+    description:
+      "Maximum allowed spread as a fraction of side mid-price. This prevents entries when pressure looks strong but execution cost is too wide.",
+  },
+  minWindowRemainingSec: {
+    description:
+      "Earliest cutoff before expiry. Strategy only enters when remaining time is above this to avoid late fills and adverse timing risk.",
+  },
+  minPtbDistancePct: {
+    description:
+      "Minimum absolute BTC distance from price-to-beat (in %) required before entries are allowed. This blocks near-PTB random-chop trades where win probability is close to 50/50.",
+  },
+  lookbackSec: {
+    description:
+      "Rolling history horizon for pressure snapshots. Used to compare current ratio versus earlier ratio and estimate whether pressure is strengthening.",
+  },
+  minRatioDelta10s: {
+    description:
+      "Minimum required increase in ratio over the lookback window. Set above 0 to require acceleration (not just static one-sided books).",
+  },
+  maxRatioDelta10sForConfidence: {
+    description:
+      "Upper anchor for velocity confidence. Ratio-delta at or above this value contributes full strength to the velocity part of confidence.",
+  },
+  minBookNotional: {
+    description:
+      "Minimum combined near-touch bid+ask notional required in-band before signals are allowed, filtering out noisy low-liquidity books.",
+  },
 };
 
 const REGIME_DIMENSIONS: Array<{
@@ -188,7 +240,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       persistenceMs: 4000,
       persistenceCount: 5,
       minConfirmingExchanges: 2,
-      minWindowElapsedSec: 90,
+      minWindowElapsedSec: 180,
       maxWindowElapsedSec: 240,
       maxOracleAgeSec: 2,
       confidenceMultiplier: 1.6,
@@ -201,7 +253,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       persistenceMs: 3000,
       persistenceCount: 4,
       minConfirmingExchanges: 1,
-      minWindowElapsedSec: 60,
+      minWindowElapsedSec: 180,
       maxWindowElapsedSec: 270,
       maxOracleAgeSec: 2,
       confidenceMultiplier: 1.2,
@@ -214,7 +266,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       persistenceMs: 2000,
       persistenceCount: 3,
       minConfirmingExchanges: 0,
-      minWindowElapsedSec: 45,
+      minWindowElapsedSec: 180,
       maxWindowElapsedSec: 285,
       maxOracleAgeSec: 3,
       confidenceMultiplier: 1.0,
@@ -224,12 +276,13 @@ const DEFAULT_CONFIG_PRESETS: Record<
     },
   },
   efficiency: {
-    high: { minProfitBps: 20, tradeSize: 20, maxEntriesPerWindow: 1 },
-    medium: { minProfitBps: 8, tradeSize: 20, maxEntriesPerWindow: 2 },
-    low: { minProfitBps: 3, tradeSize: 20, maxEntriesPerWindow: 3 },
+    high: { minWindowElapsedSec: 180, minProfitBps: 20, tradeSize: 20, maxEntriesPerWindow: 1 },
+    medium: { minWindowElapsedSec: 180, minProfitBps: 8, tradeSize: 20, maxEntriesPerWindow: 2 },
+    low: { minWindowElapsedSec: 180, minProfitBps: 3, tradeSize: 20, maxEntriesPerWindow: 3 },
   },
   "whale-hunt": {
     high: {
+      minWindowElapsedSec: 180,
       entryWindowSec: 45,
       maxDynamicEntryWindowSec: 90,
       minPriceMovePct: 0.08,
@@ -244,6 +297,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       maxEntriesPerWindow: 1,
     },
     medium: {
+      minWindowElapsedSec: 180,
       entryWindowSec: 60,
       maxDynamicEntryWindowSec: 120,
       minPriceMovePct: 0.03,
@@ -258,6 +312,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       maxEntriesPerWindow: 2,
     },
     low: {
+      minWindowElapsedSec: 180,
       entryWindowSec: 60,
       maxDynamicEntryWindowSec: 120,
       minPriceMovePct: 0.015,
@@ -277,7 +332,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       rsiPeriod: 7,
       rsiOverbought: 70,
       rsiOversold: 30,
-      minWindowElapsedSec: 90,
+      minWindowElapsedSec: 180,
       maxWindowElapsedSec: 240,
       minPriceMovePct: 0.06,
       maxSharePrice: 0.55,
@@ -288,7 +343,7 @@ const DEFAULT_CONFIG_PRESETS: Record<
       rsiPeriod: 7,
       rsiOverbought: 62,
       rsiOversold: 38,
-      minWindowElapsedSec: 60,
+      minWindowElapsedSec: 180,
       maxWindowElapsedSec: 270,
       minPriceMovePct: 0.03,
       maxSharePrice: 0.65,
@@ -299,12 +354,62 @@ const DEFAULT_CONFIG_PRESETS: Record<
       rsiPeriod: 7,
       rsiOverbought: 58,
       rsiOversold: 42,
-      minWindowElapsedSec: 45,
+      minWindowElapsedSec: 180,
       maxWindowElapsedSec: 285,
       minPriceMovePct: 0.02,
       maxSharePrice: 0.72,
       tradeSize: 8,
       maxEntriesPerWindow: 3,
+    },
+  },
+  "orderflow-imbalance": {
+    high: {
+      orderBookBandPct: 0.04,
+      minImbalanceRatio: 4.5,
+      maxImbalanceRatioForConfidence: 10,
+      maxSpreadPct: 0.02,
+      minWindowElapsedSec: 180,
+      minWindowRemainingSec: 45,
+      minPtbDistancePct: 0.05,
+      lookbackSec: 10,
+      minRatioDelta10s: 0.3,
+      maxRatioDelta10sForConfidence: 3,
+      minBookNotional: 500,
+      maxSharePrice: 0.8,
+      tradeSize: 8,
+      maxEntriesPerWindow: 1,
+    },
+    medium: {
+      orderBookBandPct: 0.05,
+      minImbalanceRatio: 3.5,
+      maxImbalanceRatioForConfidence: 10,
+      maxSpreadPct: 0.03,
+      minWindowElapsedSec: 180,
+      minWindowRemainingSec: 30,
+      minPtbDistancePct: 0.03,
+      lookbackSec: 10,
+      minRatioDelta10s: 0,
+      maxRatioDelta10sForConfidence: 3,
+      minBookNotional: 200,
+      maxSharePrice: 0.9,
+      tradeSize: 10,
+      maxEntriesPerWindow: 1,
+    },
+    low: {
+      orderBookBandPct: 0.06,
+      minImbalanceRatio: 2.8,
+      maxImbalanceRatioForConfidence: 8,
+      maxSpreadPct: 0.04,
+      minWindowElapsedSec: 180,
+      minWindowRemainingSec: 20,
+      minPtbDistancePct: 0.02,
+      lookbackSec: 8,
+      minRatioDelta10s: 0,
+      maxRatioDelta10sForConfidence: 2,
+      minBookNotional: 120,
+      maxSharePrice: 0.93,
+      tradeSize: 12,
+      maxEntriesPerWindow: 2,
     },
   },
 };
@@ -314,6 +419,8 @@ function formatPresetValue(value: number | undefined, key: string): string {
   if (
     key.includes("Pct") ||
     key.includes("Price") ||
+    key.includes("Ratio") ||
+    key.includes("Delta") ||
     key.toLowerCase().includes("probability") ||
     key.includes("Weight")
   ) {
@@ -809,6 +916,8 @@ export function StrategyCard({
                   step={
                     key.includes("Pct") ||
                     key.includes("Price") ||
+                    key.includes("Ratio") ||
+                    key.includes("Delta") ||
                     key.toLowerCase().includes("probability") ||
                     key.includes("Weight")
                       ? 0.01

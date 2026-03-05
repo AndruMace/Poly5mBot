@@ -76,6 +76,7 @@ export interface SignalTelemetry {
   usedDynamicWindow?: boolean;
   earlyEntry?: boolean;
   reversalImprobability?: number;
+  orderBookImbalance?: number;
 }
 
 export interface Signal {

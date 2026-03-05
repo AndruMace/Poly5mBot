@@ -3,6 +3,7 @@ export const STRATEGY_DISPLAY_NAMES: Record<string, string> = {
   efficiency: "Market Efficiency",
   "whale-hunt": "Whale Hunt",
   momentum: "Momentum Confirmation",
+  "orderflow-imbalance": "Order Flow Imbalance",
 };
 
 export const STRATEGY_UI_ORDER = [
@@ -10,6 +11,7 @@ export const STRATEGY_UI_ORDER = [
   "efficiency",
   "whale-hunt",
   "momentum",
+  "orderflow-imbalance",
 ] as const;
 
 export function getStrategyDisplayName(name: string): string {

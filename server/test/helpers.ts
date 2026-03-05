@@ -12,6 +12,7 @@ import { PnLTracker } from "../src/engine/tracker.js";
 import { AccountActivityStore } from "../src/activity/store.js";
 import { CriticalIncidentStore } from "../src/incident/store.js";
 import { ObservabilityStore } from "../src/observability/store.js";
+import { DEFAULT_WHALE_HUNT_CONFIG } from "../src/strategies/whale-hunt-config.js";
 import type { AppConfigShape } from "../src/config.js";
 
 export const TestAppConfig = Layer.succeed(AppConfig, {
@@ -42,7 +43,7 @@ export const TestAppConfig = Layer.succeed(AppConfig, {
     maxWindowSpend: 15,
     maxWindowTrades: 6,
   },
-  trading: { mode: "shadow" },
+  trading: { mode: "shadow", whaleHunt: { ...DEFAULT_WHALE_HUNT_CONFIG } },
   redemption: {
     enabled: false,
     intervalMs: 45000,
@@ -124,6 +125,7 @@ export const makeTestConfigLayer = (
     },
     trading: {
       mode: "shadow" as const,
+      whaleHunt: { ...DEFAULT_WHALE_HUNT_CONFIG },
       ...(overrides.trading ?? {}),
     },
     redemption: {

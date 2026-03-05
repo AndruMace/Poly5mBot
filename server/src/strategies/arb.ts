@@ -7,7 +7,7 @@ const DEFAULT_CONFIG: Record<string, number> = {
   persistenceMs: 3000,
   persistenceCount: 4,
   minConfirmingExchanges: 1,
-  minWindowElapsedSec: 30,
+  minWindowElapsedSec: 180,
   maxWindowElapsedSec: 270,
   maxSharePrice: 0.55,
   maxOracleAgeSec: 5,

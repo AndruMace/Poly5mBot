@@ -16,13 +16,6 @@ import type {
   ObservabilityEvent,
 } from "../types/index.js";
 
-export interface PriceHistory {
-  exchange: string;
-  price: number;
-  time: number;
-}
-
-export const MAX_PRICE_HISTORY = 600;
 export const MAX_PNL_HISTORY = 300;
 
 export const emptyPnl: PnLSummary = {
@@ -165,7 +158,6 @@ export const tradingActiveRx = Rx.make(false);
 export const modeRx = Rx.make<"live" | "shadow">("shadow");
 export const pricesRx = Rx.make<Record<string, PricePoint>>({});
 export const oracleEstimateRx = Rx.make(0);
-export const priceHistoryRx = Rx.make<PriceHistory[]>([]);
 export const currentMarketRx = Rx.make((get: Rx.Context) =>
   get(perMarketStateRx)[get(activeMarketIdRx)]?.market ?? null
 );

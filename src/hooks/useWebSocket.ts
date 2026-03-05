@@ -9,7 +9,6 @@ import {
   modeRx,
   pricesRx,
   oracleEstimateRx,
-  priceHistoryRx,
   orderBookRx,
   strategiesRx,
   tradesRx,
@@ -27,7 +26,6 @@ import {
   activeMarketIdRx,
   enabledMarketsRx,
   perMarketStateRx,
-  MAX_PRICE_HISTORY,
   MAX_PNL_HISTORY,
   emptyOrderBook,
   emptyPnl,
@@ -37,7 +35,7 @@ import {
   emptyFeedHealth,
   emptyStorageHealth,
 } from "../store/index.js";
-import type { PriceHistory, PerMarketSnapshot } from "../store/index.js";
+import type { PerMarketSnapshot } from "../store/index.js";
 import type {
   WSMessage,
   PricePoint,
@@ -49,7 +47,6 @@ import type {
   ObservabilityEvent,
 } from "../types/index.js";
 
-const PRICE_HISTORY_FLUSH_MS = 1000;
 const TRADE_FLUSH_MS = 120;
 const STALE_WS_MS = 8000;
 const RESUME_RECONNECT_COOLDOWN_MS = 2000;
@@ -178,15 +175,11 @@ export function useWebSocket() {
       registry.set(metricsRx, { ...emptyMetrics, ...snap.metrics });
       registry.set(feedHealthRx, { ...emptyFeedHealth, ...snap.feedHealth });
     });
-    registry.set(priceHistoryRx, []);
   }, [activeMarketId, registry]);
 
   useEffect(() => {
     let destroyed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let priceHistoryBuffer: PriceHistory[] = [];
-    let lastPriceHistoryFlush = 0;
-    let pendingPriceHistoryFlush: ReturnType<typeof setTimeout> | undefined;
     let tradeFlushTimer: ReturnType<typeof setTimeout> | undefined;
     let activeSocket: WebSocket | null = null;
     let forceReconnectPending = false;
@@ -300,28 +293,6 @@ export function useWebSocket() {
 
     const protocol = window.location.protocol === "https:" ? "wss:"  : "ws:";
     const url = `${protocol}//${window.location.host}/ws`;
-
-    const flushPriceHistory = () => {
-      pendingPriceHistoryFlush = undefined;
-      lastPriceHistoryFlush = Date.now();
-      if (priceHistoryBuffer.length === 0) return;
-      const batch = priceHistoryBuffer;
-      priceHistoryBuffer = [];
-      registry.update(priceHistoryRx, (prev) =>
-        [...prev, ...batch].slice(-MAX_PRICE_HISTORY),
-      );
-    };
-
-    const schedulePriceHistoryFlush = () => {
-      const now = Date.now();
-      const dueIn = PRICE_HISTORY_FLUSH_MS - (now - lastPriceHistoryFlush);
-      if (dueIn <= 0) {
-        flushPriceHistory();
-        return;
-      }
-      if (pendingPriceHistoryFlush) return;
-      pendingPriceHistoryFlush = setTimeout(flushPriceHistory, dueIn);
-    };
 
     const flushTrades = () => {
       tradeFlushTimer = undefined;
@@ -463,31 +434,8 @@ export function useWebSocket() {
       if (!shallowEqualPrices(prevPrices, prices)) {
         registry.set(pricesRx, prices);
       }
-      const validEst =
-        oracleEstimate > 0
-          ? oracleEstimate
-          : registry.get(oracleEstimateRx);
       if (oracleEstimate > 0 && oracleEstimate !== registry.get(oracleEstimateRx)) {
         registry.set(oracleEstimateRx, oracleEstimate);
-      }
-
-      const now = Date.now();
-      const newEntries: PriceHistory[] = [];
-      for (const [exchange, p] of Object.entries(prices)) {
-        if ((p as PricePoint).price > 0) {
-          newEntries.push({
-            exchange,
-            price: (p as PricePoint).price,
-            time: now,
-          });
-        }
-      }
-      if (validEst > 0) {
-        newEntries.push({ exchange: "oracle", price: validEst, time: now });
-      }
-      if (newEntries.length > 0) {
-        priceHistoryBuffer.push(...newEntries);
-        schedulePriceHistoryFlush();
       }
     }
 
@@ -722,7 +670,6 @@ export function useWebSocket() {
         if (destroyed) return;
         if (activeSocket === ws) activeSocket = null;
         flushTrades();
-        flushPriceHistory();
         registry.set(connectedRx, false);
         registry.set(exchangeConnectedRx, false);
         if (forceReconnectPending) {
@@ -790,7 +737,6 @@ export function useWebSocket() {
       destroyed = true;
       document.removeEventListener("visibilitychange", onResume);
       window.removeEventListener("focus", onResume);
-      if (pendingPriceHistoryFlush) clearTimeout(pendingPriceHistoryFlush);
       if (tradeFlushTimer) clearTimeout(tradeFlushTimer);
       clearInterval(statusRehydrateTimer);
       clearInterval(storageHealthTimer);
@@ -800,8 +746,6 @@ export function useWebSocket() {
       }
       // Clear pending trades to prevent memory retention
       clearPendingTrades();
-      // Clear price history buffer
-      priceHistoryBuffer.length = 0;
     };
   }, [registry]);
 }

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  MAX_PRICE_HISTORY,
   emptyFeedHealth,
   emptyMetrics,
   emptyOrderBook,
@@ -11,7 +10,6 @@ import {
 
 describe("store defaults", () => {
   it("defines baseline defaults for deterministic UI fallback", () => {
-    expect(MAX_PRICE_HISTORY).toBe(600);
     expect(emptyOrderBook.up.bids).toEqual([]);
     expect(emptyPnl.totalTrades).toBe(0);
     expect(defaultRegime.trendRegime).toBe("chop");

@@ -37,6 +37,7 @@ describe("window manager PTB behavior", () => {
       obs: () => Effect.void,
       refreshOrderBook: () => Effect.void,
       formatWindowTitle: (w) => w.title ?? "Window",
+      logPrefix: "[Engine:test]",
     });
 
     await Effect.runPromise(poll);

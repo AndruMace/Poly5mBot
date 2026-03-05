@@ -58,7 +58,24 @@ describe("oracle + feed aggregation", () => {
     const result = computeOracleEstimate(prices);
 
     expect(result.sourceCount).toBe(4);
-    expect(result.price).toBeCloseTo(100.03, 2);
+    // weighted mean: (100.0×4 + 100.1×2 + 99.9×2 + 100.05×1) / 9 ≈ 100.01
+    expect(result.price).toBeCloseTo(100.01, 2);
+  });
+
+  it("high-weight exchange pulls result toward its price", () => {
+    const now = Date.now();
+    const prices = new Map<string, PricePoint>([
+      ["binance",  { exchange: "binance",  price: 100.0, timestamp: now - 500 }],
+      ["bitstamp", { exchange: "bitstamp", price: 110.0, timestamp: now - 500 }],
+    ]);
+
+    const result = computeOracleEstimate(prices);
+
+    // Both prices are far apart so both become outliers → fallback to recent
+    // weighted mean: (100×4 + 110×0.5) / 4.5 = 455/4.5 ≈ 101.11
+    // vs unweighted average of 105.00 — Binance pulls result toward its price
+    expect(result.sourceCount).toBe(2);
+    expect(result.price).toBeCloseTo(101.11, 2);
   });
 
   it("reports all feeds down before any feed data is observed", async () => {

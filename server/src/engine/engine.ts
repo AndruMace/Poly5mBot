@@ -32,8 +32,14 @@ import { makeArbStrategy } from "../strategies/arb.js";
 import { makeEfficiencyStrategy } from "../strategies/efficiency.js";
 import { makeWhaleHuntStrategy } from "../strategies/whale-hunt.js";
 import { makeMomentumStrategy } from "../strategies/momentum.js";
+import { makeOrderFlowImbalanceStrategy } from "../strategies/orderflow-imbalance.js";
+import {
+  mergeWhaleHuntConfig,
+  toWhaleHuntStrategyConfig,
+} from "../strategies/whale-hunt-config.js";
 import type { Strategy } from "../strategies/base.js";
 import { shouldRunInRegime } from "../strategies/base.js";
+import { getMarketConfig } from "../markets/definitions.js";
 import type {
   MarketWindow,
   MarketContext,
@@ -55,6 +61,7 @@ const STRATEGY_COOLDOWN_MS: Record<string, number> = {
   efficiency: 5000,
   "whale-hunt": 6000,
   momentum: 4000,
+  "orderflow-imbalance": 4500,
 };
 
 const MAX_ENTRIES_PER_WINDOW: Record<string, number> = {
@@ -62,6 +69,7 @@ const MAX_ENTRIES_PER_WINDOW: Record<string, number> = {
   efficiency: 1,
   "whale-hunt": 1,
   momentum: 2, // fallback: 1 UP + 1 DOWN. Overridden by sState.config["maxEntriesPerWindow"].
+  "orderflow-imbalance": 1,
 };
 
 // Strategies in this set split their entry budget evenly across UP and DOWN directions.
@@ -74,6 +82,7 @@ const MIN_FILL_RATIO_BY_STRATEGY: Record<string, number> = {
   efficiency: 0.6,
   "whale-hunt": 0.5,
   momentum: 0.5,
+  "orderflow-imbalance": 0.5,
 };
 
 const SHADOW_SIM_OPTS_BY_STRATEGY: Record<string, SimulatorOpts> = {
@@ -81,10 +90,13 @@ const SHADOW_SIM_OPTS_BY_STRATEGY: Record<string, SimulatorOpts> = {
   efficiency: { slippageBps: 3, fillProbability: 0.82, minLiquidityPct: 0.1 },
   "whale-hunt": { slippageBps: 6, fillProbability: 0.75, minLiquidityPct: 0.08 },
   momentum: { slippageBps: 7, fillProbability: 0.86, minLiquidityPct: 0.05 },
+  "orderflow-imbalance": { slippageBps: 5, fillProbability: 0.82, minLiquidityPct: 0.08 },
 };
 
 const STRATEGY_STATE_DIR = "data";
 const STRATEGY_STATE_FILE = "data/strategy-state.json";
+const MARKET_ID = "btc";
+const ENGINE_LOG_PREFIX = `[Engine:${MARKET_ID}]`;
 
 interface PersistedStrategyStateEntry {
   enabled?: boolean;
@@ -123,15 +135,22 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const whaleHunt = yield* makeWhaleHuntStrategy;
     const momentumResult = yield* makeMomentumStrategy;
     const momentum = momentumResult;
+    const orderFlowImbalance = yield* makeOrderFlowImbalanceStrategy;
 
-    const strategies: Strategy[] = [arb, efficiency, whaleHunt, momentum];
+    const strategies: Strategy[] = [arb, efficiency, whaleHunt, momentum, orderFlowImbalance];
     const strategyMap = new Map<string, Strategy>(strategies.map((s) => [s.name, s]));
+    const marketConfig = getMarketConfig(MARKET_ID);
+    const whaleHuntConfig = mergeWhaleHuntConfig(
+      config.trading.whaleHunt,
+      marketConfig?.whaleHuntOverrides,
+    );
 
     const readPersistedStrategyState = Effect.gen(function* () {
       const fromDb: PersistedStrategyState = {};
       if (usePostgresStorage) {
         const rows = yield* postgres!.query<{ strategy_name: string; payload: unknown }>(
-          "select strategy_name, payload from strategy_state",
+          "select strategy_name, payload from strategy_state where market_id = $1",
+          [MARKET_ID],
         ).pipe(Effect.catchAll(() => Effect.succeed([])));
         for (const row of rows) {
           if (typeof row.strategy_name === "string" && row.strategy_name.length > 0) {
@@ -160,7 +179,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       } as PersistedStrategyState;
     }).pipe(
       Effect.catchAll((err) =>
-        Effect.logError(`[Engine] Failed to load strategy state from ${STRATEGY_STATE_FILE}: ${String(err)}`).pipe(
+        Effect.logError(`${ENGINE_LOG_PREFIX} Failed to load strategy state from ${STRATEGY_STATE_FILE}: ${String(err)}`).pipe(
           Effect.as({} as PersistedStrategyState),
         ),
       ),
@@ -192,10 +211,10 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           Object.entries(payload),
           ([name, entry]) =>
             postgres!.execute(
-              `insert into strategy_state (strategy_name, payload, updated_at_ms)
-               values ($1, $2::jsonb, $3)
-               on conflict (strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
-              [name, JSON.stringify(entry ?? {}), Date.now()],
+              `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
+               values ($1, $2, $3::jsonb, $4)
+               on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+              [MARKET_ID, name, JSON.stringify(entry ?? {}), Date.now()],
             ).pipe(Effect.catchAll(() => Effect.void)),
           { discard: true },
         );
@@ -216,7 +235,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
             const result = yield* strategy.updateConfig(entry.config);
             if (!result.ok) {
               yield* Effect.logWarning(
-                `[Engine] Persisted config for ${strategy.name} was invalid: ${result.error ?? "Invalid config values"}`,
+                `${ENGINE_LOG_PREFIX} Persisted config for ${strategy.name} was invalid: ${result.error ?? "Invalid config values"}`,
               );
             }
           }
@@ -227,8 +246,20 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         }),
       ).pipe(Effect.asVoid);
 
+    const applyWhaleHuntRuntimeConfig = Effect.gen(function* () {
+      const strategy = strategyMap.get("whale-hunt");
+      if (!strategy) return;
+      const result = yield* strategy.updateConfig(toWhaleHuntStrategyConfig(whaleHuntConfig));
+      if (!result.ok) {
+        yield* Effect.logWarning(
+          `${ENGINE_LOG_PREFIX} Failed to apply whale-hunt runtime config: ${result.error ?? "invalid values"}`,
+        );
+      }
+    });
+
     const persistedStrategyState = yield* readPersistedStrategyState;
     yield* applyPersistedStrategyState(persistedStrategyState);
+    yield* applyWhaleHuntRuntimeConfig;
     yield* persistStrategyStates;
 
     const stateRef = yield* Ref.make<EngineState>(initialEngineState(config.trading.mode));
@@ -243,7 +274,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       });
     }
 
-    const emit = (event: EngineEvent) => eventBus.publish({ ...event, marketId: "btc" });
+    const emit = (event: EngineEvent) => eventBus.publish({ ...event, marketId: MARKET_ID });
     const obs = (
       input: Parameters<NonNullable<typeof observability>["append"]>[0],
     ) =>
@@ -282,7 +313,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
             details: created.details,
           },
         });
-        yield* Effect.logError(`[Engine] CRITICAL INCIDENT: ${created.kind} - ${created.message}`);
+        yield* Effect.logError(`${ENGINE_LOG_PREFIX} CRITICAL INCIDENT: ${created.kind} - ${created.message}`);
       });
 
     const runAccountReconciliation = makeAccountReconciler({
@@ -507,6 +538,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         yield* emit({ _tag: "OrderBook", data: s.orderBook });
       }).pipe(Effect.catchAll(() => Effect.void));
 
+    const settlementPendingLastLog = new Map<string, number>();
+
     const pollMarkets = makeMarketPoller({
       stateRef,
       strategies,
@@ -517,6 +550,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       obs,
       refreshOrderBook,
       formatWindowTitle,
+      logPrefix: ENGINE_LOG_PREFIX,
     });
 
     const tick = Effect.gen(function* () {
@@ -525,7 +559,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       yield* Ref.update(stateRef, (s) => ({ ...s, tickInFlight: true }));
 
       yield* tickInner.pipe(
-        Effect.withSpan("Engine.tick"),
+        Effect.withSpan(`Engine:${MARKET_ID}.tick`),
         Effect.ensuring(Ref.update(stateRef, (s) => ({ ...s, tickInFlight: false }))),
       );
     });
@@ -572,11 +606,17 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         );
         const hasVenueWinner = settlement?.resolved === true && settlement.winnerSide !== null;
         if (!hasVenueWinner) {
-          yield* Effect.log(
-            `[Engine] Settlement pending for ${trade.id} (${trade.conditionId}) — waiting for venue winner`,
-          );
+          const lastLog = settlementPendingLastLog.get(trade.id) ?? 0;
+          const pendingMs = now - trade.windowEnd;
+          const logInterval = pendingMs > 5 * 60_000 ? 60_000 : pendingMs > 60_000 ? 30_000 : 0;
+          if (now - lastLog >= logInterval) {
+            settlementPendingLastLog.set(trade.id, now);
+            const msg = `${ENGINE_LOG_PREFIX} Settlement pending for ${trade.id} (${trade.conditionId}) — waiting for venue winner`;
+            yield* pendingMs > 5 * 60_000 ? Effect.logWarning(msg) : Effect.log(msg);
+          }
           continue;
         }
+        settlementPendingLastLog.delete(trade.id);
         if (closingAssetPrice > 0) {
           yield* tracker.expireTrade(trade.id, closingAssetPrice, tradeShadow);
         }
@@ -655,7 +695,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         windowRemainingMs: sNow.currentWindow.endTime - now,
         priceToBeat: sNow.currentWindow.priceToBeat,
         currentAssetPrice: currentAsset,
-        marketId: "btc",
+        marketId: MARKET_ID,
       };
 
       yield* regimeDetector.update(ctx);
@@ -695,6 +735,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       bumpDiag,
       recordSignalLatency,
       haltTradingWithIncident,
+      whaleHuntConfig,
+      logPrefix: ENGINE_LOG_PREFIX,
     });
 
     const runStrategies = makeStrategyRunner({
@@ -713,6 +755,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         adjustMomentumMaxPrice(signal, regime, ctx, config),
       bumpDiag,
       obs,
+      whaleHuntConfig,
+      logPrefix: ENGINE_LOG_PREFIX,
     });
 
     // Start loops
@@ -737,7 +781,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       yield* riskManager.rehydrate(liveTrades, windowId);
       const snap = yield* riskManager.getSnapshot;
       yield* Effect.log(
-        `[Engine] Risk rehydrated: open=${snap.openPositions}, exposure=$${snap.openExposure.toFixed(2)}, dailyPnl=$${snap.dailyPnl.toFixed(2)}, hourlyPnl=$${snap.hourlyPnl.toFixed(2)}`,
+        `${ENGINE_LOG_PREFIX} Risk rehydrated: open=${snap.openPositions}, exposure=$${snap.openExposure.toFixed(2)}, dailyPnl=$${snap.dailyPnl.toFixed(2)}, hourlyPnl=$${snap.hourlyPnl.toFixed(2)}`,
       );
 
       if (windowId) {
@@ -752,14 +796,14 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         }
         yield* Ref.update(stateRef, (s) => ({ ...s, entriesThisWindow: restoredEntries }));
         yield* Effect.log(
-          `[Engine] Restored entriesThisWindow from ${windowTrades.length} existing trades: ${JSON.stringify(Object.fromEntries(restoredEntries))}`,
+          `${ENGINE_LOG_PREFIX} Restored entriesThisWindow from ${windowTrades.length} existing trades: ${JSON.stringify(Object.fromEntries(restoredEntries))}`,
         );
       }
     });
 
     yield* tick.pipe(
       Effect.repeat(Schedule.fixed("500 millis")),
-      Effect.catchAll((err) => Effect.logError(`[Engine] Tick error: ${err}`)),
+      Effect.catchAll((err) => Effect.logError(`${ENGINE_LOG_PREFIX} Tick error: ${err}`)),
       Effect.forkScoped,
     );
 
@@ -769,7 +813,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       Effect.forkScoped,
     );
 
-    yield* Effect.log(`[Engine] Started in ${config.trading.mode.toUpperCase()} mode`);
+    yield* Effect.log(`${ENGINE_LOG_PREFIX} Started in ${config.trading.mode.toUpperCase()} mode`);
 
     // Public API
     const getStrategyStates = Effect.all(strategies.map((s) => s.getState));
@@ -786,7 +830,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           tradingActive: active,
           efficiencyIncidentBlocked: active ? false : s.efficiencyIncidentBlocked,
         }));
-        yield* Effect.log(`[Engine] Trading ${active ? "STARTED" : "STOPPED"}`);
+        yield* Effect.log(`${ENGINE_LOG_PREFIX} Trading ${active ? "STARTED" : "STOPPED"}`);
         yield* emit({ _tag: "TradingActive", data: { tradingActive: active } });
         yield* obs({
           category: "operator",
@@ -804,7 +848,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const setMode = (mode: "live" | "shadow") =>
       Effect.gen(function* () {
         yield* Ref.update(stateRef, (s) => ({ ...s, mode }));
-        yield* Effect.log(`[Engine] Mode switched to ${mode.toUpperCase()}`);
+        yield* Effect.log(`${ENGINE_LOG_PREFIX} Mode switched to ${mode.toUpperCase()}`);
         yield* emit({ _tag: "Mode", data: { mode } });
         yield* obs({
           category: "operator",

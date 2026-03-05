@@ -4,6 +4,7 @@ import { makeArbStrategy } from "../../src/strategies/arb.js";
 import { makeEfficiencyStrategy } from "../../src/strategies/efficiency.js";
 import { makeWhaleHuntStrategy } from "../../src/strategies/whale-hunt.js";
 import { makeMomentumStrategy } from "../../src/strategies/momentum.js";
+import { makeOrderFlowImbalanceStrategy } from "../../src/strategies/orderflow-imbalance.js";
 import { runTest } from "../helpers.js";
 import type { MarketContext, PricePoint } from "../../src/types.js";
 
@@ -37,7 +38,7 @@ function makeContext(overrides: Partial<MarketContext> = {}): MarketContext {
     },
     oracleEstimate: 100_000,
     oracleTimestamp: now,
-    windowElapsedMs: 120_000,
+    windowElapsedMs: 200_000,
     windowRemainingMs: 40_000,
     priceToBeat: 100_000,
     currentAssetPrice: 100_200,
@@ -63,7 +64,7 @@ describe("Strategies", () => {
           oracleEstimate: 100_000,
           oracleTimestamp: Date.now(),
           priceToBeat: 100_000,
-          windowElapsedMs: 120_000,
+          windowElapsedMs: 200_000,
         });
         // 4 calls in quick succession builds the persistence history
         yield* strategy.evaluate(ctx);
@@ -110,7 +111,7 @@ describe("Strategies", () => {
           oracleEstimate: 100_000,
           oracleTimestamp: Date.now(),
           priceToBeat: 100_000,
-          windowElapsedMs: 120_000,
+          windowElapsedMs: 200_000,
         });
         yield* strategy.evaluate(ctx);
         yield* strategy.evaluate(ctx);
@@ -205,6 +206,35 @@ describe("Strategies", () => {
       }),
     ));
 
+  it("whale-hunt rejects strongly ask-heavy order book skew", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeWhaleHuntStrategy;
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            orderBook: {
+              up: {
+                bids: [{ price: 0.50, size: 20 }],
+                asks: [{ price: 0.52, size: 250 }],
+              },
+              down: {
+                bids: [{ price: 0.46, size: 120 }],
+                asks: [{ price: 0.48, size: 120 }],
+              },
+              bestAskUp: 0.52,
+              bestAskDown: 0.48,
+              bestBidUp: 0.50,
+              bestBidDown: 0.46,
+            },
+            windowRemainingMs: 35_000,
+            currentAssetPrice: 100_250,
+            priceToBeat: 100_000,
+          }),
+        );
+        expect(signal).toBeNull();
+      }),
+    ));
+
   it("momentum produces signal with seeded prices", () =>
     runTest(
       Effect.gen(function* () {
@@ -227,6 +257,149 @@ describe("Strategies", () => {
           }),
         );
         expect(signal === null || signal.strategy === "momentum").toBe(true);
+      }),
+    ));
+
+  it("orderflow-imbalance emits UP when UP book pressure dominates with tight spread", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeOrderFlowImbalanceStrategy;
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            windowRemainingMs: 45_000,
+            orderBook: {
+              up: {
+                bids: [{ price: 0.50, size: 2000 }],
+                asks: [{ price: 0.505, size: 100 }],
+              },
+              down: {
+                bids: [{ price: 0.48, size: 350 }],
+                asks: [{ price: 0.50, size: 300 }],
+              },
+              bestAskUp: 0.505,
+              bestAskDown: 0.50,
+              bestBidUp: 0.50,
+              bestBidDown: 0.48,
+            },
+          }),
+        );
+        expect(signal).not.toBeNull();
+        expect(signal?.strategy).toBe("orderflow-imbalance");
+        expect(signal?.side).toBe("UP");
+      }),
+    ));
+
+  it("orderflow-imbalance emits DOWN when DOWN book pressure dominates with tight spread", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeOrderFlowImbalanceStrategy;
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            windowRemainingMs: 45_000,
+            currentAssetPrice: 99_900,
+            orderBook: {
+              up: {
+                bids: [{ price: 0.50, size: 250 }],
+                asks: [{ price: 0.52, size: 250 }],
+              },
+              down: {
+                bids: [{ price: 0.49, size: 1600 }],
+                asks: [{ price: 0.495, size: 120 }],
+              },
+              bestAskUp: 0.52,
+              bestAskDown: 0.495,
+              bestBidUp: 0.50,
+              bestBidDown: 0.49,
+            },
+          }),
+        );
+        expect(signal).not.toBeNull();
+        expect(signal?.strategy).toBe("orderflow-imbalance");
+        expect(signal?.side).toBe("DOWN");
+      }),
+    ));
+
+  it("orderflow-imbalance rejects when window is too early", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeOrderFlowImbalanceStrategy;
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            windowElapsedMs: 20_000,
+            windowRemainingMs: 45_000,
+            orderBook: {
+              up: {
+                bids: [{ price: 0.50, size: 2000 }],
+                asks: [{ price: 0.505, size: 100 }],
+              },
+              down: {
+                bids: [{ price: 0.48, size: 350 }],
+                asks: [{ price: 0.50, size: 300 }],
+              },
+              bestAskUp: 0.505,
+              bestAskDown: 0.50,
+              bestBidUp: 0.50,
+              bestBidDown: 0.48,
+            },
+          }),
+        );
+        expect(signal).toBeNull();
+      }),
+    ));
+
+  it("orderflow-imbalance rejects when price is too close to PTB", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeOrderFlowImbalanceStrategy;
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            currentAssetPrice: 100_010, // +0.01% vs PTB (default min is 0.03%)
+            windowElapsedMs: 200_000,
+            windowRemainingMs: 45_000,
+            orderBook: {
+              up: {
+                bids: [{ price: 0.50, size: 2200 }],
+                asks: [{ price: 0.505, size: 120 }],
+              },
+              down: {
+                bids: [{ price: 0.48, size: 350 }],
+                asks: [{ price: 0.50, size: 300 }],
+              },
+              bestAskUp: 0.505,
+              bestAskDown: 0.50,
+              bestBidUp: 0.50,
+              bestBidDown: 0.48,
+            },
+          }),
+        );
+        expect(signal).toBeNull();
+      }),
+    ));
+
+  it("orderflow-imbalance rejects signals when spread is too wide even if ratio is high", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeOrderFlowImbalanceStrategy;
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            windowRemainingMs: 45_000,
+            orderBook: {
+              up: {
+                bids: [{ price: 0.46, size: 2000 }],
+                asks: [{ price: 0.54, size: 80 }],
+              },
+              down: {
+                bids: [{ price: 0.47, size: 250 }],
+                asks: [{ price: 0.52, size: 250 }],
+              },
+              bestAskUp: 0.54,
+              bestAskDown: 0.52,
+              bestBidUp: 0.46,
+              bestBidDown: 0.47,
+            },
+          }),
+        );
+        expect(signal).toBeNull();
       }),
     ));
 });

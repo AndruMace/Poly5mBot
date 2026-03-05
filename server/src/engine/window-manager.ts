@@ -14,6 +14,7 @@ interface WindowManagerDeps {
   obs: (input: any) => Effect.Effect<void, never, never>;
   refreshOrderBook: (window: MarketWindow) => Effect.Effect<void, never, never>;
   formatWindowTitle: (window: MarketWindow) => string;
+  logPrefix: string;
 }
 
 export function makeMarketPoller(deps: WindowManagerDeps) {
@@ -26,7 +27,7 @@ export function makeMarketPoller(deps: WindowManagerDeps) {
       const updatedWindow: MarketWindow = { ...current };
       const title = current.title ?? deps.formatWindowTitle(current);
       yield* Effect.log(
-        `[Engine] New window: ${title} | Price to beat: ${
+        `${deps.logPrefix} New window: ${title} | Price to beat: ${
           updatedWindow.priceToBeat !== null
             ? `$${updatedWindow.priceToBeat.toFixed(2)}`
             : `unavailable (${updatedWindow.priceToBeatReason ?? "unresolved"})`
@@ -78,7 +79,7 @@ export function makeMarketPoller(deps: WindowManagerDeps) {
       }));
       yield* deps.emit({ _tag: "Market", data: current });
       yield* Effect.log(
-        `[Engine] PTB resolved for existing window: $${current.priceToBeat.toFixed(2)} (${current.priceToBeatSource})`,
+        `${deps.logPrefix} PTB resolved for existing window: $${current.priceToBeat.toFixed(2)} (${current.priceToBeatSource})`,
       );
     }
 
@@ -88,6 +89,6 @@ export function makeMarketPoller(deps: WindowManagerDeps) {
       yield* deps.refreshOrderBook(afterSt.currentWindow);
     }
   }).pipe(
-    Effect.catchAll((err) => Effect.logError(`[Engine] Market poll error: ${err}`)),
+    Effect.catchAll((err) => Effect.logError(`${deps.logPrefix} Market poll error: ${err}`)),
   );
 }

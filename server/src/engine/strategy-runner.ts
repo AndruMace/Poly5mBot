@@ -2,6 +2,7 @@ import { Effect, Ref } from "effect";
 import type { Strategy } from "../strategies/base.js";
 import { shouldRunInRegime } from "../strategies/base.js";
 import type { EntryContext, MarketContext, RegimeState, Signal, StrategyDiagnostics } from "../types.js";
+import type { WhaleHuntConfig } from "../strategies/whale-hunt-config.js";
 import type { EngineState } from "./state.js";
 
 interface StrategyRunnerDeps {
@@ -49,9 +50,18 @@ interface StrategyRunnerDeps {
     isShadowMode?: boolean,
   ) => void;
   obs: (input: any) => Effect.Effect<void, never, never>;
+  whaleHuntConfig: WhaleHuntConfig;
+  logPrefix: string;
 }
 
 const PTB_REQUIRED_STRATEGIES = new Set(["arb", "momentum", "whale-hunt"]);
+
+function computeLatencyGuardLeadMs(observedLatencyMs: number, cfg: WhaleHuntConfig): number {
+  return Math.max(
+    cfg.minRequiredLeadMs,
+    observedLatencyMs * cfg.latencyMultiplier + cfg.latencyBufferMs,
+  );
+}
 
 export function makeStrategyRunner(deps: StrategyRunnerDeps) {
   return (ctx: MarketContext, regime: RegimeState, isShadow: boolean, now: number) =>
@@ -115,9 +125,49 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             },
           });
           yield* Effect.log(
-            `[Engine] ${strategy.name} skipped: priceToBeat unavailable (${reason})`,
+            `${deps.logPrefix} ${strategy.name} skipped: priceToBeat unavailable (${reason})`,
           );
           continue;
+        }
+
+        if (!isShadow && strategy.name === "whale-hunt") {
+          const latency = sCurrent.metrics.latency;
+          const observedLatencyMs = Math.max(latency.lastSignalToSubmitMs, latency.avgRecentSignalToSubmitMs);
+          if (observedLatencyMs > 0) {
+            const requiredLeadMs = computeLatencyGuardLeadMs(observedLatencyMs, deps.whaleHuntConfig);
+            if (ctx.windowRemainingMs <= requiredLeadMs) {
+              yield* Ref.update(strategy.stateRef, (s) => ({
+                ...s,
+                status: "watching" as const,
+                statusReason: `Latency guard (${Math.round(observedLatencyMs)}ms latency, ${Math.round(ctx.windowRemainingMs)}ms left)`,
+              }));
+              yield* Ref.update(deps.stateRef, (stUpd) => {
+                deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, false);
+                return stUpd;
+              });
+              yield* deps.obs({
+                category: "signal",
+                source: "engine",
+                action: "signal_rejected_preflight",
+                entityType: "signal",
+                entityId: `${strategy.name}:${now}`,
+                status: "rejected",
+                strategy: strategy.name,
+                mode: "live",
+                payload: {
+                  reason: "latency_guard",
+                  gate: "latency_guard",
+                  observedLatencyMs: Math.round(observedLatencyMs),
+                  requiredLeadMs: Math.round(requiredLeadMs),
+                  windowRemainingMs: Math.round(ctx.windowRemainingMs),
+                },
+              });
+              yield* Effect.log(
+                `${deps.logPrefix} whale-hunt skipped: latency ${Math.round(observedLatencyMs)}ms, remaining ${Math.round(ctx.windowRemainingMs)}ms, required lead ${Math.round(requiredLeadMs)}ms`,
+              );
+              continue;
+            }
+          }
         }
 
         const signal = yield* strategy.evaluate(ctx);
@@ -132,7 +182,7 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
           const sideEntries = sCurrent.entriesThisWindow.get(sideKey) ?? 0;
           if (sideEntries >= perSideMax) {
             yield* Effect.log(
-              `[Engine] ${strategy.name} ${signal.side} skipped: side entry limit reached (${sideEntries}/${perSideMax})`,
+              `${deps.logPrefix} ${strategy.name} ${signal.side} skipped: side entry limit reached (${sideEntries}/${perSideMax})`,
             );
             continue;
           }
@@ -169,9 +219,14 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             return stUpd;
           });
           yield* Effect.log(
-            `[Engine] ${strategy.name} ${signal.side} skipped: maxPrice $${signal.maxPrice.toFixed(2)} < bestAsk $${bestAskForSide.toFixed(2)}`,
+            `${deps.logPrefix} ${strategy.name} ${signal.side} skipped: maxPrice $${signal.maxPrice.toFixed(2)} < bestAsk $${bestAskForSide.toFixed(2)}`,
           );
           continue;
+        }
+
+        // Don't overpay — buy at best available price, capped by maxPrice
+        if (bestAskForSide !== null && signal.maxPrice > bestAskForSide) {
+          signal.maxPrice = bestAskForSide;
         }
 
         yield* Ref.update(deps.stateRef, (stUpd) => {
@@ -183,7 +238,13 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         const recentPrices = yield* deps.getRecentPrices(300_000, "binance");
 
         const strategyMetrics = sCurrent.metrics.reconciliation.strategies.find((m) => m.strategy === strategy.name);
-        const winRate = isShadow ? strategyMetrics?.shadowWinRate : strategyMetrics?.liveWinRate;
+        // Live sizing is intentionally based only on live execution stats and only
+        // after enough submitted live samples; shadow metrics are excluded.
+        const useLivePerformanceSizing =
+          !isShadow &&
+          strategyMetrics !== undefined &&
+          strategyMetrics.liveSubmitted >= deps.whaleHuntConfig.minLiveSubmittedForSizing;
+        const winRate = useLivePerformanceSizing ? strategyMetrics?.liveWinRate : undefined;
         const computedSize = deps.computeSize(signal, recentPrices, winRate);
         const alignedSize = Math.min(computedSize, deps.maxTradeSize);
         signal.size = Math.round(alignedSize * 100) / 100;
@@ -195,7 +256,7 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
             return stUpd;
           });
-          yield* Effect.log(`[Engine] Risk rejected ${signal.strategy}: ${check.reason}`);
+          yield* Effect.log(`${deps.logPrefix} Risk rejected ${signal.strategy}: ${check.reason}`);
           yield* deps.obs({
             category: "risk",
             source: "risk_manager",

@@ -3,6 +3,14 @@ import type { EntryContext, EngineEvent, MarketContext, Signal, StrategyDiagnost
 import type { EngineState } from "./state.js";
 import { preflightShadowBuy } from "./shadow-preflight.js";
 import type { SimulatorOpts } from "./fill-simulator.js";
+import type { WhaleHuntConfig } from "../strategies/whale-hunt-config.js";
+
+function computeLatencyGuardLeadMs(observedLatencyMs: number, cfg: WhaleHuntConfig): number {
+  return Math.max(
+    cfg.minRequiredLeadMs,
+    observedLatencyMs * cfg.latencyMultiplier + cfg.latencyBufferMs,
+  );
+}
 
 interface ExecutionDeps {
   stateRef: Ref.Ref<EngineState>;
@@ -58,6 +66,8 @@ interface ExecutionDeps {
     fingerprint: string;
     details: Record<string, unknown>;
   }) => Effect.Effect<void, any, never>;
+  whaleHuntConfig: WhaleHuntConfig;
+  logPrefix: string;
 }
 
 export function makeExecutionHandlers(deps: ExecutionDeps) {
@@ -78,7 +88,7 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
           return s;
         });
         yield* Effect.log(
-          `[Shadow] ${signal.strategy} ${signal.side} skipped: ${preflight.reason}`,
+          `${deps.logPrefix} [Shadow] ${signal.strategy} ${signal.side} skipped: ${preflight.reason}`,
         );
         return false;
       }
@@ -131,7 +141,7 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
           (cancelledRecord as any).shadow = true;
           yield* deps.emit({ _tag: "Trade", data: cancelledRecord });
         }
-        yield* Effect.log(`[Shadow] ${signal.strategy} ${signal.side} cancelled: ${result.reason}`);
+        yield* Effect.log(`${deps.logPrefix} [Shadow] ${signal.strategy} ${signal.side} cancelled: ${result.reason}`);
         return false;
       }
 
@@ -166,7 +176,7 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
         yield* deps.emit({ _tag: "Trade", data: record });
       }
 
-      yield* Effect.log(`[Shadow] ${signal.strategy} ${signal.side} filled ${result.filledShares} @ $${result.avgPrice.toFixed(4)}`);
+      yield* Effect.log(`${deps.logPrefix} [Shadow] ${signal.strategy} ${signal.side} filled ${result.filledShares} @ $${result.avgPrice.toFixed(4)}`);
       return true;
     });
 
@@ -177,6 +187,26 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
 
       const signalToSubmitMs = Math.max(0, Date.now() - signal.timestamp);
       yield* Ref.update(deps.stateRef, (s) => { deps.recordSignalLatency(s, signalToSubmitMs); return s; });
+
+      if (signal.strategy === "whale-hunt") {
+        const remainingMs = st.currentWindow.endTime - Date.now();
+        const observedLatencyMs = Math.max(
+          signalToSubmitMs,
+          st.metrics.latency.lastSignalToSubmitMs,
+          st.metrics.latency.avgRecentSignalToSubmitMs,
+        );
+        const requiredLeadMs = computeLatencyGuardLeadMs(observedLatencyMs, deps.whaleHuntConfig);
+        if (remainingMs <= requiredLeadMs) {
+          yield* Ref.update(deps.stateRef, (s) => {
+            deps.bumpDiag(s, signal.strategy, "riskRejected", 1, false);
+            return s;
+          });
+          yield* Effect.log(
+            `${deps.logPrefix} whale-hunt ${signal.side} blocked by latency guard: latency ${Math.round(observedLatencyMs)}ms, remaining ${Math.round(remainingMs)}ms, required lead ${Math.round(requiredLeadMs)}ms`,
+          );
+          return false;
+        }
+      }
 
       if (signal.strategy === "efficiency") {
         const trades = yield* deps.orderService.executeDualBuy(
@@ -229,7 +259,7 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
             },
           });
           yield* Effect.logError(
-            "[Engine] Efficiency dual-leg incident detected. Trading paused and efficiency strategy blocked until manual restart.",
+            `${deps.logPrefix} Efficiency dual-leg incident detected. Trading paused and efficiency strategy blocked until manual restart.`,
           );
           return false;
         }

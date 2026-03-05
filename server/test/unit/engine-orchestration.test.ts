@@ -16,6 +16,8 @@ import { TradeStore, ShadowTradeStore } from "../../src/engine/trade-store.js";
 import { AccountActivityStore } from "../../src/activity/store.js";
 import { CriticalIncidentStore } from "../../src/incident/store.js";
 import { makeTestConfigLayer } from "../helpers.js";
+import { DEFAULT_WHALE_HUNT_CONFIG } from "../../src/strategies/whale-hunt-config.js";
+import type { AppConfigShape } from "../../src/config.js";
 import type { MarketWindow, Signal, StrategyState, TradeRecord } from "../../src/types.js";
 
 const mockState = vi.hoisted(() => ({
@@ -25,6 +27,12 @@ const mockState = vi.hoisted(() => ({
     "whale-hunt": false,
     momentum: false,
   } as Record<string, boolean>,
+  signalAgeMsByStrategy: {
+    arb: 0,
+    efficiency: 0,
+    "whale-hunt": 0,
+    momentum: 0,
+  } as Record<string, number>,
 }));
 
 function defaultStrategyState(name: string): StrategyState {
@@ -61,7 +69,7 @@ vi.mock("../../src/strategies/arb.js", async () => {
             maxPrice: 0.55,
             strategy: "arb",
             reason: "test",
-            timestamp: Date.now(),
+            timestamp: Date.now() - (mockState.signalAgeMsByStrategy.arb ?? 0),
           };
         }),
       getState: Ref.get(stateRef),
@@ -102,7 +110,7 @@ vi.mock("../../src/strategies/efficiency.js", async () => {
             maxPrice: 0.55,
             strategy: "efficiency",
             reason: "test",
-            timestamp: Date.now(),
+            timestamp: Date.now() - (mockState.signalAgeMsByStrategy.efficiency ?? 0),
           };
         }),
       getState: Ref.get(stateRef),
@@ -143,7 +151,7 @@ vi.mock("../../src/strategies/whale-hunt.js", async () => {
             maxPrice: 0.55,
             strategy: "whale-hunt",
             reason: "test",
-            timestamp: Date.now(),
+            timestamp: Date.now() - (mockState.signalAgeMsByStrategy["whale-hunt"] ?? 0),
           };
         }),
       getState: Ref.get(stateRef),
@@ -184,7 +192,7 @@ vi.mock("../../src/strategies/momentum.js", async () => {
             maxPrice: 0.55,
             strategy: "momentum",
             reason: "test",
-            timestamp: Date.now(),
+            timestamp: Date.now() - (mockState.signalAgeMsByStrategy.momentum ?? 0),
           };
         }),
       addPrice: () => Effect.void,
@@ -213,6 +221,7 @@ interface EngineHarness {
   executeSignalCalls: number;
   executeDualCalls: number;
   seenConditionIds: string[];
+  capturedSignals: Signal[];
 }
 
 function makeHarness(opts: {
@@ -231,12 +240,19 @@ function makeHarness(opts: {
     filledShares: number | null;
     reason: string | null;
   };
+  /** Override the best ask price in the order book (default: 0.55) */
+  orderBookAsk?: number;
+  /** Override window end offset from now (default: 240_000ms) */
+  windowEndOffsetMs?: number;
+  configOverrides?: Partial<AppConfigShape>;
 }): EngineHarness {
   let marketCalls = 0;
   let executeSignalCalls = 0;
   let executeDualCalls = 0;
   const seenConditionIds: string[] = [];
+  const capturedSignals: Signal[] = [];
   const files = opts.files ?? new Map<string, string>();
+  const askPrice = opts.orderBookAsk ?? 0.55;
 
   const mkWindow = (conditionId: string): MarketWindow => {
     const now = Date.now();
@@ -248,7 +264,7 @@ function makeHarness(opts: {
       upTokenId: "up-token",
       downTokenId: "down-token",
       startTime: now - 60_000,
-      endTime: now + 240_000,
+      endTime: now + (opts.windowEndOffsetMs ?? 240_000),
       priceToBeat: 100_000,
       resolved: false,
     };
@@ -289,10 +305,11 @@ function makeHarness(opts: {
   } as any);
 
   const orderLayer = Layer.succeed(OrderService, {
-    executeSignal: (_signal: Signal, _up: string, _down: string, windowEnd: number, conditionId: string, priceToBeatAtEntry: number) =>
+    executeSignal: (signal: Signal, _up: string, _down: string, windowEnd: number, conditionId: string, priceToBeatAtEntry: number) =>
       Effect.sync(() => {
         executeSignalCalls += 1;
         seenConditionIds.push(conditionId);
+        capturedSignals.push(signal);
         const trade: TradeRecord = {
           id: `live-${executeSignalCalls}`,
           strategy: "arb",
@@ -342,8 +359,8 @@ function makeHarness(opts: {
       }),
     getOrderBook: () =>
       Effect.succeed({
-        bids: [{ price: "0.5", size: "100" }],
-        asks: [{ price: "0.55", size: "100" }],
+        bids: [{ price: String(askPrice - 0.03), size: "100" }],
+        asks: [{ price: String(askPrice), size: "100" }],
       }),
     getOrderStatusById: () =>
       Effect.succeed(
@@ -418,7 +435,10 @@ function makeHarness(opts: {
     }),
   } as any);
 
-  const configLayer = makeTestConfigLayer({ trading: { mode: "live" } });
+  const configLayer = makeTestConfigLayer({
+    trading: { mode: "live", whaleHunt: { ...DEFAULT_WHALE_HUNT_CONFIG } },
+    ...(opts.configOverrides ?? {}),
+  });
 
   const fsLayer = Layer.succeed(FileSystem.FileSystem, {
     exists: (path: string) => Effect.succeed(files.has(path)),
@@ -466,6 +486,7 @@ function makeHarness(opts: {
       return executeDualCalls;
     },
     seenConditionIds,
+    capturedSignals,
   };
 }
 
@@ -475,6 +496,10 @@ describe("TradingEngine orchestration", () => {
     mockState.emitByStrategy.efficiency = false;
     mockState.emitByStrategy["whale-hunt"] = false;
     mockState.emitByStrategy.momentum = false;
+    mockState.signalAgeMsByStrategy.arb = 0;
+    mockState.signalAgeMsByStrategy.efficiency = 0;
+    mockState.signalAgeMsByStrategy["whale-hunt"] = 0;
+    mockState.signalAgeMsByStrategy.momentum = 0;
   });
 
   it("enforces per-window entry caps and resets on new window", async () => {
@@ -575,6 +600,77 @@ describe("TradingEngine orchestration", () => {
         const trades = yield* engine.tracker.getTrades(50);
         const cancelled = trades.filter((t: TradeRecord) => t.status === "cancelled");
         expect(cancelled.length).toBeGreaterThan(0);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("clamps order price to bestAsk when bestAsk is below strategy maxPrice", async () => {
+    // Strategy emits maxPrice=0.55, but bestAsk=0.52 — order should be placed at 0.52
+    const harness = makeHarness({ window1: "cond-clamp", orderBookAsk: 0.52 });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        yield* engine.setTradingActive(true);
+        yield* TestClock.adjust("1 second");
+
+        expect(harness.capturedSignals.length).toBeGreaterThan(0);
+        for (const sig of harness.capturedSignals) {
+          expect(sig.maxPrice).toBe(0.52);
+        }
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("blocks whale-hunt execution near expiry when observed latency is high", async () => {
+    mockState.emitByStrategy.arb = false;
+    mockState.emitByStrategy["whale-hunt"] = true;
+    mockState.signalAgeMsByStrategy["whale-hunt"] = 2000;
+
+    const harness = makeHarness({
+      window1: "cond-whale-latency",
+      windowEndOffsetMs: 5000,
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        yield* engine.setTradingActive(true);
+        yield* TestClock.adjust("2 seconds");
+
+        expect(harness.executeSignalCalls).toBe(0);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("uses runtime whale-hunt guard config to allow execution when thresholds are relaxed", async () => {
+    mockState.emitByStrategy.arb = false;
+    mockState.emitByStrategy["whale-hunt"] = true;
+    mockState.signalAgeMsByStrategy["whale-hunt"] = 2000;
+
+    const harness = makeHarness({
+      window1: "cond-whale-config-override",
+      windowEndOffsetMs: 5000,
+      configOverrides: {
+        trading: {
+          mode: "live",
+          whaleHunt: {
+            ...DEFAULT_WHALE_HUNT_CONFIG,
+            latencyMultiplier: 1,
+            latencyBufferMs: 0,
+            minRequiredLeadMs: 1000,
+          },
+        },
+      },
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        yield* engine.setTradingActive(true);
+        yield* TestClock.adjust("2 seconds");
+
+        expect(harness.executeSignalCalls).toBeGreaterThan(0);
       }).pipe(Effect.scoped, Effect.provide(harness.layer)),
     );
   });

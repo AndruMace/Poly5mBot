@@ -4,6 +4,7 @@ import { makeStrategyBase, makeInitialState, type Strategy, type StrategyInterna
 import type { MarketContext, Signal } from "../types.js";
 
 const DEFAULT_CONFIG: Record<string, number> = {
+  minWindowElapsedSec: 180,
   minProfitBps: 8,
   tradeSize: 20,
   maxEntriesPerWindow: 2,
@@ -22,6 +23,8 @@ export const makeEfficiencyStrategy = Effect.gen(function* () {
     Effect.gen(function* () {
       const s = yield* Ref.get(ref);
       if (!ctx.currentWindow) return null;
+      const elapsedSec = ctx.windowElapsedMs / 1000;
+      if (elapsedSec < s.config["minWindowElapsedSec"]!) return null;
 
       const { bestAskUp, bestAskDown } = ctx.orderBook;
       if (bestAskUp === null || bestAskDown === null) return null;

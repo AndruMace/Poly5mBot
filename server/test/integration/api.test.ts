@@ -11,6 +11,7 @@ import { PostgresStorage } from "../../src/storage/postgres.js";
 import { ObservabilityStore } from "../../src/observability/store.js";
 import { MarketOrchestrator } from "../../src/markets/orchestrator.js";
 import { AppConfig } from "../../src/config.js";
+import { DEFAULT_WHALE_HUNT_CONFIG } from "../../src/strategies/whale-hunt-config.js";
 import type { AppConfigShape } from "../../src/config.js";
 import type { WSStatusSnapshot } from "../../src/types.js";
 
@@ -39,8 +40,10 @@ const baseConfig: AppConfigShape = {
     staleDataMs: 5000,
     maxSpreadCents: 15,
     maxSignalAgeMs: 2000,
+    maxWindowSpend: 15,
+    maxWindowTrades: 6,
   },
-  trading: { mode: "shadow" },
+  trading: { mode: "shadow", whaleHunt: { ...DEFAULT_WHALE_HUNT_CONFIG } },
   redemption: {
     enabled: false,
     intervalMs: 45000,

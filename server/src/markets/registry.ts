@@ -1,3 +1,5 @@
+import type { WhaleHuntConfigOverrides } from "../strategies/whale-hunt-config.js";
+
 // ── Market asset configuration ──
 // Each market (BTC, XRP, …) is described by one of these configs.
 // Adding a new market is a matter of creating a MarketAssetConfig and
@@ -48,4 +50,6 @@ export interface MarketAssetConfig {
     maxWindowSpend: number;
     maxWindowTrades: number;
   }>;
+  /** Optional per-market whale-hunt runtime overrides (merged over global defaults). */
+  readonly whaleHuntOverrides?: WhaleHuntConfigOverrides;
 }

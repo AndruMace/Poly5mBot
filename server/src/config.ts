@@ -1,4 +1,9 @@
 import { Config, Effect, Layer, Redacted } from "effect";
+import {
+  DEFAULT_WHALE_HUNT_CONFIG,
+  normalizeWhaleHuntConfig,
+  type WhaleHuntConfig,
+} from "./strategies/whale-hunt-config.js";
 
 export interface AppConfigShape {
   readonly poly: {
@@ -30,6 +35,7 @@ export interface AppConfigShape {
   };
   readonly trading: {
     readonly mode: "live" | "shadow";
+    readonly whaleHunt: WhaleHuntConfig;
   };
   readonly redemption: {
     readonly enabled: boolean;
@@ -81,6 +87,27 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
     const maxWindowTrades = yield* Config.integer("MAX_WINDOW_TRADES").pipe(Config.withDefault(6));
 
     const tradingMode = yield* Config.literal("live", "shadow")("TRADING_MODE").pipe(Config.withDefault("shadow" as const));
+    const whaleHuntOrderBookBandPct = yield* Config.number("WHALE_HUNT_ORDERBOOK_BAND_PCT").pipe(
+      Config.withDefault(DEFAULT_WHALE_HUNT_CONFIG.orderBookBandPct),
+    );
+    const whaleHuntMaxAdverseImbalance = yield* Config.number("WHALE_HUNT_MAX_ADVERSE_IMBALANCE").pipe(
+      Config.withDefault(DEFAULT_WHALE_HUNT_CONFIG.maxAdverseImbalance),
+    );
+    const whaleHuntImbalanceWeight = yield* Config.number("WHALE_HUNT_IMBALANCE_WEIGHT").pipe(
+      Config.withDefault(DEFAULT_WHALE_HUNT_CONFIG.imbalanceWeight),
+    );
+    const whaleHuntLatencyMultiplier = yield* Config.number("WHALE_HUNT_LATENCY_MULTIPLIER").pipe(
+      Config.withDefault(DEFAULT_WHALE_HUNT_CONFIG.latencyMultiplier),
+    );
+    const whaleHuntLatencyBufferMs = yield* Config.integer("WHALE_HUNT_LATENCY_BUFFER_MS").pipe(
+      Config.withDefault(DEFAULT_WHALE_HUNT_CONFIG.latencyBufferMs),
+    );
+    const whaleHuntMinRequiredLeadMs = yield* Config.integer("WHALE_HUNT_MIN_REQUIRED_LEAD_MS").pipe(
+      Config.withDefault(DEFAULT_WHALE_HUNT_CONFIG.minRequiredLeadMs),
+    );
+    const whaleHuntMinLiveSubmittedForSizing = yield* Config.integer("WHALE_HUNT_MIN_LIVE_SUBMITTED_FOR_SIZING").pipe(
+      Config.withDefault(DEFAULT_WHALE_HUNT_CONFIG.minLiveSubmittedForSizing),
+    );
 
     const redeemEnabled = yield* Config.string("AUTO_REDEEM").pipe(
       Config.withDefault("true"),
@@ -141,7 +168,18 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
         maxWindowSpend,
         maxWindowTrades,
       },
-      trading: { mode: tradingMode },
+      trading: {
+        mode: tradingMode,
+        whaleHunt: normalizeWhaleHuntConfig({
+          orderBookBandPct: whaleHuntOrderBookBandPct,
+          maxAdverseImbalance: whaleHuntMaxAdverseImbalance,
+          imbalanceWeight: whaleHuntImbalanceWeight,
+          latencyMultiplier: whaleHuntLatencyMultiplier,
+          latencyBufferMs: whaleHuntLatencyBufferMs,
+          minRequiredLeadMs: whaleHuntMinRequiredLeadMs,
+          minLiveSubmittedForSizing: whaleHuntMinLiveSubmittedForSizing,
+        }),
+      },
       redemption: {
         enabled: redeemEnabled,
         intervalMs: redeemIntervalMs,
