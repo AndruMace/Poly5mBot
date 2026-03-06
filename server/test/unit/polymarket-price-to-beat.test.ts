@@ -108,4 +108,23 @@ describe("polymarket price-to-beat resolver", () => {
     expect(result.source).toBe("unavailable");
     expect(result.reason).toBe("ptb_not_found_in_page");
   });
+
+  it("returns unavailable when page fetch times out", async () => {
+    globalThis.fetch = vi.fn().mockImplementation(
+      (_url: string, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal | undefined;
+          signal?.addEventListener("abort", () => {
+            const err = new Error("Aborted");
+            (err as any).name = "AbortError";
+            reject(err);
+          });
+        }),
+    ) as unknown as typeof fetch;
+
+    const result = await fetchPriceToBeatFromPolymarketPage("btc-updown-5m-timeout", undefined, 10);
+    expect(result.priceToBeat).toBe(null);
+    expect(result.source).toBe("unavailable");
+    expect(result.reason).toContain("fetch_timeout_10ms");
+  });
 });

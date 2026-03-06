@@ -280,6 +280,12 @@ export interface LatencyMetrics {
   lastSampleAt: number;
   priceDataAgeMs: number;
   orderbookAgeMs: number;
+  ptbLookupLastMs?: number;
+  ptbLookupAvgMs?: number;
+  ptbLookupSamples?: number;
+  ptbWindowToExactLastMs?: number;
+  ptbWindowToExactAvgMs?: number;
+  ptbWindowToExactSamples?: number;
 }
 
 export interface ReconciliationStrategyMetrics {

@@ -245,6 +245,8 @@ function makeHarness(opts: {
   /** Override window end offset from now (default: 240_000ms) */
   windowEndOffsetMs?: number;
   configOverrides?: Partial<AppConfigShape>;
+  /** Simulate persistence write failures after first boot write succeeds */
+  failFileWrites?: boolean;
 }): EngineHarness {
   let marketCalls = 0;
   let executeSignalCalls = 0;
@@ -252,6 +254,7 @@ function makeHarness(opts: {
   const seenConditionIds: string[] = [];
   const capturedSignals: Signal[] = [];
   const files = opts.files ?? new Map<string, string>();
+  let writeCount = 0;
   const askPrice = opts.orderBookAsk ?? 0.55;
 
   const mkWindow = (conditionId: string): MarketWindow => {
@@ -447,13 +450,16 @@ function makeHarness(opts: {
         ? Effect.succeed(files.get(path)!)
         : Effect.fail(new Error(`missing ${path}`)),
     writeFileString: (path: string, content: string, options?: { flag?: string }) =>
-      Effect.sync(() => {
-        if (options?.flag === "a") {
-          files.set(path, (files.get(path) ?? "") + content);
-          return;
-        }
-        files.set(path, content);
-      }),
+      (opts.failFileWrites && writeCount > 0)
+        ? Effect.fail(new Error("simulated write failure"))
+        : Effect.sync(() => {
+            writeCount += 1;
+            if (options?.flag === "a") {
+              files.set(path, (files.get(path) ?? "") + content);
+              return;
+            }
+            files.set(path, content);
+          }),
     makeDirectory: (_path: string, _options?: unknown) => Effect.void,
   } as any);
 
@@ -704,6 +710,75 @@ describe("TradingEngine orchestration", () => {
         const arb = states.find((s) => s.name === "arb");
         expect(arb?.config.tradeSize).toBe(42);
       }).pipe(Effect.scoped, Effect.provide(second.layer)),
+    );
+  });
+
+  it("persists strategy regime filter across engine restart", async () => {
+    const files = new Map<string, string>();
+    const first = makeHarness({ window1: "cond-filter-a", files });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const result = yield* engine.updateStrategyRegimeFilter("arb", {
+          allowedTrend: ["chop", "up"],
+        });
+        expect(result.status).toBe("ok");
+
+        const states = yield* engine.getStrategyStates;
+        const arb = states.find((s) => s.name === "arb");
+        expect(arb?.regimeFilter.allowedTrend).toEqual(["chop", "up"]);
+      }).pipe(Effect.scoped, Effect.provide(first.layer)),
+    );
+
+    const second = makeHarness({ window1: "cond-filter-b", files });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const states = yield* engine.getStrategyStates;
+        const arb = states.find((s) => s.name === "arb");
+        expect(arb?.regimeFilter.allowedTrend).toEqual(["chop", "up"]);
+      }).pipe(Effect.scoped, Effect.provide(second.layer)),
+    );
+  });
+
+  it("does not overwrite persisted whale-hunt config with runtime defaults on restart", async () => {
+    const files = new Map<string, string>();
+    const first = makeHarness({ window1: "cond-wh-a", files });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const result = yield* engine.updateStrategyConfig("whale-hunt", {
+          latencyMultiplier: 1.33,
+        });
+        expect(result.status).toBe("ok");
+      }).pipe(Effect.scoped, Effect.provide(first.layer)),
+    );
+
+    const second = makeHarness({ window1: "cond-wh-b", files });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const states = yield* engine.getStrategyStates;
+        const whale = states.find((s) => s.name === "whale-hunt");
+        expect(whale?.config.latencyMultiplier).toBe(1.33);
+      }).pipe(Effect.scoped, Effect.provide(second.layer)),
+    );
+  });
+
+  it("returns persist_failed when strategy state cannot be written", async () => {
+    const harness = makeHarness({
+      window1: "cond-persist-fail",
+      failFileWrites: true,
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const result = yield* engine.updateStrategyConfig("arb", { tradeSize: 77 });
+        expect(result.status).toBe("persist_failed");
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
     );
   });
 });

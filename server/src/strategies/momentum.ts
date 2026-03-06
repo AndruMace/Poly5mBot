@@ -5,11 +5,11 @@ import type { MarketContext, Signal, PricePoint } from "../types.js";
 
 const DEFAULT_CONFIG: Record<string, number> = {
   rsiPeriod: 14,
-  rsiOverbought: 62,
-  rsiOversold: 38,
+  rsiOverbought: 66,
+  rsiOversold: 34,
   minWindowElapsedSec: 180,
   maxWindowElapsedSec: 270,
-  minPriceMovePct: 0.03,
+  minPriceMovePct: 0.05,
   maxSharePrice: 0.65,
   tradeSize: 8,
   maxEntriesPerWindow: 2,
@@ -19,7 +19,7 @@ const DEFAULT_CONFIG: Record<string, number> = {
 
 const DEFAULT_REGIME_FILTER = {
   allowedVolatility: ["low" as const, "normal" as const, "high" as const],
-  allowedTrend: ["strong_up" as const, "up" as const, "down" as const, "strong_down" as const],
+  allowedTrend: ["strong_up" as const, "up" as const, "chop" as const, "down" as const, "strong_down" as const],
 };
 
 export const makeMomentumStrategy = Effect.gen(function* () {

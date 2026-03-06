@@ -148,7 +148,7 @@ export const activeMarketIdRx = Rx.make(
   new URLSearchParams(window.location.search).get("market") ?? "btc"
 );
 export const enabledMarketsRx = Rx.make<EnabledMarket[]>([{ id: "btc", displayName: "BTC" }]);
-export const perMarketStateRx = Rx.make<Record<string, PerMarketSnapshot>>({});
+export const perMarketStateRx = Rx.keepAlive(Rx.make<Record<string, PerMarketSnapshot>>({}));
 
 // Writable Rx atoms
 export const connectedRx = Rx.make(false);
@@ -163,7 +163,7 @@ export const currentMarketRx = Rx.make((get: Rx.Context) =>
 );
 export const orderBookRx = Rx.make<OrderBookState>({ ...emptyOrderBook });
 export const strategiesRx = Rx.make<StrategyState[]>([]);
-export const tradesRx = Rx.make<TradeRecord[]>([]);
+export const tradesRx = Rx.keepAlive(Rx.make<TradeRecord[]>([]));
 export const pnlRx = Rx.make<PnLSummary>({ ...emptyPnl });
 export const shadowPnlRx = Rx.make<PnLSummary>({ ...emptyPnl });
 export const regimeRx = Rx.make<RegimeState>({ ...defaultRegime });

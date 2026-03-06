@@ -1,4 +1,4 @@
-import { Effect, Ref, Stream, SubscriptionRef, Schedule } from "effect";
+import { Duration, Effect, Ref, Stream, SubscriptionRef } from "effect";
 import { binanceFeed } from "./binance.js";
 import { bybitFeed } from "./bybit.js";
 import { coinbaseFeed } from "./coinbase.js";
@@ -6,11 +6,13 @@ import { krakenFeed } from "./kraken.js";
 import { bitstampFeed } from "./bitstamp.js";
 import { okxFeed } from "./okx.js";
 import { computeOracleEstimate } from "./oracle.js";
+import { fetchExchangeWeights, DEFAULT_EXCHANGE_WEIGHTS } from "./volume-weights.js";
 import type { PricePoint, FeedHealthSnapshot, FeedSourceHealth } from "../types.js";
 
 const STALE_MS = 5000;
 const DOWN_MS = 15000;
 const MAX_HISTORY = 3000;
+const ORACLE_EMA_ALPHA = 0.2;
 
 interface FeedState {
   readonly latestByExchange: Map<string, PricePoint>;
@@ -35,21 +37,48 @@ export class FeedService extends Effect.Service<FeedService>()("FeedService", {
   scoped: Effect.gen(function* () {
     const stateRef = yield* SubscriptionRef.make<FeedState>(initialFeedState);
     const historyRef = yield* Ref.make<PricePoint[]>([]);
+    const weightsRef = yield* Ref.make<Record<string, number>>(DEFAULT_EXCHANGE_WEIGHTS);
+
+    // Initial fetch with 8s timeout, fall back to defaults
+    yield* fetchExchangeWeights.pipe(
+      Effect.timeout(Duration.seconds(8)),
+      Effect.orElse(() => Effect.succeed(DEFAULT_EXCHANGE_WEIGHTS)),
+      Effect.tap((w) => Ref.set(weightsRef, w)),
+      Effect.tap(() => Effect.log("[FeedService] Exchange weights updated")),
+      Effect.catchAll(() => Effect.void),
+    );
+
+    // Hourly refresh fiber
+    yield* fetchExchangeWeights.pipe(
+      Effect.tap((w) => Ref.set(weightsRef, w)),
+      Effect.tap(() => Effect.log("[FeedService] Exchange weights updated")),
+      Effect.catchAll(() => Effect.void),
+      Effect.delay(Duration.hours(1)),
+      Effect.forever,
+      Effect.forkScoped,
+    );
 
     const updatePrice = (point: PricePoint) =>
       Effect.gen(function* () {
+        const weights = yield* Ref.get(weightsRef);
         yield* SubscriptionRef.update(stateRef, (s) => {
           const newLatest = new Map(s.latestByExchange);
           newLatest.set(point.exchange, point);
           const newConn = new Map(s.connectionByExchange);
           newConn.set(point.exchange, true);
-          const oracle = computeOracleEstimate(newLatest);
+          const oracle = computeOracleEstimate(newLatest, weights);
+          const rawOracle = oracle.price;
+          const smoothedOracle = rawOracle > 0
+            ? (s.oracleEstimate > 0
+                ? ORACLE_EMA_ALPHA * rawOracle + (1 - ORACLE_EMA_ALPHA) * s.oracleEstimate
+                : rawOracle)
+            : s.oracleEstimate;
           return {
             ...s,
             latestByExchange: newLatest,
             connectionByExchange: newConn,
-            oracleEstimate: oracle.price > 0 ? oracle.price : s.oracleEstimate,
-            oracleTimestamp: oracle.price > 0 ? Date.now() : s.oracleTimestamp,
+            oracleEstimate: smoothedOracle,
+            oracleTimestamp: rawOracle > 0 ? Date.now() : s.oracleTimestamp,
             oracleSourceCount: oracle.sourceCount,
           };
         });

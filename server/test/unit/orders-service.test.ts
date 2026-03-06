@@ -245,6 +245,60 @@ describe("OrderService", () => {
     expect(trades.every((t) => t.status === "submitted")).toBe(true);
   });
 
+  it("quantizes single-leg amounts to satisfy maker 2dp / taker 4dp constraints (momentum DOWN)", async () => {
+    const cases: Array<{ size: number; maxPrice: number }> = [
+      { size: 12.37, maxPrice: 0.671 },
+      { size: 9.99, maxPrice: 0.533 },
+      { size: 20, maxPrice: 0.5799 },
+      { size: 6.41, maxPrice: 0.487 },
+      { size: 25, maxPrice: 0.631 },
+    ];
+    const submitted: Array<{ tokenID: string; price: number; size: number }> = [];
+    const client = {
+      createAndPostOrder: async (order: { tokenID: string; price: number; size: number }) => {
+        const makerCents = order.price * order.size * 100;
+        const takerUnits = order.size * 10_000;
+        const makerIs2Dp = Math.abs(makerCents - Math.round(makerCents)) < 1e-9;
+        const takerIs4Dp = Math.abs(takerUnits - Math.round(takerUnits)) < 1e-9;
+        if (!makerIs2Dp || !takerIs4Dp) {
+          throw {
+            message:
+              "invalid amounts, the market buy orders maker amount supports a max accuracy of 2 decimals, taker amount a max of 4 decimals",
+          };
+        }
+        submitted.push(order);
+        return { orderID: `single-${submitted.length}`, status: "accepted" };
+      },
+    };
+
+    await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        for (const c of cases) {
+          const rec = yield* orders.executeSignal(
+            makeSignal({
+              strategy: "momentum",
+              side: "DOWN",
+              size: c.size,
+              maxPrice: c.maxPrice,
+            }),
+            "up-token",
+            "down-token",
+            Date.now() + 60_000,
+            `cond-single-${c.size}-${c.maxPrice}`,
+            100_250,
+          );
+          expect(rec).not.toBeNull();
+          expect(rec?.status).toBe("submitted");
+        }
+      }),
+      client,
+    );
+
+    expect(submitted.length).toBe(cases.length);
+    expect(submitted.every((o) => o.tokenID === "down-token")).toBe(true);
+  });
+
   it("normalizes order status from fallback client methods", async () => {
     const client = {
       getOrderById: async () => ({

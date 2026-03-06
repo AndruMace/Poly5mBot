@@ -1,4 +1,5 @@
 import type { PriceToBeatSource } from "../types.js";
+import { fetchWithTimeout } from "./fetch.js";
 
 export interface PriceToBeatLookupResult {
   readonly priceToBeat: number | null;
@@ -6,6 +7,8 @@ export interface PriceToBeatLookupResult {
   readonly observedAt?: number;
   readonly reason?: string;
 }
+
+const PTB_PAGE_FETCH_TIMEOUT_MS = 3_000;
 
 function parseIsoToMs(value: string | undefined): number | null {
   if (!value) return null;
@@ -93,6 +96,7 @@ function findDomPriceToBeat(html: string): number | null {
 export async function fetchPriceToBeatFromPolymarketPage(
   slug: string,
   windowStartMs?: number,
+  timeoutMs = PTB_PAGE_FETCH_TIMEOUT_MS,
 ): Promise<PriceToBeatLookupResult> {
   if (!slug) {
     return {
@@ -103,13 +107,17 @@ export async function fetchPriceToBeatFromPolymarketPage(
   }
 
   try {
-    const res = await fetch(`https://polymarket.com/event/${slug}`, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
+    const res = await fetchWithTimeout(
+      `https://polymarket.com/event/${slug}`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5",
+        },
       },
-    });
+      timeoutMs,
+    );
     if (!res.ok) {
       return {
         priceToBeat: null,

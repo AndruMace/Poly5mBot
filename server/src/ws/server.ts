@@ -2,7 +2,6 @@ import { WebSocketServer, WebSocket } from "ws";
 import type http from "http";
 import { Effect, Queue, Chunk, Schedule, Runtime } from "effect";
 import { TradingEngine } from "../engine/engine.js";
-import { FeedService } from "../feeds/manager.js";
 import { PolymarketClient } from "../polymarket/client.js";
 import { EventBus } from "../engine/event-bus.js";
 import { ObservabilityStore } from "../observability/store.js";
@@ -39,7 +38,6 @@ function broadcast(wss: WebSocketServer, msg: WSMessage): void {
 export class WebSocketService extends Effect.Service<WebSocketService>()("WebSocketService", {
   scoped: Effect.gen(function* () {
     const engine = yield* TradingEngine;
-    const feedService = yield* FeedService;
     const polyClient = yield* PolymarketClient;
     const eventBus = yield* EventBus;
     const observability = yield* ObservabilityStore;
@@ -214,17 +212,18 @@ export class WebSocketService extends Effect.Service<WebSocketService>()("WebSoc
               marketId: mkt.marketId,
               timestamp: Date.now(),
             });
+            const feedHealth = yield* mkt.getFeedHealth;
+            broadcast(wss, {
+              type: "feedHealth",
+              data: feedHealth,
+              marketId: mkt.marketId,
+              timestamp: Date.now(),
+            });
           }
-          const [feedHealth, connected, walletAddr] = yield* Effect.all([
-            feedService.getFeedHealth,
+          const [connected, walletAddr] = yield* Effect.all([
             polyClient.isConnected,
             polyClient.getWalletAddress,
           ]);
-          broadcast(wss, {
-            type: "feedHealth",
-            data: feedHealth,
-            timestamp: Date.now(),
-          });
           if (connected !== lastExchangeConnected || walletAddr !== lastWalletAddress) {
             lastExchangeConnected = connected;
             lastWalletAddress = walletAddr;

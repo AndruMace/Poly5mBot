@@ -98,7 +98,7 @@ const fakeEngineLayer = Layer.succeed(TradingEngine, {
   updateStrategyConfig: (_: string, __: Record<string, unknown>) =>
     Effect.succeed({ status: "ok" as const }),
   updateStrategyRegimeFilter: (_: string, __: Record<string, unknown>) =>
-    Effect.succeed("ok" as const),
+    Effect.succeed({ status: "ok" as const }),
 } as any);
 
 const fakeFeedLayer = Layer.succeed(FeedService, {

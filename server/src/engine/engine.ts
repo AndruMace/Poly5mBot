@@ -93,6 +93,12 @@ const SHADOW_SIM_OPTS_BY_STRATEGY: Record<string, SimulatorOpts> = {
   "orderflow-imbalance": { slippageBps: 5, fillProbability: 0.82, minLiquidityPct: 0.08 },
 };
 
+function settlementPendingPollIntervalMs(pendingMs: number): number {
+  if (pendingMs > 5 * 60_000) return 60_000;
+  if (pendingMs > 60_000) return 20_000;
+  return 10_000;
+}
+
 const STRATEGY_STATE_DIR = "data";
 const STRATEGY_STATE_FILE = "data/strategy-state.json";
 const MARKET_ID = "btc";
@@ -105,6 +111,7 @@ interface PersistedStrategyStateEntry {
 }
 
 type PersistedStrategyState = Record<string, PersistedStrategyStateEntry>;
+type StrategyStateSchema = "market_scoped" | "legacy";
 
 export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngine", {
   scoped: Effect.gen(function* () {
@@ -144,14 +151,44 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       config.trading.whaleHunt,
       marketConfig?.whaleHuntOverrides,
     );
+    const strategyStateSchema = yield* Effect.gen(function* () {
+      if (!usePostgresStorage) return null as StrategyStateSchema | null;
+      const rows = yield* postgres!.query<{ has_market_id: boolean }>(
+        `select exists(
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'strategy_state'
+            and column_name = 'market_id'
+        ) as has_market_id`,
+      );
+      return rows[0]?.has_market_id ? "market_scoped" as const : "legacy" as const;
+    }).pipe(
+      Effect.catchAll((err) => {
+        if (config.storage.backend === "postgres") {
+          return Effect.fail(new Error(`${ENGINE_LOG_PREFIX} Failed to inspect strategy_state schema: ${String(err)}`));
+        }
+        return Effect.logWarning(
+          `${ENGINE_LOG_PREFIX} Failed to inspect strategy_state schema; falling back to file strategy state: ${String(err)}`,
+        ).pipe(Effect.as(null as StrategyStateSchema | null));
+      }),
+    );
 
     const readPersistedStrategyState = Effect.gen(function* () {
       const fromDb: PersistedStrategyState = {};
-      if (usePostgresStorage) {
+      if (usePostgresStorage && strategyStateSchema !== null) {
         const rows = yield* postgres!.query<{ strategy_name: string; payload: unknown }>(
-          "select strategy_name, payload from strategy_state where market_id = $1",
-          [MARKET_ID],
-        ).pipe(Effect.catchAll(() => Effect.succeed([])));
+          strategyStateSchema === "market_scoped"
+            ? "select strategy_name, payload from strategy_state where market_id = $1"
+            : "select strategy_name, payload from strategy_state",
+          strategyStateSchema === "market_scoped" ? [MARKET_ID] : [],
+        ).pipe(
+          Effect.catchAll((err) =>
+            Effect.logError(`${ENGINE_LOG_PREFIX} Failed to read strategy state from database: ${String(err)}`).pipe(
+              Effect.as([]),
+            ),
+          ),
+        );
         for (const row of rows) {
           if (typeof row.strategy_name === "string" && row.strategy_name.length > 0) {
             fromDb[row.strategy_name] =
@@ -198,27 +235,55 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           ] as const),
         ),
       );
-
       const payload = Object.fromEntries(entries) as PersistedStrategyState;
+
       if (useFileStorage) {
         yield* fs.makeDirectory(STRATEGY_STATE_DIR, { recursive: true }).pipe(
           Effect.catchAll(() => Effect.void),
         );
-        yield* fs.writeFileString(STRATEGY_STATE_FILE, JSON.stringify(payload, null, 2));
+        const fileErr = yield* fs.writeFileString(STRATEGY_STATE_FILE, JSON.stringify(payload, null, 2)).pipe(
+          Effect.as(null as string | null),
+          Effect.catchAll((err) => Effect.succeed(String(err))),
+        );
+        if (fileErr) {
+          yield* Effect.logError(`${ENGINE_LOG_PREFIX} Failed to persist strategy states to file: ${fileErr}`);
+          return { ok: false as const, error: fileErr };
+        }
       }
       if (usePostgresStorage) {
-        yield* Effect.forEach(
+        if (strategyStateSchema === null) {
+          return {
+            ok: false as const,
+            error: "strategy_state schema unavailable while postgres storage is enabled",
+          };
+        }
+        const dbErr = yield* Effect.forEach(
           Object.entries(payload),
           ([name, entry]) =>
-            postgres!.execute(
-              `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
-               values ($1, $2, $3::jsonb, $4)
-               on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
-              [MARKET_ID, name, JSON.stringify(entry ?? {}), Date.now()],
-            ).pipe(Effect.catchAll(() => Effect.void)),
+            strategyStateSchema === "market_scoped"
+              ? postgres!.execute(
+                  `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
+                   values ($1, $2, $3::jsonb, $4)
+                   on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+                  [MARKET_ID, name, JSON.stringify(entry ?? {}), Date.now()],
+                )
+              : postgres!.execute(
+                  `insert into strategy_state (strategy_name, payload, updated_at_ms)
+                   values ($1, $2::jsonb, $3)
+                   on conflict (strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+                  [name, JSON.stringify(entry ?? {}), Date.now()],
+                ),
           { discard: true },
+        ).pipe(
+          Effect.as(null as string | null),
+          Effect.catchAll((err) => Effect.succeed(String(err))),
         );
+        if (dbErr) {
+          yield* Effect.logError(`${ENGINE_LOG_PREFIX} Failed to persist strategy states to postgres: ${dbErr}`);
+          return { ok: false as const, error: dbErr };
+        }
       }
+      return { ok: true as const };
     });
 
     const applyPersistedStrategyState = (persisted: PersistedStrategyState) =>
@@ -257,10 +322,18 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       }
     });
 
+    yield* applyWhaleHuntRuntimeConfig;
     const persistedStrategyState = yield* readPersistedStrategyState;
     yield* applyPersistedStrategyState(persistedStrategyState);
-    yield* applyWhaleHuntRuntimeConfig;
-    yield* persistStrategyStates;
+    const bootPersistResult = yield* persistStrategyStates;
+    if (!bootPersistResult.ok) {
+      if (config.storage.backend === "postgres") {
+        return yield* Effect.fail(new Error(`${ENGINE_LOG_PREFIX} Startup strategy state persist failed: ${bootPersistResult.error}`));
+      }
+      yield* Effect.logWarning(
+        `${ENGINE_LOG_PREFIX} Startup strategy state persist failed: ${bootPersistResult.error}`,
+      );
+    }
 
     const stateRef = yield* Ref.make<EngineState>(initialEngineState(config.trading.mode));
 
@@ -539,6 +612,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       }).pipe(Effect.catchAll(() => Effect.void));
 
     const settlementPendingLastLog = new Map<string, number>();
+    const settlementPendingLastCheck = new Map<string, number>();
 
     const pollMarkets = makeMarketPoller({
       stateRef,
@@ -598,6 +672,12 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           now >= trade.windowEnd,
       );
       for (const trade of expired) {
+        const pendingMs = now - trade.windowEnd;
+        const pollIntervalMs = settlementPendingPollIntervalMs(pendingMs);
+        const lastCheck = settlementPendingLastCheck.get(trade.id) ?? 0;
+        if (now - lastCheck < pollIntervalMs) continue;
+        settlementPendingLastCheck.set(trade.id, now);
+
         const tradeShadow = trade.shadow === true;
         const tradeRecord = yield* tracker.getTradeRecordById(trade.id, tradeShadow);
         if (!tradeRecord) continue;
@@ -607,8 +687,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const hasVenueWinner = settlement?.resolved === true && settlement.winnerSide !== null;
         if (!hasVenueWinner) {
           const lastLog = settlementPendingLastLog.get(trade.id) ?? 0;
-          const pendingMs = now - trade.windowEnd;
-          const logInterval = pendingMs > 5 * 60_000 ? 60_000 : pendingMs > 60_000 ? 30_000 : 0;
+          const logInterval = pollIntervalMs;
           if (now - lastLog >= logInterval) {
             settlementPendingLastLog.set(trade.id, now);
             const msg = `${ENGINE_LOG_PREFIX} Settlement pending for ${trade.id} (${trade.conditionId}) — waiting for venue winner`;
@@ -617,6 +696,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           continue;
         }
         settlementPendingLastLog.delete(trade.id);
+        settlementPendingLastCheck.delete(trade.id);
         if (closingAssetPrice > 0) {
           yield* tracker.expireTrade(trade.id, closingAssetPrice, tradeShadow);
         }
@@ -884,7 +964,22 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         if (!s) return false;
         const current = yield* Ref.get(s.stateRef);
         yield* s.setEnabled(!current.enabled);
-        yield* persistStrategyStates;
+        const persisted = yield* persistStrategyStates;
+        if (!persisted.ok) {
+          yield* Effect.logError(`${ENGINE_LOG_PREFIX} Failed to persist strategy toggle for ${name}: ${persisted.error}`);
+          yield* obs({
+            category: "operator",
+            source: "engine",
+            action: "strategy_state_persist_failed",
+            entityType: "strategy",
+            entityId: name,
+            status: "error",
+            strategy: name,
+            mode: null,
+            payload: { operation: "toggle", error: persisted.error ?? "unknown" },
+          });
+          return current.enabled;
+        }
         const states = yield* getStrategyStates;
         yield* emit({ _tag: "Strategies", data: states });
         yield* obs({
@@ -907,7 +1002,24 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         if (!s) return { status: "not_found" as const };
         const result = yield* s.updateConfig(cfg);
         if (result.ok) {
-          yield* persistStrategyStates;
+          const persisted = yield* persistStrategyStates;
+          if (!persisted.ok) {
+            yield* obs({
+              category: "operator",
+              source: "engine",
+              action: "strategy_state_persist_failed",
+              entityType: "strategy",
+              entityId: name,
+              status: "error",
+              strategy: name,
+              mode: null,
+              payload: { operation: "config_update", error: persisted.error ?? "unknown" },
+            });
+            return {
+              status: "persist_failed" as const,
+              error: persisted.error ?? "Failed to persist strategy state",
+            };
+          }
           const states = yield* getStrategyStates;
           yield* emit({ _tag: "Strategies", data: states });
           yield* obs({
@@ -935,9 +1047,26 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const updateStrategyRegimeFilter = (name: string, filter: Record<string, unknown>) =>
       Effect.gen(function* () {
         const s = strategyMap.get(name);
-        if (!s) return "not_found" as const;
+        if (!s) return { status: "not_found" as const };
         yield* s.updateRegimeFilter(filter as any);
-        yield* persistStrategyStates;
+        const persisted = yield* persistStrategyStates;
+        if (!persisted.ok) {
+          yield* obs({
+            category: "operator",
+            source: "engine",
+            action: "strategy_state_persist_failed",
+            entityType: "strategy",
+            entityId: name,
+            status: "error",
+            strategy: name,
+            mode: null,
+            payload: { operation: "regime_filter_update", error: persisted.error ?? "unknown" },
+          });
+          return {
+            status: "persist_failed" as const,
+            error: persisted.error ?? "Failed to persist strategy state",
+          };
+        }
         const states = yield* getStrategyStates;
         yield* emit({ _tag: "Strategies", data: states });
         yield* obs({
@@ -951,7 +1080,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           mode: null,
           payload: { regimeFilter: filter },
         });
-        return "ok" as const;
+        return { status: "ok" as const };
       });
 
     return {

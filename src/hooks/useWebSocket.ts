@@ -649,10 +649,8 @@ export function useWebSocket() {
                 );
                 break;
               case "feedHealth":
-                // feedHealth broadcast is currently BTC-only (from feedService singleton)
-                if (isActive || msgMarketId === "btc") {
-                  registry.set(feedHealthRx, { ...emptyFeedHealth, ...(msg.data as any) });
-                }
+                patchPerMarket(msgMarketId, "feedHealth", { ...emptyFeedHealth, ...(msg.data as any) });
+                if (isActive) registry.set(feedHealthRx, { ...emptyFeedHealth, ...(msg.data as any) });
                 break;
               case "exchangeStatus":
                 registry.set(exchangeConnectedRx, (msg.data as any).exchangeConnected);

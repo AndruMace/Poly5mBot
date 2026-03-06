@@ -107,6 +107,12 @@ const fakeEngine = {
       lastSampleAt: 0,
       priceDataAgeMs: 0,
       orderbookAgeMs: 0,
+      ptbLookupLastMs: 0,
+      ptbLookupAvgMs: 0,
+      ptbLookupSamples: 0,
+      ptbWindowToExactLastMs: 0,
+      ptbWindowToExactAvgMs: 0,
+      ptbWindowToExactSamples: 0,
     },
     reconciliation: {
       updatedAt: 0,
@@ -135,7 +141,7 @@ const fakeEngine = {
   updateStrategyConfig: (_name: string, _cfg: Record<string, unknown>) =>
     Effect.succeed({ status: "ok" as const }),
   updateStrategyRegimeFilter: (_name: string, _filter: Record<string, unknown>) =>
-    Effect.succeed("ok" as const),
+    Effect.succeed({ status: "ok" as const }),
   tracker: {
     getTrades: (_limit = 100) => Effect.succeed([]),
     listTrades: (_query: any) =>
@@ -305,6 +311,7 @@ describe("API handler integration", () => {
     );
     expect(res.status).toBe(200);
     expect((res.body as any).mode).toBe("shadow");
+    expect((res.body as any).metrics.latency.ptbWindowToExactLastMs).toBe(0);
   });
 
   it("rejects unauthenticated control routes", async () => {
@@ -413,5 +420,54 @@ describe("API handler integration", () => {
     expect((res.body as any).ok).toBe(true);
     expect((res.body as any).incident.id).toBe("inc-123");
     expect((res.body as any).incident.resolvedAt).not.toBeNull();
+  });
+
+  it("returns 500 when strategy config persistence fails", async () => {
+    const failingEngine = {
+      ...fakeEngine,
+      updateStrategyConfig: () =>
+        Effect.succeed({
+          status: "persist_failed" as const,
+          error: "simulated persistence failure",
+        }),
+    };
+    const failingEngineLayer = Layer.succeed(TradingEngine, failingEngine as any);
+    const failingMarketEngine = {
+      ...fakeMarketEngine,
+      ...failingEngine,
+      listTrades: fakeEngine.tracker.listTrades,
+      getTradeRecords: (_limit?: number) => Effect.succeed([]),
+      getPnLSummary: fakeEngine.tracker.getSummary(false),
+      getShadowPnLSummary: fakeEngine.tracker.getSummary(true),
+    };
+    const failingOrchestrator = {
+      getEngine: (id: string) => (id === "btc" ? failingMarketEngine : null),
+      getAllEngines: () => [failingMarketEngine],
+      getEnabledMarketIds: () => ["btc"],
+      getEnabledMarkets: () => [{ id: "btc", displayName: "BTC" }],
+    };
+    const failingLayer = Layer.mergeAll(
+      Layer.succeed(AppConfig, baseConfig as any),
+      failingEngineLayer,
+      Layer.succeed(FeedService, fakeFeedService as any),
+      Layer.succeed(PolymarketClient, fakePoly as any),
+      Layer.succeed(NotesStore, fakeNotes as any),
+      Layer.succeed(AccountActivityStore, fakeActivityStore as any),
+      Layer.succeed(CriticalIncidentStore, fakeIncidentStore as any),
+      Layer.succeed(ObservabilityStore, fakeObservabilityStore as any),
+      Layer.succeed(PostgresStorage, fakePostgresStorage as any),
+      Layer.succeed(MarketOrchestrator, failingOrchestrator as any),
+    );
+    const res = await Effect.runPromise(
+      handleRequest(
+        "/api/strategies/arb/config",
+        "POST",
+        { tradeSize: 12 },
+        false,
+        { authorization: "Bearer secret" },
+      ).pipe(Effect.provide(failingLayer)),
+    );
+    expect(res.status).toBe(500);
+    expect((res.body as any).error).toContain("simulated persistence failure");
   });
 });

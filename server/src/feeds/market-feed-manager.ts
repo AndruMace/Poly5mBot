@@ -1,10 +1,12 @@
 import { Effect, Ref, Scope, Stream, SubscriptionRef } from "effect";
 import { computeOracleEstimate } from "./oracle.js";
+import { DEFAULT_EXCHANGE_WEIGHTS } from "./volume-weights.js";
 import type { PricePoint, FeedHealthSnapshot, FeedSourceHealth } from "../types.js";
 
 const STALE_MS = 5000;
 const DOWN_MS = 15000;
 const MAX_HISTORY = 3000;
+const ORACLE_EMA_ALPHA = 0.2;
 
 interface FeedState {
   readonly latestByExchange: Map<string, PricePoint>;
@@ -29,6 +31,7 @@ export function createMarketFeedManager(
   marketId: string,
   feedStreams: Stream.Stream<PricePoint, never, never>[],
   feedNames: string[],
+  weights?: Record<string, number>,
 ): Effect.Effect<MarketFeedInstance, never, Scope.Scope> {
   return Effect.gen(function* () {
     const initialConnections = new Map<string, boolean>(feedNames.map((n) => [n, false]));
@@ -40,21 +43,29 @@ export function createMarketFeedManager(
       oracleSourceCount: 0,
     });
     const historyRef = yield* Ref.make<PricePoint[]>([]);
+    const weightsRef = yield* Ref.make<Record<string, number>>(weights ?? DEFAULT_EXCHANGE_WEIGHTS);
 
     const updatePrice = (point: PricePoint) =>
       Effect.gen(function* () {
+        const w = yield* Ref.get(weightsRef);
         yield* SubscriptionRef.update(stateRef, (s) => {
           const newLatest = new Map(s.latestByExchange);
           newLatest.set(point.exchange, point);
           const newConn = new Map(s.connectionByExchange);
           newConn.set(point.exchange, true);
-          const oracle = computeOracleEstimate(newLatest);
+          const oracle = computeOracleEstimate(newLatest, w);
+          const rawOracle = oracle.price;
+          const smoothedOracle = rawOracle > 0
+            ? (s.oracleEstimate > 0
+                ? ORACLE_EMA_ALPHA * rawOracle + (1 - ORACLE_EMA_ALPHA) * s.oracleEstimate
+                : rawOracle)
+            : s.oracleEstimate;
           return {
             ...s,
             latestByExchange: newLatest,
             connectionByExchange: newConn,
-            oracleEstimate: oracle.price > 0 ? oracle.price : s.oracleEstimate,
-            oracleTimestamp: oracle.price > 0 ? Date.now() : s.oracleTimestamp,
+            oracleEstimate: smoothedOracle,
+            oracleTimestamp: rawOracle > 0 ? Date.now() : s.oracleTimestamp,
             oracleSourceCount: oracle.sourceCount,
           };
         });

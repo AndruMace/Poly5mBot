@@ -46,4 +46,54 @@ describe("window manager PTB behavior", () => {
     expect(emitted[0]?.priceToBeatStatus).toBe("unavailable");
     expect(emitted[0]?.priceToBeatSource).toBe("unavailable");
   });
+
+  it("records PTB resolution latency when an existing window resolves", async () => {
+    const stateRef = await Effect.runPromise(Ref.make(initialEngineState("shadow")));
+    const startTime = Date.now() - 30_000;
+    const endTime = Date.now() + 120_000;
+    let callCount = 0;
+    const unresolved: MarketWindow = {
+      conditionId: "cond-lat",
+      slug: "btc-updown-5m-lat",
+      title: "Latency Window",
+      polymarketUrl: "https://polymarket.com/event/btc-updown-5m-lat",
+      upTokenId: "up",
+      downTokenId: "down",
+      startTime,
+      endTime,
+      priceToBeat: null,
+      priceToBeatStatus: "unavailable",
+      priceToBeatSource: "unavailable",
+      priceToBeatReason: "ptb_not_found_in_page",
+      resolved: false,
+    };
+    const resolved: MarketWindow = {
+      ...unresolved,
+      priceToBeat: 68000.12,
+      priceToBeatStatus: "exact",
+      priceToBeatSource: "polymarket_page_json",
+    };
+    const poll = makeMarketPoller({
+      stateRef,
+      strategies: [{ name: "momentum" } as any],
+      fetchCurrentWindow: Effect.sync(() => {
+        callCount += 1;
+        return callCount < 2 ? unresolved : resolved;
+      }),
+      isConnected: Effect.succeed(false),
+      onNewWindow: () => Effect.void,
+      emit: () => Effect.void,
+      obs: () => Effect.void,
+      refreshOrderBook: () => Effect.void,
+      formatWindowTitle: (w) => w.title ?? "Window",
+      logPrefix: "[Engine:test]",
+    });
+
+    await Effect.runPromise(poll);
+    await Effect.runPromise(poll);
+    const state = await Effect.runPromise(Ref.get(stateRef));
+    expect(state.currentWindow?.priceToBeat).toBe(68000.12);
+    expect(state.metrics.latency.ptbWindowToExactSamples).toBe(1);
+    expect((state.metrics.latency.ptbWindowToExactLastMs ?? 0)).toBeGreaterThanOrEqual(0);
+  });
 });

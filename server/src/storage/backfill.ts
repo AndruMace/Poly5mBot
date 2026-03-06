@@ -166,13 +166,32 @@ async function main() {
     try {
       const raw = await fs.readFile(path.join(dataDir, "strategy-state.json"), "utf8");
       const state = JSON.parse(raw) as Record<string, unknown>;
+      const marketIdRows = await pool.query<{ has_market_id: boolean }>(
+        `select exists(
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'strategy_state'
+            and column_name = 'market_id'
+        ) as has_market_id`,
+      );
+      const hasMarketId = marketIdRows.rows[0]?.has_market_id === true;
       for (const [strategyName, payload] of Object.entries(state)) {
-        await pool.query(
-          `insert into strategy_state (strategy_name, payload, updated_at_ms)
-           values ($1, $2::jsonb, $3)
-           on conflict (strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
-          [strategyName, JSON.stringify(payload ?? {}), Date.now()],
-        );
+        if (hasMarketId) {
+          await pool.query(
+            `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
+             values ($1, $2, $3::jsonb, $4)
+             on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+            ["btc", strategyName, JSON.stringify(payload ?? {}), Date.now()],
+          );
+        } else {
+          await pool.query(
+            `insert into strategy_state (strategy_name, payload, updated_at_ms)
+             values ($1, $2::jsonb, $3)
+             on conflict (strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+            [strategyName, JSON.stringify(payload ?? {}), Date.now()],
+          );
+        }
       }
     } catch {
       /* no strategy state file */

@@ -2,10 +2,16 @@ import { Effect, Ref } from "effect";
 import type { MarketWindow, PriceToBeatSource, PriceToBeatStatus, Side } from "../types.js";
 import { PolymarketError } from "../errors.js";
 import { fetchPriceToBeatFromPolymarketPage } from "./price-to-beat.js";
+import { fetchWithTimeout } from "./fetch.js";
 
 const FIVE_MIN_S = 300;
 const FIVE_MIN_MS = FIVE_MIN_S * 1000;
 const GAMMA_API = "https://gamma-api.polymarket.com";
+const GAMMA_FETCH_TIMEOUT_MS = 2_500;
+const PTB_PAGE_FETCH_TIMEOUT_MS = 3_000;
+const SETTLEMENT_FETCH_TIMEOUT_MS = 2_500;
+const PTB_RETRY_SCHEDULE_MS = [3_000, 6_000, 12_000, 20_000] as const;
+const PTB_RETRY_JITTER_RANGE_MS = 750;
 
 interface GammaEvent {
   id: string;
@@ -38,6 +44,11 @@ interface GammaMarket {
 interface SettlementResult {
   resolved: boolean;
   winnerSide: Side | null;
+}
+
+interface PtbRetryState {
+  attempts: number;
+  lastAttemptAt: number;
 }
 
 function extractPriceToBeat(
@@ -114,7 +125,11 @@ async function resolveWindowPriceToBeat(
     };
   }
 
-  const lookup = await fetchPriceToBeatFromPolymarketPage(window.slug, window.startTime);
+  const lookup = await fetchPriceToBeatFromPolymarketPage(
+    window.slug,
+    window.startTime,
+    PTB_PAGE_FETCH_TIMEOUT_MS,
+  );
   if (lookup.priceToBeat !== null) {
     const resolved: MarketWindow = {
       ...window,
@@ -137,6 +152,20 @@ async function resolveWindowPriceToBeat(
   };
   cache.set(window.conditionId, unresolved);
   return unresolved;
+}
+
+function jitterFromKey(key: string): number {
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return hash % (PTB_RETRY_JITTER_RANGE_MS + 1);
+}
+
+function getPtbRetryCooldownMs(conditionId: string, attempts: number): number {
+  const stepIdx = Math.min(attempts - 1, PTB_RETRY_SCHEDULE_MS.length - 1);
+  const base = PTB_RETRY_SCHEDULE_MS[stepIdx] ?? PTB_RETRY_SCHEDULE_MS[PTB_RETRY_SCHEDULE_MS.length - 1];
+  return base + jitterFromKey(conditionId);
 }
 
 function parseArrayField<T = string>(value: unknown): T[] {
@@ -229,6 +258,7 @@ export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string
       lastFetch: 0,
     });
     const ptbCache = new Map<string, MarketWindow>();
+    const ptbRetryState = new Map<string, PtbRetryState>();
 
     const fetchCurrentWindow = Effect.gen(function* () {
       const now = Date.now();
@@ -249,24 +279,38 @@ export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string
             priceToBeatReason: undefined,
           };
           yield* Ref.set(cacheRef, { window: merged, lastFetch: cache.lastFetch });
+          ptbRetryState.delete(cache.window.conditionId);
           return merged;
         }
 
-        // Rate-limit retries to avoid hammering polymarket.com
-        const lastAttempt = ptbHit?.priceToBeatObservedAt ?? 0;
-        if (lastAttempt && now - lastAttempt < PTB_RETRY_COOLDOWN_MS) {
+        const retryState = ptbRetryState.get(cache.window.conditionId);
+        const retryDelay = retryState
+          ? getPtbRetryCooldownMs(cache.window.conditionId, retryState.attempts)
+          : 0;
+        if (retryState && now - retryState.lastAttemptAt < retryDelay) {
           return cache.window;
         }
 
         // Attempt PTB resolution without re-fetching Gamma
+        const lookupStart = Date.now();
         const resolved = yield* Effect.tryPromise({
           try: () => resolveWindowPriceToBeat(cache.window!, ptbCache),
           catch: () => null,
         }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+        const lookupMs = Date.now() - lookupStart;
         if (resolved && resolved.priceToBeat !== null) {
           yield* Ref.set(cacheRef, { window: resolved, lastFetch: cache.lastFetch });
+          ptbRetryState.delete(cache.window.conditionId);
+          yield* Effect.log(
+            `[Markets:${slugPrefix}] PTB resolved in ${lookupMs}ms (source=${resolved.priceToBeatSource ?? "unknown"})`,
+          );
           return resolved;
         }
+        const nextAttempts = (retryState?.attempts ?? 0) + 1;
+        ptbRetryState.set(cache.window.conditionId, { attempts: nextAttempts, lastAttemptAt: now });
+        yield* Effect.log(
+          `[Markets:${slugPrefix}] PTB unresolved after ${lookupMs}ms (attempt=${nextAttempts}, reason=${resolved?.priceToBeatReason ?? "unknown"})`,
+        );
         return resolved ?? cache.window;
       }
 
@@ -281,7 +325,7 @@ export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string
         const result = yield* Effect.tryPromise({
           try: async () => {
             const url = `${GAMMA_API}/events?slug=${slug}`;
-            const res = await fetch(url);
+            const res = await fetchWithTimeout(url, undefined, GAMMA_FETCH_TIMEOUT_MS);
             if (!res.ok) return null;
             const events = (await res.json()) as GammaEvent[];
             if (!events || events.length === 0) return null;
@@ -338,7 +382,7 @@ function fetchSettlementByConditionImpl(conditionId: string) {
     for (const url of endpoints) {
       const candidate = yield* Effect.tryPromise({
         try: async () => {
-          const res = await fetch(url);
+          const res = await fetchWithTimeout(url, undefined, SETTLEMENT_FETCH_TIMEOUT_MS);
           if (!res.ok) return null;
           const body = (await res.json()) as unknown;
           const markets = Array.isArray(body) ? body : [];
@@ -358,7 +402,6 @@ function fetchSettlementByConditionImpl(conditionId: string) {
 }
 
 const CACHE_TTL = 8_000;
-const PTB_RETRY_COOLDOWN_MS = 30_000;
 
 export class MarketService extends Effect.Service<MarketService>()("MarketService", {
   effect: Effect.gen(function* () {
@@ -367,6 +410,7 @@ export class MarketService extends Effect.Service<MarketService>()("MarketServic
       lastFetch: 0,
     });
     const ptbCache = new Map<string, MarketWindow>();
+    const ptbRetryState = new Map<string, PtbRetryState>();
 
     const fetchCurrentBtc5mWindow = Effect.gen(function* () {
       const now = Date.now();
@@ -387,24 +431,38 @@ export class MarketService extends Effect.Service<MarketService>()("MarketServic
             priceToBeatReason: undefined,
           };
           yield* Ref.set(cacheRef, { window: merged, lastFetch: cache.lastFetch });
+          ptbRetryState.delete(cache.window.conditionId);
           return merged;
         }
 
-        // Rate-limit retries to avoid hammering polymarket.com
-        const lastAttempt = ptbHit?.priceToBeatObservedAt ?? 0;
-        if (lastAttempt && now - lastAttempt < PTB_RETRY_COOLDOWN_MS) {
+        const retryState = ptbRetryState.get(cache.window.conditionId);
+        const retryDelay = retryState
+          ? getPtbRetryCooldownMs(cache.window.conditionId, retryState.attempts)
+          : 0;
+        if (retryState && now - retryState.lastAttemptAt < retryDelay) {
           return cache.window;
         }
 
         // Attempt PTB resolution without re-fetching Gamma
+        const lookupStart = Date.now();
         const resolved = yield* Effect.tryPromise({
           try: () => resolveWindowPriceToBeat(cache.window!, ptbCache),
           catch: () => null,
         }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+        const lookupMs = Date.now() - lookupStart;
         if (resolved && resolved.priceToBeat !== null) {
           yield* Ref.set(cacheRef, { window: resolved, lastFetch: cache.lastFetch });
+          ptbRetryState.delete(cache.window.conditionId);
+          yield* Effect.log(
+            `[Markets] PTB resolved in ${lookupMs}ms (source=${resolved.priceToBeatSource ?? "unknown"})`,
+          );
           return resolved;
         }
+        const nextAttempts = (retryState?.attempts ?? 0) + 1;
+        ptbRetryState.set(cache.window.conditionId, { attempts: nextAttempts, lastAttemptAt: now });
+        yield* Effect.log(
+          `[Markets] PTB unresolved after ${lookupMs}ms (attempt=${nextAttempts}, reason=${resolved?.priceToBeatReason ?? "unknown"})`,
+        );
         return resolved ?? cache.window;
       }
 
@@ -419,7 +477,7 @@ export class MarketService extends Effect.Service<MarketService>()("MarketServic
         const result = yield* Effect.tryPromise({
           try: async () => {
             const url = `${GAMMA_API}/events?slug=${slug}`;
-            const res = await fetch(url);
+            const res = await fetchWithTimeout(url, undefined, GAMMA_FETCH_TIMEOUT_MS);
             if (!res.ok) return null;
             const events = (await res.json()) as GammaEvent[];
             if (!events || events.length === 0) return null;

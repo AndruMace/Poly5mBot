@@ -156,7 +156,7 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
           updated.hourlyPnl += trade.pnl;
           if (trade.outcome === "loss") {
             updated.consecutiveLosses++;
-            updated.windowLosses++;
+            if (trade.conditionId === s.currentWindowId) updated.windowLosses++;
           } else if (trade.outcome === "win") {
             updated.consecutiveLosses = 0;
           }
@@ -374,7 +374,7 @@ export function createRiskManager(
         if (!shadow) {
           updated.dailyPnl += trade.pnl;
           updated.hourlyPnl += trade.pnl;
-          if (trade.outcome === "loss") { updated.consecutiveLosses++; updated.windowLosses++; }
+          if (trade.outcome === "loss") { updated.consecutiveLosses++; if (trade.conditionId === s.currentWindowId) updated.windowLosses++; }
           else if (trade.outcome === "win") { updated.consecutiveLosses = 0; }
         }
         return updated;

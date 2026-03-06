@@ -596,6 +596,9 @@ export const handleRequest = (
         if (!mktEngine) return { status: 404, body: { error: "Market not found" } };
         const result = yield* mktEngine.updateStrategyConfig(name, body ?? {});
         if (result.status === "not_found") return { status: 404, body: { error: "Strategy not found" } };
+        if (result.status === "persist_failed") {
+          return { status: 500, body: { error: result.error ?? "Failed to persist strategy config" } };
+        }
         if (result.status === "invalid") {
           return {
             status: 400,
@@ -619,7 +622,10 @@ export const handleRequest = (
         const mktEngine = resolveEngine(marketIdSeg);
         if (!mktEngine) return { status: 404, body: { error: "Market not found" } };
         const result = yield* mktEngine.updateStrategyRegimeFilter(name, body ?? {});
-        if (result === "not_found") return { status: 404, body: { error: "Strategy not found" } };
+        if (result.status === "not_found") return { status: 404, body: { error: "Strategy not found" } };
+        if (result.status === "persist_failed") {
+          return { status: 500, body: { error: result.error ?? "Failed to persist strategy regime filter" } };
+        }
         yield* audit("api_strategy_regime_filter_update", { marketId: mktEngine.marketId, name, keys: Object.keys(body ?? {}) });
         return { status: 200, body: { ok: true } };
       }

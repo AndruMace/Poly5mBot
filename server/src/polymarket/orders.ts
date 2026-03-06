@@ -11,6 +11,7 @@ const MIN_SHARES = 5;
 const MIN_CLOB_NOTIONAL = 1.0;
 const FOK_LIQUIDITY_BACKOFF_BASE_MS = 8_000;
 const FOK_LIQUIDITY_BACKOFF_MAX_MS = 120_000;
+const SHARE_UNITS_SCALE = 10_000;
 interface FokBackoffState {
   consecutiveFailures: number;
   blockedUntil: number;
@@ -36,67 +37,84 @@ function lcm(a: number, b: number): number {
   return Math.abs(a * b) / gcd(a, b);
 }
 
-function quantizeBuyOrder(notional: number, rawPrice: number) {
-  const price = floorTo(rawPrice, 2);
-  const maxQuote = floorTo(notional, 2);
-  if (price <= 0 || maxQuote <= 0) return { price: 0, shares: 0, quote: 0 };
+interface ClobPrecisionCheck {
+  valid: boolean;
+  priceCents: number;
+  shareUnits: number;
+  makerCents: number;
+  takerUnits: number;
+}
 
+function toPriceCents(rawPrice: number): number {
+  return Math.round(floorTo(rawPrice, 2) * 100);
+}
+
+function toShareUnits(rawShares: number): number {
+  return Math.floor(rawShares * SHARE_UNITS_SCALE + Number.EPSILON);
+}
+
+function shareStepUnitsForPriceCents(priceCents: number): number {
+  return Math.floor(SHARE_UNITS_SCALE / gcd(SHARE_UNITS_SCALE, priceCents));
+}
+
+function precisionFromUnits(priceCents: number, shareUnits: number): ClobPrecisionCheck {
+  const makerProduct = priceCents * shareUnits;
+  const makerDivisible = makerProduct % SHARE_UNITS_SCALE === 0;
+  return {
+    valid: priceCents > 0 && shareUnits > 0 && makerDivisible,
+    priceCents,
+    shareUnits,
+    makerCents: makerDivisible ? Math.floor(makerProduct / SHARE_UNITS_SCALE) : 0,
+    takerUnits: shareUnits,
+  };
+}
+
+function validateClobPrecision(price: number, shares: number): ClobPrecisionCheck {
   const priceCents = Math.round(price * 100);
-  if (priceCents <= 0) return { price: 0, shares: 0, quote: 0 };
+  const shareUnits = Math.round(shares * SHARE_UNITS_SCALE);
+  const priceFits2Dp = Math.abs(price * 100 - priceCents) < 1e-9;
+  const sharesFit4Dp = Math.abs(shares * SHARE_UNITS_SCALE - shareUnits) < 1e-9;
+  const check = precisionFromUnits(priceCents, shareUnits);
+  return {
+    ...check,
+    valid: check.valid && priceFits2Dp && sharesFit4Dp,
+  };
+}
 
-  const d = gcd(10_000, priceCents);
-  const minShareUnitStep = Math.floor(10_000 / d);
-  const quoteCentsPerStep = Math.floor(priceCents / d);
-  const maxQuoteCents = Math.floor(maxQuote * 100);
-  const stepCount = Math.floor(maxQuoteCents / quoteCentsPerStep);
-  const shareUnits = stepCount * minShareUnitStep;
-  let shares = floorTo(shareUnits / 10_000, 4);
-  let quote = floorTo((shareUnits * priceCents) / 1_000_000, 2);
-
-  // Fallback to simpler quantization if step-based is too granular or fails 2 decimal maker check
-  const shares2d = floorTo(shares, 2);
-  const rawQuote2d = shares2d * price;
-  const quoteCents2d = Math.round(rawQuote2d * 100);
-  
-  if (Math.abs(rawQuote2d - quoteCents2d / 100) > 1e-9 || (shares * price * 100) % 1 !== 0) {
-    const d2 = gcd(100, priceCents);
-    const step2 = Math.floor(100 / d2);
-    const qps2 = Math.floor(priceCents / d2);
-    const sc2 = Math.floor(maxQuoteCents / qps2);
-    const su2 = sc2 * step2;
-    shares = floorTo(su2 / 100, 2);
-    quote = floorTo((su2 * priceCents) / 10_000, 2);
-  }
-
-  // Final safety check: Polymarket throws if shares * price has > 2 decimals.
-  // So we explicitly floor it to exactly 2 decimal precision.
-  shares = floorTo(shares, 4);
-  quote = floorTo(shares * price, 2);
-  
-  // Back-calculate shares if flooring the quote disrupted the exact price ratio.
-  // If we spend exactly `quote` at `price`, we get `quote / price` shares.
-  // Polymarket requires shares to have max 4 decimals, and quote max 2 decimals.
-  const correctedShares = floorTo(quote / price, 4);
-  if (Math.abs(correctedShares * price - quote) < 1e-6) {
-    shares = correctedShares;
-  } else {
-    // If it doesn't map perfectly, we just fallback to truncating shares to 2 decimals,
-    // which guarantees that shares(2 decimals) * price(2 decimals) = max 4 decimals, 
-    // but often still violates the 2 decimal quote rule. So we have to find a share count
-    // that produces exactly a 2-decimal quote.
-    shares = floorTo(shares, 2);
-    quote = floorTo(shares * price, 2);
-  }
-
-  return { price, shares, quote };
+function quantizeBuyOrder(notional: number, rawPrice: number) {
+  const priceCents = toPriceCents(rawPrice);
+  const maxQuoteCents = Math.floor(floorTo(notional, 2) * 100);
+  if (priceCents <= 0 || maxQuoteCents <= 0) return { price: 0, shares: 0, quote: 0 };
+  const stepUnits = shareStepUnitsForPriceCents(priceCents);
+  const maxShareUnits = Math.floor((maxQuoteCents * SHARE_UNITS_SCALE) / priceCents);
+  const shareUnits = Math.floor(maxShareUnits / stepUnits) * stepUnits;
+  const check = precisionFromUnits(priceCents, shareUnits);
+  if (!check.valid || check.makerCents <= 0) return { price: 0, shares: 0, quote: 0 };
+  return {
+    price: floorTo(priceCents / 100, 2),
+    shares: floorTo(shareUnits / SHARE_UNITS_SCALE, 4),
+    quote: floorTo(check.makerCents / 100, 2),
+  };
 }
 
 function enforceMinSharesSingleLeg(price: number, shares: number) {
-  if (price <= 0 || shares <= 0) return { shares: 0, quote: 0, clamped: false };
-  const clamped = shares > 0 && shares < MIN_SHARES;
-  const safeShares = clamped ? MIN_SHARES : shares;
-  const quote = floorTo(safeShares * price, 2);
-  return { shares: floorTo(safeShares, 4), quote, clamped };
+  const priceCents = toPriceCents(price);
+  const rawUnits = toShareUnits(shares);
+  if (priceCents <= 0 || rawUnits <= 0) return { shares: 0, quote: 0, clamped: false };
+  const minUnits = MIN_SHARES * SHARE_UNITS_SCALE;
+  const clamped = rawUnits < minUnits;
+  const targetUnits = clamped ? minUnits : rawUnits;
+  const stepUnits = shareStepUnitsForPriceCents(priceCents);
+  const normalizedUnits = clamped
+    ? Math.ceil(targetUnits / stepUnits) * stepUnits
+    : Math.floor(targetUnits / stepUnits) * stepUnits;
+  const check = precisionFromUnits(priceCents, normalizedUnits);
+  if (!check.valid || check.makerCents <= 0) return { shares: 0, quote: 0, clamped };
+  return {
+    shares: floorTo(normalizedUnits / SHARE_UNITS_SCALE, 4),
+    quote: floorTo(check.makerCents / 100, 2),
+    clamped,
+  };
 }
 
 function quantizeDualBuyOrder(totalNotional: number, upPriceRaw: number, downPriceRaw: number) {
@@ -338,6 +356,14 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           const notional = normalized.quote;
           if (price <= 0 || shares <= 0 || notional <= 0) continue;
           if (notional < MIN_CLOB_NOTIONAL) continue;
+          const precision = validateClobPrecision(price, shares);
+          if (!precision.valid) {
+            lastReason = "precision_invalid_local";
+            yield* Effect.logWarning(
+              `[Orders] Skipping invalid local precision for ${signal.strategy} ${signal.side} [FOK scale=${scale}]: price=${price}, shares=${shares}, makerCents=${precision.makerCents}, takerUnits=${precision.takerUnits}`,
+            );
+            continue;
+          }
           if (normalized.clamped) {
             const requestedNotional = signal.size * scale;
             const delta = notional - requestedNotional;
@@ -391,7 +417,9 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
               clobResult: "rejected",
               clobReason: reason,
             };
-            yield* Effect.logWarning(`[Orders] Live order rejected for ${signal.strategy} ${signal.side}: ${reason}`);
+            yield* Effect.logWarning(
+              `[Orders] Live order rejected for ${signal.strategy} ${signal.side}: ${reason} (price=${price}, shares=${shares}, makerCents=${precision.makerCents}, takerUnits=${precision.takerUnits}, scale=${scale})`,
+            );
             return record;
           }
 
@@ -429,7 +457,9 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
               clobResult: parsed.status ?? "rejected",
               clobReason: parsed.reason ?? undefined,
             };
-            yield* Effect.logWarning(`[Orders] Live order rejected for ${signal.strategy} ${signal.side}: ${lastReason}`);
+            yield* Effect.logWarning(
+              `[Orders] Live order rejected for ${signal.strategy} ${signal.side}: ${lastReason} (price=${price}, shares=${shares}, makerCents=${precision.makerCents}, takerUnits=${precision.takerUnits}, scale=${scale})`,
+            );
             return record;
           }
 
@@ -495,7 +525,13 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         // No resting order is created — safe to use without slot risk.
         const fakQ = quantizeBuyOrder(signal.size, signal.maxPrice);
         const fakNorm = enforceMinSharesSingleLeg(fakQ.price, fakQ.shares);
-        if (fakQ.price > 0 && fakNorm.shares > 0 && fakNorm.quote >= MIN_CLOB_NOTIONAL) {
+        const fakPrecision = validateClobPrecision(fakQ.price, fakNorm.shares);
+        if (
+          fakQ.price > 0 &&
+          fakNorm.shares > 0 &&
+          fakNorm.quote >= MIN_CLOB_NOTIONAL &&
+          fakPrecision.valid
+        ) {
           const fakResult = yield* Effect.tryPromise({
             try: () =>
               (client as any).createAndPostOrder(
@@ -508,7 +544,9 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
 
           if (fakResult._tag === "Left") {
             const reason = fakResult.left;
-            yield* Effect.logWarning(`[Orders] FAK fallback failed for ${signal.strategy} ${signal.side}: ${reason}`);
+            yield* Effect.logWarning(
+              `[Orders] FAK fallback failed for ${signal.strategy} ${signal.side}: ${reason} (price=${fakQ.price}, shares=${fakNorm.shares}, makerCents=${fakPrecision.makerCents}, takerUnits=${fakPrecision.takerUnits})`,
+            );
             return null as TradeRecord | null;
           }
 
@@ -575,6 +613,11 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           );
           fokBackoffByKey.delete(backoffKey);
           return record as TradeRecord | null;
+        }
+        if (!fakPrecision.valid) {
+          yield* Effect.logWarning(
+            `[Orders] Skipping FAK fallback due to invalid local precision for ${signal.strategy} ${signal.side}: price=${fakQ.price}, shares=${fakNorm.shares}, makerCents=${fakPrecision.makerCents}, takerUnits=${fakPrecision.takerUnits}`,
+          );
         }
 
         return null as TradeRecord | null;
@@ -703,7 +746,10 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           try: () => (client as any).getOrderBook(tokenId),
           catch: (err) => new OrderError({ message: `getOrderBook failed for ${tokenId.slice(0, 12)}...: ${err}` }),
         });
-      }).pipe(Effect.catchAll((err) => Effect.logError(String(err)).pipe(Effect.map(() => null))));
+      }).pipe(
+        Effect.timeout("2 seconds"),
+        Effect.catchAll((err) => Effect.logError(String(err)).pipe(Effect.map(() => null))),
+      );
 
     const getMidpoint = (tokenId: string) =>
       Effect.gen(function* () {
