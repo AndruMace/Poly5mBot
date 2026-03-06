@@ -258,6 +258,8 @@ export interface StrategyDiagnostics {
   signals: number;
   riskRejected: number;
   liveRejected: number;
+  precisionRejected: number;
+  silentNullExecution: number;
   dynamicWindowUsed: number;
   earlyEntryAccepted: number;
   earlyEntryRejected: number;
@@ -324,6 +326,12 @@ export interface EngineMetrics {
   window: Record<string, StrategyDiagnostics>;
   latency: LatencyMetrics;
   reconciliation: ReconciliationMetrics;
+  orderPrecisionGuard?: {
+    version: string;
+    quantizedSingleLegBuy: boolean;
+    quantizedDualLegBuy: boolean;
+    localPrecisionValidation: boolean;
+  };
 }
 
 // ── Feed health ──

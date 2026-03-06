@@ -3,7 +3,7 @@ import { FileSystem } from "@effect/platform";
 import { AppConfig } from "../config.js";
 import { FeedService } from "../feeds/manager.js";
 import { MarketService, formatWindowTitle } from "../polymarket/markets.js";
-import { OrderService, calculateFeeStatic, effectiveFeeRateStatic } from "../polymarket/orders.js";
+import { OrderService, ORDER_PRECISION_GUARD_VERSION, calculateFeeStatic, effectiveFeeRateStatic } from "../polymarket/orders.js";
 import { PolymarketClient } from "../polymarket/client.js";
 import { AutoRedeemer } from "../polymarket/redeemer.js";
 import { RiskManager } from "./risk.js";
@@ -119,6 +119,18 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
     const feedService = yield* FeedService;
     const marketService = yield* MarketService;
     const orderService = yield* OrderService;
+    const defaultOrderPrecisionGuardInfo = {
+      version: ORDER_PRECISION_GUARD_VERSION,
+      quantizedSingleLegBuy: true,
+      quantizedDualLegBuy: true,
+      localPrecisionValidation: true,
+    } as const;
+    const orderPrecisionGuardInfo = yield* (
+      "getPrecisionGuardInfo" in orderService
+      && (orderService as { getPrecisionGuardInfo?: Effect.Effect<typeof defaultOrderPrecisionGuardInfo> }).getPrecisionGuardInfo
+        ? (orderService as { getPrecisionGuardInfo: Effect.Effect<typeof defaultOrderPrecisionGuardInfo> }).getPrecisionGuardInfo
+        : Effect.succeed(defaultOrderPrecisionGuardInfo)
+    ).pipe(Effect.catchAll(() => Effect.succeed(defaultOrderPrecisionGuardInfo)));
     const polyClient = yield* PolymarketClient;
     const riskManager = yield* RiskManager;
     const tracker = yield* PnLTracker;
@@ -613,6 +625,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
     const settlementPendingLastLog = new Map<string, number>();
     const settlementPendingLastCheck = new Map<string, number>();
+    let lastActivityFreshnessCheckAt = 0;
+    let activityFreshnessStaleActive = false;
 
     const pollMarkets = makeMarketPoller({
       stateRef,
@@ -642,6 +656,49 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       const st = yield* Ref.get(stateRef);
       const isShadow = st.mode === "shadow";
       const now = Date.now();
+      if (!isShadow && now - lastActivityFreshnessCheckAt >= 60_000) {
+        lastActivityFreshnessCheckAt = now;
+        const freshness = yield* activityStore.getFreshness().pipe(
+          Effect.catchAll(() =>
+            Effect.succeed({
+              latestActivityTimestampSec: null,
+              latestImportedAtMs: null,
+              ageSinceLatestActivitySec: null,
+              ageSinceLatestImportSec: null,
+              stale: true,
+              staleThresholdSec: 600,
+            }),
+          ),
+        );
+        if (freshness.stale && !activityFreshnessStaleActive) {
+          activityFreshnessStaleActive = true;
+          yield* obs({
+            category: "activity",
+            source: "engine",
+            action: "activity_freshness_stale",
+            entityType: "system",
+            entityId: "account_activity",
+            status: "stale",
+            mode: st.mode,
+            payload: freshness,
+          });
+          yield* Effect.logWarning(
+            `${ENGINE_LOG_PREFIX} Account activity data is stale (import age: ${freshness.ageSinceLatestImportSec ?? "unknown"}s)`,
+          );
+        } else if (!freshness.stale && activityFreshnessStaleActive) {
+          activityFreshnessStaleActive = false;
+          yield* obs({
+            category: "activity",
+            source: "engine",
+            action: "activity_freshness_recovered",
+            entityType: "system",
+            entityId: "account_activity",
+            status: "ok",
+            mode: st.mode,
+            payload: freshness,
+          });
+        }
+      }
       if (!isShadow && now - st.lastReconcileAt >= 15_000) {
         yield* runAccountReconciliation;
         yield* Ref.update(stateRef, (s) => ({ ...s, lastReconcileAt: Date.now() }));
@@ -869,10 +926,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const restoredEntries = new Map<string, number>();
         for (const t of windowTrades) {
           restoredEntries.set(t.strategy, (restoredEntries.get(t.strategy) ?? 0) + 1);
-          if (PER_SIDE_STRATEGIES.has(t.strategy)) {
-            const sideKey = `${t.strategy}:${t.side}`;
-            restoredEntries.set(sideKey, (restoredEntries.get(sideKey) ?? 0) + 1);
-          }
+          const sideKey = `${t.strategy}:${t.side}`;
+          restoredEntries.set(sideKey, (restoredEntries.get(sideKey) ?? 0) + 1);
         }
         yield* Ref.update(stateRef, (s) => ({ ...s, entriesThisWindow: restoredEntries }));
         yield* Effect.log(
@@ -955,6 +1010,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         window: s.windowDiagnostics,
         latency: s.metrics.latency,
         reconciliation: s.metrics.reconciliation,
+        orderPrecisionGuard: orderPrecisionGuardInfo,
       })),
     );
 

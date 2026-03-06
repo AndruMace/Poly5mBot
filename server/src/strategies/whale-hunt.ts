@@ -8,6 +8,7 @@ const DEFAULT_CONFIG: Record<string, number> = {
   entryWindowSec: 60,
   maxDynamicEntryWindowSec: 120,
   minPriceMovePct: 0.03,
+  minPtbDistancePct: 0.1,
   minEarlyGapPct: 0.12,
   probabilityFloor: 0.78,
   regimeWeight: 0.2,
@@ -17,9 +18,17 @@ const DEFAULT_CONFIG: Record<string, number> = {
   maxAdverseImbalance: DEFAULT_WHALE_HUNT_CONFIG.maxAdverseImbalance,
   imbalanceWeight: DEFAULT_WHALE_HUNT_CONFIG.imbalanceWeight,
   maxSharePrice: 0.995,
+  maxExecutionPrice: 0.985,
   minSharePrice: 0.75,
   tradeSize: 15,
   maxEntriesPerWindow: 2,
+  maxSameSideEntriesPerWindow: 1,
+  allowSameSideStacking: 0,
+  qualityMinMultiplier: 0.5,
+  qualityMaxMultiplier: 1.15,
+  spreadPenaltyK: 8,
+  chopConfidenceFloor: 0.65,
+  chopSizeMultiplier: 0.7,
 };
 
 const DEFAULT_REGIME_FILTER = {
@@ -74,6 +83,7 @@ export const makeWhaleHuntStrategy = Effect.gen(function* () {
 
       const priceMove = ((ctx.currentAssetPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
       const absMove = Math.abs(priceMove);
+      if (absMove < Math.max(0, s.config["minPtbDistancePct"]!)) return null;
       const baseEntryWindowSec = s.config["entryWindowSec"]!;
       const maxDynamicEntryWindowSec = Math.max(baseEntryWindowSec, s.config["maxDynamicEntryWindowSec"]!);
       const minEarlyGapPct = s.config["minEarlyGapPct"]!;

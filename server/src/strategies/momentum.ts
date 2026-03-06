@@ -10,9 +10,18 @@ const DEFAULT_CONFIG: Record<string, number> = {
   minWindowElapsedSec: 180,
   maxWindowElapsedSec: 270,
   minPriceMovePct: 0.05,
+  minPtbDistancePct: 0.03,
   maxSharePrice: 0.65,
+  maxExecutionPrice: 0.64,
   tradeSize: 8,
   maxEntriesPerWindow: 2,
+  maxSameSideEntriesPerWindow: 1,
+  allowSameSideStacking: 0,
+  chopConfidenceFloor: 0.6,
+  chopSizeMultiplier: 0.75,
+  qualityMinMultiplier: 0.5,
+  qualityMaxMultiplier: 1.15,
+  spreadPenaltyK: 8,
   thinLiquidityDiscount: 0.02,
   blowoutSpreadDiscount: 0.03,
 };
@@ -54,6 +63,7 @@ export const makeMomentumStrategy = Effect.gen(function* () {
       const priceMove = ((ctx.currentAssetPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
       const absMove = Math.abs(priceMove);
       if (absMove < s.config["minPriceMovePct"]!) return null;
+      if (absMove < Math.max(0, s.config["minPtbDistancePct"]!)) return null;
 
       let side: "UP" | "DOWN" | null = null;
       let reason = "";

@@ -15,8 +15,16 @@ export const DEFAULT_CONFIG: Record<string, number> = {
   maxRatioDelta10sForConfidence: 3,
   minBookNotional: 200,
   maxSharePrice: 0.9,
+  maxExecutionPrice: 0.88,
   tradeSize: 10,
   maxEntriesPerWindow: 1,
+  maxSameSideEntriesPerWindow: 1,
+  allowSameSideStacking: 0,
+  chopConfidenceFloor: 0.6,
+  chopSizeMultiplier: 0.75,
+  qualityMinMultiplier: 0.5,
+  qualityMaxMultiplier: 1.15,
+  spreadPenaltyK: 8,
 };
 
 export const DEFAULT_REGIME_FILTER = {

@@ -120,8 +120,15 @@ export function RecentTrades() {
                   <td className="py-1.5 px-2 font-mono text-[var(--text-secondary)]">
                     {t.lastEventType ?? "—"}
                   </td>
-                  <td className="py-1.5 px-2 text-[11px] font-mono text-[var(--text-secondary)]">
-                    {t.shadow ? "shadow" : (t.clobResult ?? "—")}
+                  <td className="py-1.5 px-2 text-[11px]">
+                    {t.shadow ? (
+                      <span className="font-mono text-[var(--text-secondary)]">shadow</span>
+                    ) : (
+                      <div className="flex flex-col leading-tight">
+                        <span className="font-mono text-[var(--text-secondary)]">{t.clobResult ?? "—"}</span>
+                        {t.clobReason && <span className="text-[var(--accent-red)]">{t.clobReason}</span>}
+                      </div>
+                    )}
                   </td>
                   <td
                     className={`py-1.5 px-2 text-right font-mono ${

@@ -12,6 +12,7 @@ const MIN_CLOB_NOTIONAL = 1.0;
 const FOK_LIQUIDITY_BACKOFF_BASE_MS = 8_000;
 const FOK_LIQUIDITY_BACKOFF_MAX_MS = 120_000;
 const SHARE_UNITS_SCALE = 10_000;
+export const ORDER_PRECISION_GUARD_VERSION = "2026-03-06-quantized-market-buy-v1";
 interface FokBackoffState {
   consecutiveFailures: number;
   blockedUntil: number;
@@ -19,7 +20,13 @@ interface FokBackoffState {
 
 function floorTo(value: number, decimals: number): number {
   const factor = 10 ** decimals;
-  return Math.floor(value * factor + Number.EPSILON) / factor;
+  // Stabilize IEEE-754 representation before flooring (e.g. 0.57 * 100 may be 56.999999...).
+  const scaled = Number((value * factor).toFixed(12));
+  return Math.floor(scaled) / factor;
+}
+
+function toFixedNumber(value: number, decimals: number): number {
+  return Number(value.toFixed(decimals));
 }
 
 function gcd(a: number, b: number): number {
@@ -81,6 +88,19 @@ function validateClobPrecision(price: number, shares: number): ClobPrecisionChec
   };
 }
 
+function classifyPrecisionReason(reason: string | null | undefined): "precision_rejected_by_venue" | null {
+  if (!reason) return null;
+  const normalized = reason.toLowerCase();
+  if (
+    normalized.includes("invalid amounts")
+    || normalized.includes("max accuracy of 2 decimals")
+    || normalized.includes("taker amount a max of 4 decimals")
+  ) {
+    return "precision_rejected_by_venue";
+  }
+  return null;
+}
+
 function quantizeBuyOrder(notional: number, rawPrice: number) {
   const priceCents = toPriceCents(rawPrice);
   const maxQuoteCents = Math.floor(floorTo(notional, 2) * 100);
@@ -91,9 +111,9 @@ function quantizeBuyOrder(notional: number, rawPrice: number) {
   const check = precisionFromUnits(priceCents, shareUnits);
   if (!check.valid || check.makerCents <= 0) return { price: 0, shares: 0, quote: 0 };
   return {
-    price: floorTo(priceCents / 100, 2),
-    shares: floorTo(shareUnits / SHARE_UNITS_SCALE, 4),
-    quote: floorTo(check.makerCents / 100, 2),
+    price: toFixedNumber(priceCents / 100, 2),
+    shares: toFixedNumber(shareUnits / SHARE_UNITS_SCALE, 4),
+    quote: toFixedNumber(check.makerCents / 100, 2),
   };
 }
 
@@ -111,8 +131,8 @@ function enforceMinSharesSingleLeg(price: number, shares: number) {
   const check = precisionFromUnits(priceCents, normalizedUnits);
   if (!check.valid || check.makerCents <= 0) return { shares: 0, quote: 0, clamped };
   return {
-    shares: floorTo(normalizedUnits / SHARE_UNITS_SCALE, 4),
-    quote: floorTo(check.makerCents / 100, 2),
+    shares: toFixedNumber(normalizedUnits / SHARE_UNITS_SCALE, 4),
+    quote: toFixedNumber(check.makerCents / 100, 2),
     clamped,
   };
 }
@@ -147,9 +167,9 @@ function quantizeDualBuyOrder(totalNotional: number, upPriceRaw: number, downPri
     return { shares: 0, upNotional: 0, downNotional: 0, upPrice: 0, downPrice: 0 };
   }
 
-  const shares = floorTo(shareUnits / 10_000, 4);
-  const upNotional = floorTo((shareUnits * upPriceCents) / 1_000_000, 2);
-  const downNotional = floorTo((shareUnits * downPriceCents) / 1_000_000, 2);
+  const shares = toFixedNumber(shareUnits / 10_000, 4);
+  const upNotional = toFixedNumber((shareUnits * upPriceCents) / 1_000_000, 2);
+  const downNotional = toFixedNumber((shareUnits * downPriceCents) / 1_000_000, 2);
 
   return { shares, upNotional, downNotional, upPrice, downPrice };
 }
@@ -164,11 +184,11 @@ function enforceMinSharesDualLeg(
   }
   const clamped = shares > 0 && shares < MIN_SHARES;
   const safeShares = clamped ? MIN_SHARES : shares;
-  const normalizedShares = floorTo(safeShares, 4);
+  const normalizedShares = toFixedNumber(safeShares, 4);
   return {
     shares: normalizedShares,
-    upNotional: floorTo(normalizedShares * upPrice, 2),
-    downNotional: floorTo(normalizedShares * downPrice, 2),
+    upNotional: toFixedNumber(normalizedShares * upPrice, 2),
+    downNotional: toFixedNumber(normalizedShares * downPrice, 2),
     clamped,
   };
 }
@@ -180,6 +200,39 @@ function extractOrderError(err: unknown): string {
   if (typeof data?.error === "string" && data.error.trim().length > 0) return data.error;
   if (typeof e?.message === "string" && e.message.trim().length > 0) return e.message;
   return "unknown error";
+}
+
+function makeRejectedTradeRecord(
+  signal: Signal,
+  tokenId: string,
+  price: number,
+  notional: number,
+  shares: number,
+  windowEnd: number,
+  conditionId: string,
+  priceToBeatAtEntry: number,
+  reason: string,
+): TradeRecord {
+  return {
+    id: `trade-${++tradeCounter}-${Date.now()}`,
+    strategy: signal.strategy,
+    side: signal.side,
+    tokenId,
+    entryPrice: price,
+    size: notional,
+    shares,
+    fee: 0,
+    status: "rejected",
+    shadow: false,
+    outcome: null,
+    pnl: 0,
+    timestamp: Date.now(),
+    windowEnd,
+    conditionId,
+    priceToBeatAtEntry,
+    clobResult: classifyPrecisionReason(reason) ?? "rejected",
+    clobReason: reason,
+  };
 }
 
 function isFokLiquidityReject(reason: string | null | undefined): boolean {
@@ -329,6 +382,12 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
   effect: Effect.gen(function* () {
     const polyClient = yield* PolymarketClient;
     const fokBackoffByKey = new Map<string, FokBackoffState>();
+    const precisionGuardInfo = {
+      version: ORDER_PRECISION_GUARD_VERSION,
+      quantizedSingleLegBuy: true,
+      quantizedDualLegBuy: true,
+      localPrecisionValidation: true,
+    } as const;
 
     const executeSignal = (
       signal: Signal,
@@ -377,7 +436,8 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           const result = yield* Effect.tryPromise({
             try: () =>
               (client as any).createAndPostOrder(
-                { tokenID: tokenId, price, side: "BUY", size: shares },
+                // clob-client BUY semantics: size is quote notional (maker amount), not shares.
+                { tokenID: tokenId, price, side: "BUY", size: notional },
                 { tickSize: "0.01", negRisk: false },
                 "FOK",
               ) as Promise<unknown>,
@@ -397,26 +457,17 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
               continue;
             }
             fokBackoffByKey.delete(backoffKey);
-            const record: TradeRecord = {
-              id: `trade-${++tradeCounter}-${Date.now()}`,
-              strategy: signal.strategy,
-              side: signal.side,
+            const record = makeRejectedTradeRecord(
+              signal,
               tokenId,
-              entryPrice: price,
-              size: notional,
+              price,
+              notional,
               shares,
-              fee: 0,
-              status: "rejected",
-              shadow: false,
-              outcome: null,
-              pnl: 0,
-              timestamp: Date.now(),
               windowEnd,
               conditionId,
               priceToBeatAtEntry,
-              clobResult: "rejected",
-              clobReason: reason,
-            };
+              reason,
+            );
             yield* Effect.logWarning(
               `[Orders] Live order rejected for ${signal.strategy} ${signal.side}: ${reason} (price=${price}, shares=${shares}, makerCents=${precision.makerCents}, takerUnits=${precision.takerUnits}, scale=${scale})`,
             );
@@ -493,7 +544,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             side: signal.side,
             tokenId,
             entryPrice: finalAvgPrice,
-            size: finalShares > 0 && finalAvgPrice > 0 ? floorTo(finalShares * finalAvgPrice, 2) : notional,
+            size: finalShares > 0 && finalAvgPrice > 0 ? toFixedNumber(finalShares * finalAvgPrice, 2) : notional,
             shares: finalShares,
             fee,
             status: mappedStatus,
@@ -535,7 +586,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           const fakResult = yield* Effect.tryPromise({
             try: () =>
               (client as any).createAndPostOrder(
-                { tokenID: tokenId, price: fakQ.price, side: "BUY", size: fakNorm.shares },
+                { tokenID: tokenId, price: fakQ.price, side: "BUY", size: fakNorm.quote },
                 { tickSize: "0.01", negRisk: false },
                 "FAK",
               ) as Promise<unknown>,
@@ -593,7 +644,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             side: signal.side,
             tokenId,
             entryPrice: finalAvgPrice,
-            size: floorTo(finalShares * finalAvgPrice, 2),
+            size: toFixedNumber(finalShares * finalAvgPrice, 2),
             shares: finalShares,
             fee,
             status: finalStatus,
@@ -617,6 +668,17 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         if (!fakPrecision.valid) {
           yield* Effect.logWarning(
             `[Orders] Skipping FAK fallback due to invalid local precision for ${signal.strategy} ${signal.side}: price=${fakQ.price}, shares=${fakNorm.shares}, makerCents=${fakPrecision.makerCents}, takerUnits=${fakPrecision.takerUnits}`,
+          );
+          return makeRejectedTradeRecord(
+            signal,
+            tokenId,
+            fakQ.price,
+            fakNorm.quote,
+            fakNorm.shares,
+            windowEnd,
+            conditionId,
+            priceToBeatAtEntry,
+            "precision_invalid_local",
           );
         }
 
@@ -661,6 +723,35 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             );
           }
         }
+        const upPrecision = validateClobPrecision(pxUp, shares);
+        const downPrecision = validateClobPrecision(pxDown, shares);
+        if (!upPrecision.valid || !downPrecision.valid) {
+          const reason = "precision_invalid_local_dual_buy";
+          yield* Effect.logWarning(
+            `[Orders] Skipping efficiency dual-buy due to invalid local precision: up(price=${pxUp}, shares=${shares}, makerCents=${upPrecision.makerCents}, takerUnits=${upPrecision.takerUnits}) down(price=${pxDown}, shares=${shares}, makerCents=${downPrecision.makerCents}, takerUnits=${downPrecision.takerUnits})`,
+          );
+          trades.push({
+            id: `trade-${++tradeCounter}-${Date.now()}`,
+            strategy: "efficiency",
+            side: "UP",
+            tokenId: upTokenId,
+            entryPrice: pxUp,
+            size: normalized.upNotional,
+            shares,
+            fee: 0,
+            status: "rejected",
+            shadow: false,
+            outcome: null,
+            pnl: 0,
+            timestamp: Date.now(),
+            windowEnd,
+            conditionId,
+            priceToBeatAtEntry,
+            clobResult: "precision_invalid_local",
+            clobReason: reason,
+          });
+          return trades;
+        }
 
         const legs: Array<["UP" | "DOWN", string, number, number]> = [
           ["UP", upTokenId, pxUp, normalized.upNotional],
@@ -684,7 +775,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
           const result = yield* Effect.tryPromise({
             try: () =>
               (client as any).createAndPostOrder(
-                { tokenID: tokenId, price: px, side: "BUY", size: shares },
+                { tokenID: tokenId, price: px, side: "BUY", size: legNotional },
                 { tickSize: "0.01", negRisk: false },
                 "FOK",
               ) as Promise<unknown>,
@@ -869,6 +960,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
       listRecentOrders,
       calculateFee,
       effectiveFeeRate,
+      getPrecisionGuardInfo: Effect.succeed(precisionGuardInfo),
     } as const;
   }),
 }) {}

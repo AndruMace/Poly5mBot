@@ -1,0 +1,129 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - button [ref=e6]:
+      - img [ref=e7]
+    - navigation [ref=e9]:
+      - button "Dashboard" [ref=e10]:
+        - img [ref=e11]
+        - generic [ref=e16]: Dashboard
+      - button "Strategies" [ref=e17]:
+        - img [ref=e18]
+        - generic [ref=e26]: Strategies
+      - button "Trades" [active] [ref=e27]:
+        - img [ref=e28]
+        - generic [ref=e32]: Trades
+      - button "Observability" [ref=e33]:
+        - img [ref=e34]
+        - generic [ref=e36]: Observability
+      - button "Settings" [ref=e37]:
+        - img [ref=e38]
+        - generic [ref=e41]: Settings
+  - generic [ref=e42]:
+    - banner [ref=e43]:
+      - generic [ref=e44]:
+        - heading "5mTracker" [level=1] [ref=e45]
+        - generic [ref=e46]:
+          - generic [ref=e47]: BTC
+          - generic [ref=e48]: $110,000.00
+      - generic [ref=e49]:
+        - button "SHADOW" [ref=e50]:
+          - img [ref=e51]
+          - text: SHADOW
+        - button "Start Trading" [ref=e54]:
+          - img [ref=e55]
+          - text: Start Trading
+        - generic [ref=e57]:
+          - img [ref=e58]
+          - generic [ref=e61]: 0x1234...cdef
+        - generic [ref=e62]:
+          - generic "WebSocket to server" [ref=e63]:
+            - img [ref=e64]
+            - generic [ref=e68]: WS
+          - generic "Polymarket CLOB connection" [ref=e69]:
+            - generic [ref=e71]: CLOB
+          - generic "Database connection" [ref=e72]:
+            - generic [ref=e74]: DB N/A
+    - main [ref=e75]:
+      - generic [ref=e76]:
+        - generic [ref=e78]:
+          - generic [ref=e79]:
+            - img [ref=e80]
+            - text: Shadow Mode P&L
+          - generic [ref=e83]:
+            - generic [ref=e84]:
+              - generic [ref=e85]:
+                - img [ref=e86]
+                - text: Total P&L
+              - generic [ref=e88]: +$0.00
+            - generic [ref=e89]:
+              - generic [ref=e90]:
+                - img [ref=e91]
+                - text: Today
+              - generic [ref=e94]: +$0.00
+            - generic [ref=e95]:
+              - generic [ref=e96]:
+                - img [ref=e97]
+                - text: Total Trades
+              - generic [ref=e99]: "0"
+            - generic [ref=e100]:
+              - generic [ref=e101]:
+                - img [ref=e102]
+                - text: Win Rate
+              - generic [ref=e106]: 0.0%
+          - generic [ref=e107]:
+            - generic [ref=e108]: By Strategy
+            - generic [ref=e109]:
+              - generic [ref=e110]:
+                - generic [ref=e111]: Arbitrage
+                - generic [ref=e112]: +$0.00 (0%)
+              - generic [ref=e113]:
+                - generic [ref=e114]: Market Efficiency
+                - generic [ref=e115]: +$0.00 (0%)
+              - generic [ref=e116]:
+                - generic [ref=e117]: Whale Hunt
+                - generic [ref=e118]: +$0.00 (0%)
+              - generic [ref=e119]:
+                - generic [ref=e120]: Momentum Confirmation
+                - generic [ref=e121]: +$0.00 (0%)
+              - generic [ref=e122]:
+                - generic [ref=e123]: Order Flow Imbalance
+                - generic [ref=e124]: +$0.00 (0%)
+        - generic [ref=e125]:
+          - generic [ref=e126]:
+            - generic [ref=e127]:
+              - img [ref=e128]
+              - heading "Trade History" [level=2] [ref=e132]
+              - generic [ref=e133]: 2 trades
+            - generic [ref=e134]:
+              - generic [ref=e135]:
+                - button "Strategy Trades" [ref=e136]
+                - button "Account Activity" [ref=e137]
+              - generic [ref=e138]:
+                - button "All" [ref=e139]
+                - button "Live" [ref=e140]
+                - button "Shadow" [ref=e141]
+              - combobox [ref=e142]:
+                - option "Past hour"
+                - option "Past 12 hours"
+                - option "Past day" [selected]
+                - option "Past week"
+                - option "All"
+              - button "Export CSV" [ref=e143]:
+                - img [ref=e144]
+                - text: Export CSV
+          - generic [ref=e147]:
+            - generic [ref=e148]: Showing past 30 days
+            - generic [ref=e149]:
+              - button "Previous" [disabled] [ref=e150]
+              - generic [ref=e151]: Page 1
+              - button "Next" [disabled] [ref=e152]
+          - generic [ref=e153]: payload.items is not iterable
+    - button "Notes" [ref=e156]:
+      - generic [ref=e157]:
+        - img [ref=e158]
+        - generic [ref=e161]: Notes
+      - img [ref=e162]
+```

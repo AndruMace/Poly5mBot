@@ -4,15 +4,22 @@ import type { MarketContext, Signal } from "../types.js";
 
 const DEFAULT_CONFIG: Record<string, number> = {
   minSpreadPct: 0.04,
+  minPtbDistancePct: 0.03,
   persistenceMs: 3000,
   persistenceCount: 4,
   minConfirmingExchanges: 1,
   minWindowElapsedSec: 180,
   maxWindowElapsedSec: 270,
   maxSharePrice: 0.55,
+  maxExecutionPrice: 0.54,
   maxOracleAgeSec: 5,
   tradeSize: 5,
   maxEntriesPerWindow: 2,
+  maxSameSideEntriesPerWindow: 1,
+  allowSameSideStacking: 0,
+  qualityMinMultiplier: 0.5,
+  qualityMaxMultiplier: 1.15,
+  spreadPenaltyK: 8,
 };
 
 const DEFAULT_REGIME_FILTER = {
@@ -61,6 +68,8 @@ export const makeArbStrategy = Effect.gen(function* () {
 
       const side: "UP" | "DOWN" = spreadPct > 0 ? "UP" : "DOWN";
       const btcDelta = ((binance.price - ctx.priceToBeat) / ctx.priceToBeat) * 100;
+      const minPtbDistancePct = Math.max(0, s.config["minPtbDistancePct"]!);
+      if (Math.abs(btcDelta) < minPtbDistancePct) return null;
       if (side === "UP" && btcDelta <= 0) return null;
       if (side === "DOWN" && btcDelta >= 0) return null;
 

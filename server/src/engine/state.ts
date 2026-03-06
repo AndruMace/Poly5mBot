@@ -36,6 +36,8 @@ export function zeroDiagnostics(): StrategyDiagnostics {
     signals: 0,
     riskRejected: 0,
     liveRejected: 0,
+    precisionRejected: 0,
+    silentNullExecution: 0,
     dynamicWindowUsed: 0,
     earlyEntryAccepted: 0,
     earlyEntryRejected: 0,

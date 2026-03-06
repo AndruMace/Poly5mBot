@@ -35,7 +35,11 @@ interface StrategyRunnerDeps {
     shadow: boolean,
     ctx: MarketContext,
     entryCtx: EntryContext,
-  ) => Effect.Effect<boolean, any, never>;
+  ) => Effect.Effect<{
+    executed: boolean;
+    rejectClass?: string;
+    rejectReason?: string;
+  }, any, never>;
   adjustMomentumMaxPrice: (
     signal: Signal,
     regime: RegimeState,
@@ -55,6 +59,33 @@ interface StrategyRunnerDeps {
 }
 
 const PTB_REQUIRED_STRATEGIES = new Set(["arb", "momentum", "whale-hunt"]);
+const CHOP_SENSITIVE_STRATEGIES = new Set(["momentum", "orderflow-imbalance", "whale-hunt"]);
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getPtbDistancePct(ctx: MarketContext): number {
+  if (ctx.priceToBeat === null || ctx.priceToBeat <= 0) return 0;
+  return Math.abs((ctx.currentAssetPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
+}
+
+function getSideSpreadPct(ctx: MarketContext, side: "UP" | "DOWN"): number | null {
+  const bid = side === "UP" ? ctx.orderBook.bestBidUp : ctx.orderBook.bestBidDown;
+  const ask = side === "UP" ? ctx.orderBook.bestAskUp : ctx.orderBook.bestAskDown;
+  if (bid === null || ask === null || bid <= 0 || ask <= 0 || ask < bid) return null;
+  const mid = (bid + ask) / 2;
+  if (mid <= 0) return null;
+  return (ask - bid) / mid;
+}
+
+function bucketWindowRemainingMs(windowRemainingMs: number): "<30s" | "30-60s" | "60-90s" | "90-120s" | ">=120s" {
+  if (windowRemainingMs < 30_000) return "<30s";
+  if (windowRemainingMs < 60_000) return "30-60s";
+  if (windowRemainingMs < 90_000) return "60-90s";
+  if (windowRemainingMs < 120_000) return "90-120s";
+  return ">=120s";
+}
 
 function computeLatencyGuardLeadMs(observedLatencyMs: number, cfg: WhaleHuntConfig): number {
   return Math.max(
@@ -187,6 +218,93 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             continue;
           }
         }
+
+        const allowSameSideStacking = (sState.config["allowSameSideStacking"] ?? 0) >= 1;
+        const configuredMaxSameSide = Math.max(1, Math.floor(sState.config["maxSameSideEntriesPerWindow"] ?? 1));
+        const maxSameSideEntries = allowSameSideStacking ? configuredMaxSameSide : 1;
+        const sideKey = `${strategy.name}:${signal.side}`;
+        const sideEntries = sCurrent.entriesThisWindow.get(sideKey) ?? 0;
+        if (sideEntries >= maxSameSideEntries) {
+          yield* Ref.update(deps.stateRef, (stUpd) => {
+            deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
+            return stUpd;
+          });
+          yield* deps.obs({
+            category: "signal",
+            source: "engine",
+            action: "signal_rejected_preflight",
+            entityType: "signal",
+            entityId: `${strategy.name}:${signal.timestamp}`,
+            status: "rejected",
+            strategy: strategy.name,
+            mode: isShadow ? "shadow" : "live",
+            payload: {
+              reason: "same_window_stack_blocked",
+              gate: "same_window_stack_blocked",
+              side: signal.side,
+              sideEntries,
+              maxSameSideEntries,
+            },
+          });
+          yield* Effect.log(
+            `${deps.logPrefix} ${strategy.name} ${signal.side} skipped: same-window side stacking blocked (${sideEntries}/${maxSameSideEntries})`,
+          );
+          continue;
+        }
+
+        const ptbDistancePct = getPtbDistancePct(ctx);
+        const minPtbDistancePct = Math.max(0, sState.config["minPtbDistancePct"] ?? 0);
+        if (minPtbDistancePct > 0 && ptbDistancePct < minPtbDistancePct) {
+          yield* Ref.update(deps.stateRef, (stUpd) => {
+            deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
+            return stUpd;
+          });
+          yield* deps.obs({
+            category: "signal",
+            source: "engine",
+            action: "signal_rejected_preflight",
+            entityType: "signal",
+            entityId: `${strategy.name}:${signal.timestamp}`,
+            status: "rejected",
+            strategy: strategy.name,
+            mode: isShadow ? "shadow" : "live",
+            payload: {
+              reason: "ptb_too_close",
+              gate: "ptb_distance",
+              ptbDistancePct,
+              minPtbDistancePct,
+            },
+          });
+          continue;
+        }
+
+        if (regime.trendRegime === "chop" && CHOP_SENSITIVE_STRATEGIES.has(strategy.name)) {
+          const chopConfidenceFloor = clamp(sState.config["chopConfidenceFloor"] ?? 0.55, 0, 1);
+          if (signal.confidence < chopConfidenceFloor) {
+            yield* Ref.update(deps.stateRef, (stUpd) => {
+              deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
+              return stUpd;
+            });
+            yield* deps.obs({
+              category: "signal",
+              source: "engine",
+              action: "signal_rejected_preflight",
+              entityType: "signal",
+              entityId: `${strategy.name}:${signal.timestamp}`,
+              status: "rejected",
+              strategy: strategy.name,
+              mode: isShadow ? "shadow" : "live",
+              payload: {
+                reason: "chop_confidence_too_low",
+                gate: "chop_confidence_floor",
+                confidence: signal.confidence,
+                required: chopConfidenceFloor,
+              },
+            });
+            continue;
+          }
+        }
+
         yield* deps.obs({
           category: "signal",
           source: "engine",
@@ -202,12 +320,41 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             reason: signal.reason,
             maxPrice: signal.maxPrice,
             size: signal.size,
+            windowRemainingMs: ctx.windowRemainingMs,
+            windowRemainingBucket: bucketWindowRemainingMs(ctx.windowRemainingMs),
+            ptbDistancePct,
+            sideSpreadPct: getSideSpreadPct(ctx, signal.side),
+            regimeTrend: regime.trendRegime,
+            regimeVolatility: regime.volatilityRegime,
           },
         });
 
         if (signal.strategy === "momentum") {
           signal.maxPrice = deps.adjustMomentumMaxPrice(signal, regime, ctx, sState.config);
         }
+        const maxExecutionPrice = sState.config["maxExecutionPrice"];
+        if (typeof maxExecutionPrice === "number" && Number.isFinite(maxExecutionPrice) && maxExecutionPrice > 0) {
+          signal.maxPrice = Math.min(signal.maxPrice, maxExecutionPrice);
+        }
+
+        const sideSpreadPct = getSideSpreadPct(ctx, signal.side);
+        const spreadPenaltyK = Math.max(0, sState.config["spreadPenaltyK"] ?? 8);
+        const spreadQuality = sideSpreadPct === null ? 1 : clamp(1 - sideSpreadPct * spreadPenaltyK, 0.4, 1.1);
+        const ptbReference = Math.max(minPtbDistancePct, 0.01);
+        const ptbQuality = minPtbDistancePct > 0 ? clamp(ptbDistancePct / ptbReference, 0.4, 1.2) : 1;
+        const confidenceQuality = clamp(signal.confidence, 0.35, 1.1);
+        const chopSizeMultiplier =
+          regime.trendRegime === "chop" && CHOP_SENSITIVE_STRATEGIES.has(strategy.name)
+            ? clamp(sState.config["chopSizeMultiplier"] ?? 0.75, 0.1, 1)
+            : 1;
+        const qualityMinMultiplier = clamp(sState.config["qualityMinMultiplier"] ?? 0.5, 0.1, 1);
+        const qualityMaxMultiplier = clamp(sState.config["qualityMaxMultiplier"] ?? 1.15, qualityMinMultiplier, 2);
+        const qualityMultiplier = clamp(
+          confidenceQuality * ptbQuality * spreadQuality * chopSizeMultiplier,
+          qualityMinMultiplier,
+          qualityMaxMultiplier,
+        );
+        signal.size = Math.max(0.01, Math.round(signal.size * qualityMultiplier * 100) / 100);
 
         // Skip signal immediately if our limit price is below the current best ask.
         // The scale loop only reduces size, never price — all FOK/FAK attempts at
@@ -217,6 +364,22 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
           yield* Ref.update(deps.stateRef, (stUpd) => {
             deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
             return stUpd;
+          });
+          yield* deps.obs({
+            category: "signal",
+            source: "engine",
+            action: "signal_rejected_preflight",
+            entityType: "signal",
+            entityId: `${strategy.name}:${signal.timestamp}`,
+            status: "rejected",
+            strategy: strategy.name,
+            mode: isShadow ? "shadow" : "live",
+            payload: {
+              reason: "price_too_high",
+              gate: "max_price_vs_best_ask",
+              maxPrice: signal.maxPrice,
+              bestAsk: bestAskForSide,
+            },
           });
           yield* Effect.log(
             `${deps.logPrefix} ${strategy.name} ${signal.side} skipped: maxPrice $${signal.maxPrice.toFixed(2)} < bestAsk $${bestAskForSide.toFixed(2)}`,
@@ -339,7 +502,8 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
           lastStrategyExecution: new Map([...s.lastStrategyExecution, [strategy.name, now]]),
         }));
 
-        const executed = yield* deps.executeStrategy(signal, isShadow, ctx, entryContext);
+        const execution = yield* deps.executeStrategy(signal, isShadow, ctx, entryContext);
+        const executed = execution.executed;
         yield* deps.obs({
           category: "signal",
           source: "engine",
@@ -353,16 +517,32 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             executed,
             side: signal.side,
             finalSize: signal.size,
+            rejectClass: execution.rejectClass ?? null,
+            rejectReason: execution.rejectReason ?? null,
           },
         });
+        if (
+          !isShadow
+          && !executed
+          && (execution.rejectClass === "precision_invalid_local" || execution.rejectClass === "precision_rejected_by_venue")
+        ) {
+          yield* Ref.update(deps.stateRef, (s) => {
+            const newMap = new Map(s.entriesThisWindow);
+            newMap.set(strategy.name, (newMap.get(strategy.name) ?? 0) + 1);
+            const sideKey = `${strategy.name}:${signal.side}`;
+            newMap.set(sideKey, (newMap.get(sideKey) ?? 0) + 1);
+            return { ...s, entriesThisWindow: newMap };
+          });
+          yield* Effect.logWarning(
+            `${deps.logPrefix} ${strategy.name} ${signal.side} precision reject consumed entry budget (${execution.rejectClass})`,
+          );
+        }
         if (executed) {
           yield* Ref.update(deps.stateRef, (s) => {
             const newMap = new Map(s.entriesThisWindow);
             newMap.set(strategy.name, (newMap.get(strategy.name) ?? 0) + 1);
-            if (deps.perSideStrategies.has(strategy.name)) {
-              const sideKey = `${strategy.name}:${signal.side}`;
-              newMap.set(sideKey, (newMap.get(sideKey) ?? 0) + 1);
-            }
+            const sideKey = `${strategy.name}:${signal.side}`;
+            newMap.set(sideKey, (newMap.get(sideKey) ?? 0) + 1);
             return { ...s, entriesThisWindow: newMap };
           });
         }

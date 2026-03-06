@@ -28,4 +28,24 @@ describe("AccountActivityStore", () => {
         expect(page.items.some((r) => r.action === "Redeem")).toBe(true);
       }),
     ));
+
+  it("reports freshness and stale state from latest import", () =>
+    runTest(
+      Effect.gen(function* () {
+        const store = yield* AccountActivityStore;
+        const unique = Date.now();
+        const csv = [
+          '"marketName",action,usdcAmount,tokenAmount,tokenName,timestamp,hash',
+          `"BTC test",Buy,5,8,Down,${Math.floor(Date.now() / 1000) - 5},0xabc${unique}`,
+        ].join("\n");
+        yield* store.importCsv(csv);
+
+        const fresh = yield* store.getFreshness(120);
+        expect(fresh.stale).toBe(false);
+        expect(fresh.latestImportedAtMs).not.toBeNull();
+
+        const stale = yield* store.getFreshness(-1);
+        expect(stale.stale).toBe(true);
+      }),
+    ));
 });

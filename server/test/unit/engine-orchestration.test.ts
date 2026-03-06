@@ -244,6 +244,12 @@ function makeHarness(opts: {
   orderBookAsk?: number;
   /** Override window end offset from now (default: 240_000ms) */
   windowEndOffsetMs?: number;
+  /** Override mocked executeSignal trade status (default: submitted) */
+  executeSignalStatus?: TradeRecord["status"];
+  /** Optional mocked CLOB reason to attach to executeSignal trades */
+  executeSignalClobReason?: string;
+  /** Optional mocked CLOB result to attach to executeSignal trades */
+  executeSignalClobResult?: string;
   configOverrides?: Partial<AppConfigShape>;
   /** Simulate persistence write failures after first boot write succeeds */
   failFileWrites?: boolean;
@@ -322,7 +328,7 @@ function makeHarness(opts: {
           size: 5,
           shares: 9,
           fee: 0,
-          status: "submitted",
+          status: opts.executeSignalStatus ?? "submitted",
           outcome: null,
           pnl: 0,
           timestamp: Date.now(),
@@ -331,6 +337,8 @@ function makeHarness(opts: {
           conditionId,
           priceToBeatAtEntry,
           ...(opts.orderClobId ? { clobOrderId: opts.orderClobId } : {}),
+          ...(opts.executeSignalClobReason ? { clobReason: opts.executeSignalClobReason } : {}),
+          ...(opts.executeSignalClobResult ? { clobResult: opts.executeSignalClobResult } : {}),
         };
         return trade;
       }),
@@ -534,6 +542,29 @@ describe("TradingEngine orchestration", () => {
     );
   });
 
+  it("consumes entry budget on repeated precision rejects to prevent flood retries", async () => {
+    const harness = makeHarness({
+      window1: "cond-precision-flood",
+      executeSignalStatus: "rejected",
+      executeSignalClobResult: "precision_rejected_by_venue",
+      executeSignalClobReason:
+        "invalid amounts, the market buy orders maker amount supports a max accuracy of 2 decimals, taker amount a max of 4 decimals",
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        yield* engine.setTradingActive(true);
+        yield* TestClock.adjust("12 seconds");
+        // Arb maxEntriesPerWindow=2. Precision rejects should now consume this budget.
+        expect(harness.executeSignalCalls).toBeLessThanOrEqual(2);
+
+        const metrics = yield* engine.getMetrics;
+        expect(metrics.window.arb?.precisionRejected ?? 0).toBeGreaterThan(0);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
   it("auto-pauses trading when efficiency dual-leg incident is detected", async () => {
     mockState.emitByStrategy.arb = false;
     mockState.emitByStrategy.efficiency = true;
@@ -552,6 +583,27 @@ describe("TradingEngine orchestration", () => {
         expect(harness.executeDualCalls).toBeGreaterThan(0);
         const active = yield* engine.isTradingActive;
         expect(active).toBe(false);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("blocks same-side stacking by default within one window", async () => {
+    mockState.emitByStrategy.arb = false;
+    mockState.emitByStrategy.momentum = true;
+    const harness = makeHarness({ window1: "cond-stack-blocked" });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const update = yield* engine.updateStrategyConfig("momentum", {
+          maxEntriesPerWindow: 4,
+          allowSameSideStacking: 0,
+          maxSameSideEntriesPerWindow: 3,
+        });
+        expect(update.status).toBe("ok");
+        yield* engine.setTradingActive(true);
+        yield* TestClock.adjust("12 seconds");
+        expect(harness.executeSignalCalls).toBe(1);
       }).pipe(Effect.scoped, Effect.provide(harness.layer)),
     );
   });

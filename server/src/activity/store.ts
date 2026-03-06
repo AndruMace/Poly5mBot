@@ -31,6 +31,15 @@ export interface ActivityListResult {
   hasMore: boolean;
 }
 
+export interface ActivityFreshness {
+  latestActivityTimestampSec: number | null;
+  latestImportedAtMs: number | null;
+  ageSinceLatestActivitySec: number | null;
+  ageSinceLatestImportSec: number | null;
+  stale: boolean;
+  staleThresholdSec: number;
+}
+
 const DATA_DIR = "data";
 const ACTIVITY_FILE = "data/account-activity.jsonl";
 
@@ -341,9 +350,41 @@ export class AccountActivityStore extends Effect.Service<AccountActivityStore>()
         }),
       );
 
+    const getFreshness = (staleThresholdSec = 600) =>
+      Ref.get(ref).pipe(
+        Effect.map((map) => {
+          const rows = [...map.values()];
+          if (rows.length === 0) {
+            return {
+              latestActivityTimestampSec: null,
+              latestImportedAtMs: null,
+              ageSinceLatestActivitySec: null,
+              ageSinceLatestImportSec: null,
+              stale: true,
+              staleThresholdSec,
+            } satisfies ActivityFreshness;
+          }
+          const latestActivityTimestampSec = rows.reduce((max, r) => Math.max(max, r.timestamp), 0);
+          const latestImportedAtMs = rows.reduce((max, r) => Math.max(max, r.importedAt), 0);
+          const nowSec = Math.floor(Date.now() / 1000);
+          const nowMs = Date.now();
+          const ageSinceLatestActivitySec = Math.max(0, nowSec - latestActivityTimestampSec);
+          const ageSinceLatestImportSec = Math.floor(Math.max(0, nowMs - latestImportedAtMs) / 1000);
+          return {
+            latestActivityTimestampSec,
+            latestImportedAtMs,
+            ageSinceLatestActivitySec,
+            ageSinceLatestImportSec,
+            stale: ageSinceLatestImportSec > staleThresholdSec,
+            staleThresholdSec,
+          } satisfies ActivityFreshness;
+        }),
+      );
+
     return {
       importCsv,
       list,
+      getFreshness,
     } as const;
   }),
 }) {}

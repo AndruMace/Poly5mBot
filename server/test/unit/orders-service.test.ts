@@ -124,6 +124,36 @@ describe("OrderService", () => {
     expect(record?.clobReason).toContain("invalid signature");
   });
 
+  it("classifies venue precision rejects with structured clobResult", async () => {
+    const client = {
+      createAndPostOrder: async () => {
+        throw {
+          message:
+            "invalid amounts, the market buy orders maker amount supports a max accuracy of 2 decimals, taker amount a max of 4 decimals",
+        };
+      },
+    };
+
+    const record = await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        return yield* orders.executeSignal(
+          makeSignal({ strategy: "momentum", side: "DOWN", size: 12.37, maxPrice: 0.671 }),
+          "up-token",
+          "down-token",
+          Date.now() + 60_000,
+          "cond-precision-classify",
+          100_100,
+        );
+      }),
+      client,
+    );
+
+    expect(record).not.toBeNull();
+    expect(record?.status).toBe("rejected");
+    expect(record?.clobResult).toBe("precision_rejected_by_venue");
+  });
+
   it("falls back to FAK partial fills after FOK liquidity exhaustion", async () => {
     const client = {
       createAndPostOrder: async (
@@ -209,10 +239,11 @@ describe("OrderService", () => {
     const client = {
       createAndPostOrder: async (order: { price: number; size: number }) => {
         calls += 1;
-        const makerCents = order.price * order.size * 100;
-        const takerUnits = order.size * 10_000;
-        const makerIs2Dp = Math.abs(makerCents - Math.round(makerCents)) < 1e-9;
-        const takerIs4Dp = Math.abs(takerUnits - Math.round(takerUnits)) < 1e-9;
+        const makerCents = Math.round(order.size * 100);
+        const priceCents = Math.round(order.price * 100);
+        const makerIs2Dp = Math.abs(order.size * 100 - makerCents) < 1e-6;
+        const takerNumerator = makerCents * 10_000;
+        const takerIs4Dp = priceCents > 0 && takerNumerator % priceCents === 0;
         if (!makerIs2Dp || !takerIs4Dp) {
           throw {
             message:
@@ -256,10 +287,11 @@ describe("OrderService", () => {
     const submitted: Array<{ tokenID: string; price: number; size: number }> = [];
     const client = {
       createAndPostOrder: async (order: { tokenID: string; price: number; size: number }) => {
-        const makerCents = order.price * order.size * 100;
-        const takerUnits = order.size * 10_000;
-        const makerIs2Dp = Math.abs(makerCents - Math.round(makerCents)) < 1e-9;
-        const takerIs4Dp = Math.abs(takerUnits - Math.round(takerUnits)) < 1e-9;
+        const makerCents = Math.round(order.size * 100);
+        const priceCents = Math.round(order.price * 100);
+        const makerIs2Dp = Math.abs(order.size * 100 - makerCents) < 1e-6;
+        const takerNumerator = makerCents * 10_000;
+        const takerIs4Dp = priceCents > 0 && takerNumerator % priceCents === 0;
         if (!makerIs2Dp || !takerIs4Dp) {
           throw {
             message:
@@ -346,8 +378,54 @@ describe("OrderService", () => {
     );
 
     expect(record).not.toBeNull();
-    expect(submittedSizes[0]).toBe(5);
+    expect(submittedSizes[0]).toBe(4.5);
     expect(record?.shares).toBe(5);
+  });
+
+  it("returns local precision rejection instead of null when price quantization is invalid", async () => {
+    let calls = 0;
+    const client = {
+      createAndPostOrder: async () => {
+        calls += 1;
+        return { orderID: "ord-should-not-submit", status: "accepted" };
+      },
+    };
+
+    const record = await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        return yield* orders.executeSignal(
+          makeSignal({ strategy: "momentum", size: 2, maxPrice: 0.001 }),
+          "up-token",
+          "down-token",
+          Date.now() + 60_000,
+          "cond-local-precision",
+          100_000,
+        );
+      }),
+      client,
+    );
+
+    expect(calls).toBe(0);
+    expect(record).not.toBeNull();
+    expect(record?.status).toBe("rejected");
+    expect(record?.clobReason).toBe("precision_invalid_local");
+    expect(record?.clobResult).toBe("rejected");
+  });
+
+  it("exposes order precision guard metadata for runtime parity checks", async () => {
+    const info = await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        return yield* orders.getPrecisionGuardInfo;
+      }),
+      {},
+    );
+
+    expect(info.version.length).toBeGreaterThan(0);
+    expect(info.quantizedSingleLegBuy).toBe(true);
+    expect(info.quantizedDualLegBuy).toBe(true);
+    expect(info.localPrecisionValidation).toBe(true);
   });
 
   it("clamps IOC fallback orders to at least 5 shares", async () => {
@@ -366,7 +444,7 @@ describe("OrderService", () => {
           orderID: "ord-min-ioc",
           status: "partially_filled",
           avgPrice: "0.9",
-          sizeMatched: String(order.size),
+          sizeMatched: "5",
         };
       },
       getOrderById: async () => ({
@@ -392,7 +470,7 @@ describe("OrderService", () => {
     );
 
     expect(record).not.toBeNull();
-    expect(iocSubmittedSizes[0]).toBe(5);
+    expect(iocSubmittedSizes[0]).toBe(4.5);
     expect(record?.shares).toBe(5);
   });
 
@@ -423,10 +501,10 @@ describe("OrderService", () => {
     );
 
     expect(trades).toHaveLength(2);
-    expect(submittedSizes).toEqual([5, 5]);
+    expect(submittedSizes).toEqual([2.6, 2.35]);
     expect(trades[0]?.shares).toBe(5);
     expect(trades[1]?.shares).toBe(5);
     expect(trades[0]?.size).toBeCloseTo(2.6, 6);
-    expect(trades[1]?.size).toBeCloseTo(2.34, 6);
+    expect(trades[1]?.size).toBeCloseTo(2.35, 6);
   });
 });

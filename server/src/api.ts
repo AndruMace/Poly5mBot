@@ -210,6 +210,7 @@ export const handleRequest = (
             killSwitches,
             risk,
             metrics,
+            orderPrecisionGuard: metrics.orderPrecisionGuard ?? null,
             enabledMarkets: orchestrator.getEnabledMarkets(),
             storage: {
               backend: config.storage.backend,
@@ -332,6 +333,11 @@ export const handleRequest = (
             timeframe,
           },
         };
+      }
+      if (path === "/api/activity/freshness") {
+        const staleThresholdSec = parsePositiveInt(searchParams.get("staleThresholdSec"), 600, 86400);
+        const freshness = yield* activityStore.getFreshness(staleThresholdSec);
+        return { status: 200, body: freshness };
       }
       if (path === "/api/activity/export.csv") {
         const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
@@ -475,6 +481,78 @@ export const handleRequest = (
           q,
         });
         return { status: 200, body: { ...metrics, timeframe } };
+      }
+      if (path === "/api/analytics/late-window") {
+        const timeframe = parseTradeTimeframe(searchParams.get("timeframe"));
+        const sinceMs = timeframeToSinceMs(timeframe);
+        const minSamples = parsePositiveInt(searchParams.get("minSamples"), 20, 10_000);
+        const mktEngine = resolveEngine();
+        const all = mktEngine
+          ? yield* mktEngine.getTradeRecords(5000)
+          : yield* engine.tracker.getAllTradeRecords(false);
+        const resolved = all.filter((t) => t.status === "resolved" && (!sinceMs || t.timestamp >= sinceMs));
+        type Bucket = "<30s" | "30-60s" | "60-90s" | "90-120s" | ">=120s";
+        const classify = (msRemaining: number): Bucket =>
+          msRemaining < 30_000 ? "<30s"
+            : msRemaining < 60_000 ? "30-60s"
+              : msRemaining < 90_000 ? "60-90s"
+                : msRemaining < 120_000 ? "90-120s"
+                  : ">=120s";
+        const byBucket = new Map<Bucket, { trades: number; wins: number; losses: number; pnl: number }>();
+        const byStrategyBucket = new Map<string, { trades: number; wins: number; losses: number; pnl: number }>();
+        for (const trade of resolved) {
+          const windowEnd = trade.entryContext?.window?.windowEnd ?? trade.windowEnd;
+          const msRemaining = Math.max(0, windowEnd - trade.timestamp);
+          const bucket = classify(msRemaining);
+          const bucketAgg = byBucket.get(bucket) ?? { trades: 0, wins: 0, losses: 0, pnl: 0 };
+          bucketAgg.trades += 1;
+          if (trade.outcome === "win") bucketAgg.wins += 1;
+          if (trade.outcome === "loss") bucketAgg.losses += 1;
+          bucketAgg.pnl += trade.pnl;
+          byBucket.set(bucket, bucketAgg);
+
+          const key = `${trade.strategy}|${bucket}`;
+          const stratAgg = byStrategyBucket.get(key) ?? { trades: 0, wins: 0, losses: 0, pnl: 0 };
+          stratAgg.trades += 1;
+          if (trade.outcome === "win") stratAgg.wins += 1;
+          if (trade.outcome === "loss") stratAgg.losses += 1;
+          stratAgg.pnl += trade.pnl;
+          byStrategyBucket.set(key, stratAgg);
+        }
+        const buckets: Bucket[] = ["<30s", "30-60s", "60-90s", "90-120s", ">=120s"];
+        return {
+          status: 200,
+          body: {
+            timeframe,
+            minSamples,
+            totalResolved: resolved.length,
+            bucketStats: buckets.map((bucket) => {
+              const agg = byBucket.get(bucket) ?? { trades: 0, wins: 0, losses: 0, pnl: 0 };
+              return {
+                bucket,
+                trades: agg.trades,
+                wins: agg.wins,
+                losses: agg.losses,
+                winRate: agg.trades > 0 ? agg.wins / agg.trades : 0,
+                pnl: agg.pnl,
+                meetsMinSamples: agg.trades >= minSamples,
+              };
+            }),
+            strategyBucketStats: [...byStrategyBucket.entries()].map(([key, agg]) => {
+              const [strategy, bucket] = key.split("|");
+              return {
+                strategy,
+                bucket,
+                trades: agg.trades,
+                wins: agg.wins,
+                losses: agg.losses,
+                winRate: agg.trades > 0 ? agg.wins / agg.trades : 0,
+                pnl: agg.pnl,
+                meetsMinSamples: agg.trades >= minSamples,
+              };
+            }),
+          },
+        };
       }
       if (path === "/api/storage/health") {
         const health = yield* postgres.health;

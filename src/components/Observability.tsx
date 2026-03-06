@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRxValue } from "@effect-rx/rx-react";
-import { Activity, Search, Save, Clock3, Table2, AlertTriangle } from "lucide-react";
-import { observabilityEventsRx } from "../store/index.js";
+import { Activity, Search, Save, Clock3, Table2, AlertTriangle, ShieldAlert, RefreshCw, Play } from "lucide-react";
+import {
+  observabilityEventsRx,
+  killSwitchesRx,
+  riskRx,
+  tradingActiveRx,
+  activeMarketIdRx,
+  exchangeConnectedRx,
+} from "../store/index.js";
 import {
   OBSERVABILITY_CATEGORIES,
   OBSERVABILITY_ENTITY_TYPES,
@@ -89,6 +96,13 @@ export function Observability() {
   const [selectedIncident, setSelectedIncident] = useState<CriticalIncident | null>(null);
   const [resolvingIncidentId, setResolvingIncidentId] = useState<string | null>(null);
   const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([]);
+  const [gateActionError, setGateActionError] = useState<string | null>(null);
+  const [gateActionLoading, setGateActionLoading] = useState<"reset" | "start" | null>(null);
+  const killSwitches = useRxValue(killSwitchesRx);
+  const risk = useRxValue(riskRx);
+  const tradingActive = useRxValue(tradingActiveRx);
+  const activeMarketId = useRxValue(activeMarketIdRx);
+  const exchangeConnected = useRxValue(exchangeConnectedRx);
 
   useEffect(() => {
     try {
@@ -263,6 +277,43 @@ export function Observability() {
     setFilters({ ...item.filters });
   };
 
+  const resetKillSwitchPauses = useCallback(async () => {
+    setGateActionError(null);
+    setGateActionLoading("reset");
+    try {
+      const res = await fetch(`/api/killswitches/${activeMarketId}/reset`, { method: "POST" });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error ?? `Reset failed (${res.status})`);
+      }
+    } catch (err) {
+      setGateActionError(err instanceof Error ? err.message : "Failed to reset kill switches");
+    } finally {
+      setGateActionLoading(null);
+    }
+  }, [activeMarketId]);
+
+  const startTrading = useCallback(async () => {
+    setGateActionError(null);
+    setGateActionLoading("start");
+    try {
+      const res = await fetch(`/api/trading/${activeMarketId}/toggle`, { method: "POST" });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error ?? `Trading toggle failed (${res.status})`);
+      }
+    } catch (err) {
+      setGateActionError(err instanceof Error ? err.message : "Failed to start trading");
+    } finally {
+      setGateActionLoading(null);
+    }
+  }, [activeMarketId]);
+
+  const activeKillSwitches = useMemo(
+    () => killSwitches.filter((ks) => ks.active),
+    [killSwitches],
+  );
+
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
@@ -359,6 +410,76 @@ export function Observability() {
             ))}
           </div>
         </div>
+      </div>
+
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <ShieldAlert size={14} className="text-[var(--accent-yellow)]" />
+            <span>Rejection Gates</span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => void resetKillSwitchPauses()}
+              disabled={gateActionLoading !== null}
+              className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1 text-xs disabled:opacity-50"
+            >
+              <RefreshCw size={11} className="mr-1 inline" />
+              {gateActionLoading === "reset" ? "Resetting..." : "Reset Pauses"}
+            </button>
+            {!tradingActive && (
+              <button
+                onClick={() => void startTrading()}
+                disabled={gateActionLoading !== null}
+                className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1 text-xs disabled:opacity-50"
+              >
+                <Play size={11} className="mr-1 inline" />
+                {gateActionLoading === "start" ? "Starting..." : "Start Trading"}
+              </button>
+            )}
+          </div>
+        </div>
+        {gateActionError && (
+          <div className="mb-2 text-xs text-[var(--accent-red)]">{gateActionError}</div>
+        )}
+        <div className="grid gap-2 md:grid-cols-2">
+          <div className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2 text-xs">
+            <div className="text-[var(--text-secondary)]">Trading Active</div>
+            <div className={tradingActive ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+              {tradingActive ? "yes" : "no"}
+            </div>
+          </div>
+          <div className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2 text-xs">
+            <div className="text-[var(--text-secondary)]">Exchange Connected</div>
+            <div className={exchangeConnected ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+              {exchangeConnected ? "yes" : "no"}
+            </div>
+          </div>
+          <div className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2 text-xs">
+            <div className="text-[var(--text-secondary)]">Auto-Pause Remaining</div>
+            <div className={risk.pauseRemainingSec > 0 ? "text-[var(--accent-yellow)]" : "text-[var(--accent-green)]"}>
+              {Math.max(0, Math.round(risk.pauseRemainingSec))}s
+            </div>
+          </div>
+          <div className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2 text-xs">
+            <div className="text-[var(--text-secondary)]">Active Kill Switches</div>
+            <div className={activeKillSwitches.length > 0 ? "text-[var(--accent-red)]" : "text-[var(--accent-green)]"}>
+              {activeKillSwitches.length}
+            </div>
+          </div>
+        </div>
+        {killSwitches.length > 0 && (
+          <div className="mt-2 max-h-[16vh] overflow-auto rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2">
+            {killSwitches.map((ks) => (
+              <div key={ks.name} className="mb-1 flex items-center justify-between text-xs last:mb-0">
+                <span className={ks.active ? "text-[var(--accent-red)]" : "text-[var(--text-secondary)]"}>
+                  {ks.name}
+                </span>
+                <span className="font-mono text-[10px] text-[var(--text-secondary)]">{ks.reason}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3">

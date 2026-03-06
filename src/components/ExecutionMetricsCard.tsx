@@ -18,6 +18,12 @@ export function ExecutionMetricsCard() {
         <Gauge size={16} className="text-[var(--accent-blue)]" />
         <h3 className="text-sm font-semibold">Execution Metrics</h3>
       </div>
+      {metrics.orderPrecisionGuard && (
+        <div className="mb-3 rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-[11px]">
+          <span className="text-[var(--text-secondary)]">Order precision guard:</span>{" "}
+          <span className="font-mono">{metrics.orderPrecisionGuard.version}</span>
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-3 mb-3 text-xs">
         <div className="bg-[var(--bg-secondary)] rounded px-3 py-2">
           <div className="text-[var(--text-secondary)]">Last Signal→Submit</div>
@@ -62,6 +68,8 @@ export function ExecutionMetricsCard() {
               <th className="text-right py-1">Signals</th>
               <th className="text-right py-1">Risk Rej</th>
               <th className="text-right py-1">Live Rej</th>
+              <th className="text-right py-1">Precision Rej</th>
+              <th className="text-right py-1">Silent Null</th>
               <th className="text-right py-1">Dyn Win</th>
               <th className="text-right py-1">Early OK</th>
               <th className="text-right py-1">Early Rej</th>
@@ -82,6 +90,8 @@ export function ExecutionMetricsCard() {
                   <td className="py-1 text-right font-mono">{row?.signals ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.riskRejected ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.liveRejected ?? 0}</td>
+                  <td className="py-1 text-right font-mono">{row?.precisionRejected ?? 0}</td>
+                  <td className="py-1 text-right font-mono">{row?.silentNullExecution ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.dynamicWindowUsed ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.earlyEntryAccepted ?? 0}</td>
                   <td className="py-1 text-right font-mono">{row?.earlyEntryRejected ?? 0}</td>

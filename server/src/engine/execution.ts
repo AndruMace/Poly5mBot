@@ -12,6 +12,26 @@ function computeLatencyGuardLeadMs(observedLatencyMs: number, cfg: WhaleHuntConf
   );
 }
 
+type ExecutionResult = {
+  executed: boolean;
+  rejectClass?: "precision_invalid_local" | "precision_rejected_by_venue" | "silent_null_execution";
+  rejectReason?: string;
+};
+
+function classifyReject(reason: string | undefined): ExecutionResult["rejectClass"] | undefined {
+  if (!reason) return undefined;
+  const normalized = reason.toLowerCase();
+  if (normalized.includes("precision_invalid_local")) return "precision_invalid_local";
+  if (
+    normalized.includes("invalid amounts")
+    || normalized.includes("max accuracy of 2 decimals")
+    || normalized.includes("taker amount a max of 4 decimals")
+  ) {
+    return "precision_rejected_by_venue";
+  }
+  return undefined;
+}
+
 interface ExecutionDeps {
   stateRef: Ref.Ref<EngineState>;
   minFillRatioByStrategy: Record<string, number>;
@@ -183,7 +203,7 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
   const executeLive = (signal: Signal, conditionId: string, ptb: number, entryCtx: EntryContext) =>
     Effect.gen(function* () {
       const st = yield* Ref.get(deps.stateRef);
-      if (!st.currentWindow) return false;
+      if (!st.currentWindow) return { executed: false } as ExecutionResult;
 
       const signalToSubmitMs = Math.max(0, Date.now() - signal.timestamp);
       yield* Ref.update(deps.stateRef, (s) => { deps.recordSignalLatency(s, signalToSubmitMs); return s; });
@@ -204,7 +224,7 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
           yield* Effect.log(
             `${deps.logPrefix} whale-hunt ${signal.side} blocked by latency guard: latency ${Math.round(observedLatencyMs)}ms, remaining ${Math.round(remainingMs)}ms, required lead ${Math.round(requiredLeadMs)}ms`,
           );
-          return false;
+          return { executed: false } as ExecutionResult;
         }
       }
 
@@ -230,8 +250,12 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
               return s;
             });
           } else if (trade.status === "cancelled" || trade.status === "rejected") {
+            const rejectClass = classifyReject(trade.clobReason);
             yield* Ref.update(deps.stateRef, (s) => {
               deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false);
+              if (rejectClass === "precision_invalid_local" || rejectClass === "precision_rejected_by_venue") {
+                deps.bumpDiag(s, signal.strategy, "precisionRejected", 1, false);
+              }
               return s;
             });
           }
@@ -261,11 +285,19 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
           yield* Effect.logError(
             `${deps.logPrefix} Efficiency dual-leg incident detected. Trading paused and efficiency strategy blocked until manual restart.`,
           );
-          return false;
+          return { executed: false } as ExecutionResult;
         }
-        return trades.some(
+        const executed = trades.some(
           (t) => t.status === "submitted" || t.status === "partial" || t.status === "filled",
         );
+        if (executed) return { executed } as ExecutionResult;
+        const firstReject = trades.find((t) => t.status === "rejected" || t.status === "cancelled");
+        const rejectReason = firstReject?.clobReason;
+        return {
+          executed: false,
+          rejectClass: classifyReject(rejectReason),
+          rejectReason,
+        } as ExecutionResult;
       }
 
       const trade = yield* deps.orderService.executeSignal(
@@ -284,27 +316,52 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
             return s;
           });
         } else if (trade.status === "cancelled" || trade.status === "rejected") {
-          yield* Ref.update(deps.stateRef, (s) => { deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false); return s; });
+          const rejectClass = classifyReject(trade.clobReason);
+          yield* Ref.update(deps.stateRef, (s) => {
+            deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false);
+            if (rejectClass === "precision_invalid_local" || rejectClass === "precision_rejected_by_venue") {
+              deps.bumpDiag(s, signal.strategy, "precisionRejected", 1, false);
+            }
+            return s;
+          });
         }
         // Emit the stored record so the WS message timestamp matches what the
         // API and cursor pagination return (both use the event-sourced timestamp).
         const stored = yield* deps.tracker.getTradeRecordById(trade.id, false);
         yield* deps.emit({ _tag: "Trade", data: stored ?? trade });
-        return trade.status === "submitted" || trade.status === "partial" || trade.status === "filled";
+        const executed = trade.status === "submitted" || trade.status === "partial" || trade.status === "filled";
+        if (executed) {
+          return { executed: true } as ExecutionResult;
+        }
+        const rejectReason = trade.clobReason;
+        return {
+          executed: false,
+          rejectClass: classifyReject(rejectReason),
+          rejectReason,
+        } as ExecutionResult;
       }
-      yield* Ref.update(deps.stateRef, (s) => { deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false); return s; });
-      return false;
+      yield* Ref.update(deps.stateRef, (s) => {
+        deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false);
+        deps.bumpDiag(s, signal.strategy, "silentNullExecution", 1, false);
+        return s;
+      });
+      return {
+        executed: false,
+        rejectClass: "silent_null_execution",
+        rejectReason: "order_service_returned_null",
+      } as ExecutionResult;
     });
 
   const executeStrategy = (signal: Signal, shadow: boolean, ctx: MarketContext, entryCtx: EntryContext) =>
     Effect.gen(function* () {
       const st = yield* Ref.get(deps.stateRef);
-      if (!st.currentWindow) return false;
+      if (!st.currentWindow) return { executed: false } as ExecutionResult;
       const conditionId = st.currentWindow.conditionId;
       const ptb = st.currentWindow.priceToBeat ?? 0;
 
       if (shadow) {
-        return yield* executeShadow(signal, conditionId, ptb, ctx, entryCtx);
+        const executed = yield* executeShadow(signal, conditionId, ptb, ctx, entryCtx);
+        return { executed } as ExecutionResult;
       }
       return yield* executeLive(signal, conditionId, ptb, entryCtx);
     });
