@@ -6,6 +6,7 @@ import type { MarketContext, Signal } from "../types.js";
 const DEFAULT_CONFIG: Record<string, number> = {
   minWindowElapsedSec: 180,
   minProfitBps: 8,
+  slippageBufferBps: 4,
   tradeSize: 20,
   maxEntriesPerWindow: 2,
 };
@@ -37,8 +38,10 @@ export const makeEfficiencyStrategy = Effect.gen(function* () {
       const feeUp = effectiveFeeRateStatic(bestAskUp);
       const feeDown = effectiveFeeRateStatic(bestAskDown);
       const totalFees = feeUp + feeDown;
+      const slippageBufferBps = s.config["slippageBufferBps"] ?? 0;
+      const slippageBuffer = slippageBufferBps / 10_000;
 
-      const netProfit = 1.0 - totalCost - totalFees;
+      const netProfit = 1.0 - totalCost - totalFees - slippageBuffer;
       const profitBps = netProfit * 10000;
 
       if (profitBps < s.config["minProfitBps"]!) return null;
@@ -49,7 +52,7 @@ export const makeEfficiencyStrategy = Effect.gen(function* () {
         size: s.config["tradeSize"]!,
         maxPrice: bestAskUp,
         strategy: "efficiency",
-        reason: `Sum=${totalCost.toFixed(4)}, profit=${profitBps.toFixed(0)}bps after fees`,
+        reason: `Sum=${totalCost.toFixed(4)}, fees=${(totalFees * 10_000).toFixed(1)}bps, buffer=${slippageBufferBps.toFixed(1)}bps, net=${profitBps.toFixed(0)}bps`,
         timestamp: Date.now(),
       };
       yield* Ref.update(ref, (st) => ({ ...st, status: "trading" as const, lastSignal: signal }));

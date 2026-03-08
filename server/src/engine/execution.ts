@@ -4,6 +4,7 @@ import type { EngineState } from "./state.js";
 import { preflightShadowBuy } from "./shadow-preflight.js";
 import type { SimulatorOpts } from "./fill-simulator.js";
 import type { WhaleHuntConfig } from "../strategies/whale-hunt-config.js";
+import { effectiveFeeRateStatic } from "../polymarket/orders.js";
 
 function computeLatencyGuardLeadMs(observedLatencyMs: number, cfg: WhaleHuntConfig): number {
   return Math.max(
@@ -67,6 +68,8 @@ interface ExecutionDeps {
   orderService: {
     executeDualBuy: (...args: any[]) => Effect.Effect<any[], any, never>;
     executeSignal: (...args: any[]) => Effect.Effect<any | null, any, never>;
+    executeSell: (...args: any[]) => Effect.Effect<any, any, never>;
+    getOrderBook: (tokenId: string) => Effect.Effect<any, any, never>;
   };
   riskManager: {
     onTradeOpened: (trade: any, shadow?: boolean) => Effect.Effect<void, any, never>;
@@ -87,7 +90,42 @@ interface ExecutionDeps {
     details: Record<string, unknown>;
   }) => Effect.Effect<void, any, never>;
   whaleHuntConfig: WhaleHuntConfig;
+  efficiencyRecovery: {
+    maxLegImbalanceMs: number;
+    maxHedgeRetries: number;
+    maxResidualExposureUsd: number;
+    maxUnwindSlippageBps: number;
+  };
   logPrefix: string;
+}
+
+function isLiveExecutedStatus(status: string | null | undefined): boolean {
+  return status === "submitted" || status === "partial" || status === "filled";
+}
+
+function getBestAskFromBook(book: unknown): number | null {
+  if (!book || typeof book !== "object") return null;
+  const asks = (book as any).asks;
+  if (!Array.isArray(asks) || asks.length === 0) return null;
+  const first = asks[0];
+  const raw = first?.price;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function getBestBidFromBook(book: unknown): number | null {
+  if (!book || typeof book !== "object") return null;
+  const bids = (book as any).bids;
+  if (!Array.isArray(bids) || bids.length === 0) return null;
+  const first = bids[0];
+  const raw = first?.price;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function floorTo(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.floor((value + Number.EPSILON) * factor) / factor;
 }
 
 export function makeExecutionHandlers(deps: ExecutionDeps) {
@@ -229,42 +267,165 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
       }
 
       if (signal.strategy === "efficiency") {
+        const persistLiveTrade = (trade: any) =>
+          Effect.gen(function* () {
+            trade.entryContext = entryCtx;
+            yield* Ref.update(deps.stateRef, (s) => {
+              deps.bumpDiag(s, signal.strategy, "submitted", 1, false);
+              return s;
+            });
+            yield* deps.tracker.addTrade(trade);
+            if (isLiveExecutedStatus(trade.status)) {
+              yield* deps.riskManager.onTradeOpened(trade);
+              yield* Ref.update(deps.stateRef, (s) => {
+                const diagKey = trade.status === "partial" ? "partialFill" : trade.status === "submitted" ? "submitted" : "fullFill";
+                deps.bumpDiag(s, signal.strategy, diagKey, 1, false);
+                return s;
+              });
+            } else if (trade.status === "cancelled" || trade.status === "rejected") {
+              const rejectClass = classifyReject(trade.clobReason);
+              yield* Ref.update(deps.stateRef, (s) => {
+                deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false);
+                if (rejectClass === "precision_invalid_local" || rejectClass === "precision_rejected_by_venue") {
+                  deps.bumpDiag(s, signal.strategy, "precisionRejected", 1, false);
+                }
+                return s;
+              });
+            }
+            const stored = yield* deps.tracker.getTradeRecordById(trade.id, false);
+            yield* deps.emit({ _tag: "Trade", data: stored ?? trade });
+          });
+
         const trades = yield* deps.orderService.executeDualBuy(
           st.currentWindow.upTokenId, st.currentWindow.downTokenId,
           st.orderBook.bestAskUp!, st.orderBook.bestAskDown!,
           signal.size, st.currentWindow.endTime, conditionId, ptb,
         );
-        let incident = false;
         for (const trade of trades) {
-          trade.entryContext = entryCtx;
-          if (trade.strategy === "efficiency-partial") {
-            incident = true;
-          }
-          yield* Ref.update(deps.stateRef, (s) => { deps.bumpDiag(s, signal.strategy, "submitted", 1, false); return s; });
-          yield* deps.tracker.addTrade(trade);
-          if (trade.status === "filled" || trade.status === "partial" || trade.status === "submitted") {
-            yield* deps.riskManager.onTradeOpened(trade);
-            yield* Ref.update(deps.stateRef, (s) => {
-              const diagKey = trade.status === "partial" ? "partialFill" : trade.status === "submitted" ? "submitted" : "fullFill";
-              deps.bumpDiag(s, signal.strategy, diagKey, 1, false);
-              return s;
-            });
-          } else if (trade.status === "cancelled" || trade.status === "rejected") {
-            const rejectClass = classifyReject(trade.clobReason);
-            yield* Ref.update(deps.stateRef, (s) => {
-              deps.bumpDiag(s, signal.strategy, "liveRejected", 1, false);
-              if (rejectClass === "precision_invalid_local" || rejectClass === "precision_rejected_by_venue") {
-                deps.bumpDiag(s, signal.strategy, "precisionRejected", 1, false);
-              }
-              return s;
-            });
-          }
-          // Emit the stored record so the WS message timestamp matches what the
-          // API and cursor pagination return (both use the event-sourced timestamp).
-          const stored = yield* deps.tracker.getTradeRecordById(trade.id, false);
-          yield* deps.emit({ _tag: "Trade", data: stored ?? trade });
+          yield* persistLiveTrade(trade);
         }
-        if (incident) {
+
+        const partialIncidentTrade = trades.find((t) => t.strategy === "efficiency-partial");
+        if (partialIncidentTrade && isLiveExecutedStatus(partialIncidentTrade.status)) {
+          const elapsedMs = Date.now() - partialIncidentTrade.timestamp;
+          const withinLegImbalanceLimit = elapsedMs <= deps.efficiencyRecovery.maxLegImbalanceMs;
+          let recovered = false;
+          let terminalState: "hedged" | "flattened" | "paused_with_residual" = "paused_with_residual";
+          let residualExposureUsd = partialIncidentTrade.size;
+
+          if (withinLegImbalanceLimit) {
+            const oppositeSide: "UP" | "DOWN" = partialIncidentTrade.side === "UP" ? "DOWN" : "UP";
+            const oppositeTokenId = oppositeSide === "UP" ? st.currentWindow.upTokenId : st.currentWindow.downTokenId;
+            for (let attempt = 1; attempt <= deps.efficiencyRecovery.maxHedgeRetries; attempt += 1) {
+              const oppositeBook = yield* deps.orderService.getOrderBook(oppositeTokenId);
+              const oppositeBestAsk = getBestAskFromBook(oppositeBook);
+              if (oppositeBestAsk === null) break;
+              const sumCost = partialIncidentTrade.entryPrice + oppositeBestAsk;
+              const expectedNetBps = (1 - sumCost - effectiveFeeRateStatic(partialIncidentTrade.entryPrice) - effectiveFeeRateStatic(oppositeBestAsk)) * 10_000;
+              if (expectedNetBps <= 0) {
+                break;
+              }
+              const hedgeMaxPrice = floorTo(oppositeBestAsk * (1 + deps.efficiencyRecovery.maxUnwindSlippageBps / 10_000), 2);
+              const hedgeSignal: Signal = {
+                side: oppositeSide,
+                confidence: Math.max(0.5, signal.confidence),
+                size: partialIncidentTrade.size,
+                maxPrice: hedgeMaxPrice,
+                strategy: "efficiency",
+                reason: `efficiency_recovery_hedge_attempt_${attempt}`,
+                timestamp: Date.now(),
+              };
+              const hedgeTrade = yield* deps.orderService.executeSignal(
+                hedgeSignal,
+                st.currentWindow.upTokenId,
+                st.currentWindow.downTokenId,
+                st.currentWindow.endTime,
+                conditionId,
+                ptb,
+              );
+              if (!hedgeTrade) continue;
+              yield* persistLiveTrade(hedgeTrade);
+              if (isLiveExecutedStatus(hedgeTrade.status)) {
+                residualExposureUsd = Math.max(0, partialIncidentTrade.size - hedgeTrade.size);
+                if (residualExposureUsd <= deps.efficiencyRecovery.maxResidualExposureUsd) {
+                  recovered = true;
+                  terminalState = "hedged";
+                  break;
+                }
+              }
+            }
+          }
+
+          if (!recovered) {
+            const sameLegBook = yield* deps.orderService.getOrderBook(partialIncidentTrade.tokenId);
+            const sameLegBestBid = getBestBidFromBook(sameLegBook);
+            if (sameLegBestBid !== null) {
+              const minPrice = floorTo(Math.max(0.01, sameLegBestBid * (1 - deps.efficiencyRecovery.maxUnwindSlippageBps / 10_000)), 2);
+              const closeTrade = yield* deps.orderService.executeSell(
+                partialIncidentTrade.tokenId,
+                partialIncidentTrade.side,
+                "efficiency-flatten",
+                partialIncidentTrade.shares,
+                minPrice,
+                st.currentWindow.endTime,
+                conditionId,
+                ptb,
+              );
+              if (closeTrade) {
+                yield* persistLiveTrade(closeTrade);
+                if (isLiveExecutedStatus(closeTrade.status)) {
+                  const residualShares = Math.max(0, partialIncidentTrade.shares - closeTrade.shares);
+                  residualExposureUsd = residualShares * partialIncidentTrade.entryPrice;
+                  if (residualExposureUsd <= deps.efficiencyRecovery.maxResidualExposureUsd) {
+                    recovered = true;
+                    terminalState = "flattened";
+                  }
+                }
+              }
+            }
+          }
+
+          if (!recovered) {
+            terminalState = "paused_with_residual";
+          }
+
+          if (terminalState === "paused_with_residual") {
+            const incidentReason = withinLegImbalanceLimit
+              ? "hedge_or_flatten_failed"
+              : "max_leg_imbalance_exceeded";
+            yield* Ref.update(deps.stateRef, (s) => ({
+              ...s,
+              efficiencyIncidentBlocked: true,
+              tradingActive: false,
+            }));
+            yield* deps.emit({ _tag: "TradingActive", data: { tradingActive: false } });
+            yield* deps.haltTradingWithIncident({
+              kind: "efficiency_partial_incident",
+              message: "Efficiency dual-leg recovery failed. Trading paused until manual intervention.",
+              fingerprint: `efficiency-partial:${conditionId}:${Date.now()}`,
+              details: {
+                conditionId,
+                strategy: signal.strategy,
+                side: signal.side,
+                size: signal.size,
+                reason: incidentReason,
+                terminalState,
+                residualExposureUsd: Number(residualExposureUsd.toFixed(2)),
+              },
+            });
+            yield* Effect.logError(
+              `${deps.logPrefix} Efficiency recovery failed (${incidentReason}); paused with residual $${residualExposureUsd.toFixed(2)}.`,
+            );
+            return { executed: false } as ExecutionResult;
+          }
+
+          yield* Effect.log(
+            `${deps.logPrefix} Efficiency recovery completed (${terminalState}) residual=$${residualExposureUsd.toFixed(2)}.`,
+          );
+          return { executed: true } as ExecutionResult;
+        }
+
+        if (partialIncidentTrade) {
           yield* Ref.update(deps.stateRef, (s) => ({
             ...s,
             efficiencyIncidentBlocked: true,
@@ -288,7 +449,7 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
           return { executed: false } as ExecutionResult;
         }
         const executed = trades.some(
-          (t) => t.status === "submitted" || t.status === "partial" || t.status === "filled",
+          (t) => isLiveExecutedStatus(t.status),
         );
         if (executed) return { executed } as ExecutionResult;
         const firstReject = trades.find((t) => t.status === "rejected" || t.status === "cancelled");

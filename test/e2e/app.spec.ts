@@ -73,6 +73,26 @@ test.beforeEach(async ({ page }) => {
     });
   });
 
+  await page.route("**/api/trades?**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [],
+        hasMore: false,
+        nextCursor: null,
+      }),
+    });
+  });
+
+  await page.route("**/api/trades/export.csv**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/csv",
+      body: "id,strategy\n",
+    });
+  });
+
   await page.goto("/");
 
   await page.waitForTimeout(50);
@@ -254,7 +274,7 @@ test("strategy and trade tabs render server-backed state", async ({ page }) => {
       },
     });
   });
-  await expect(page.getByText(/1 trades/i)).toBeVisible();
+  await expect(page.getByText(/2 trades/i)).toBeVisible();
   await expect(page.getByRole("button", { name: /export csv/i })).toBeVisible();
 });
 

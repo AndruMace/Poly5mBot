@@ -287,12 +287,15 @@ describe("OrderService", () => {
     const submitted: Array<{ tokenID: string; price: number; size: number }> = [];
     const client = {
       createAndPostOrder: async (order: { tokenID: string; price: number; size: number }) => {
-        const makerCents = Math.round(order.size * 100);
-        const priceCents = Math.round(order.price * 100);
-        const makerIs2Dp = Math.abs(order.size * 100 - makerCents) < 1e-6;
-        const takerNumerator = makerCents * 10_000;
-        const takerIs4Dp = priceCents > 0 && takerNumerator % priceCents === 0;
-        if (!makerIs2Dp || !takerIs4Dp) {
+        // Simulate the CLOB library: size = shares (taker amount).
+        // CLOB computes maker = roundDown(shares, 2) * price. If the raw float has
+        // >4dp (IEEE-754 noise), the CLOB normalizes it down to 4dp before sending.
+        // The venue then requires that normalized maker to have ≤2dp.
+        const roundedShares = Math.floor(order.size * 100) / 100;
+        const rawMaker = roundedShares * order.price;
+        const normalizedMaker = Number(rawMaker.toFixed(4)); // CLOB's 4dp fallback
+        const makerDp = (normalizedMaker.toString().split(".")[1] ?? "").length;
+        if (makerDp > 2) {
           throw {
             message:
               "invalid amounts, the market buy orders maker amount supports a max accuracy of 2 decimals, taker amount a max of 4 decimals",
@@ -378,7 +381,8 @@ describe("OrderService", () => {
     );
 
     expect(record).not.toBeNull();
-    expect(submittedSizes[0]).toBe(4.5);
+    // size sent to CLOB is shares (taker amount), not notional — the CLOB computes USDC internally.
+    expect(submittedSizes[0]).toBe(5);
     expect(record?.shares).toBe(5);
   });
 
@@ -424,8 +428,85 @@ describe("OrderService", () => {
 
     expect(info.version.length).toBeGreaterThan(0);
     expect(info.quantizedSingleLegBuy).toBe(true);
+    expect(info.quantizedSingleLegSell).toBe(true);
     expect(info.quantizedDualLegBuy).toBe(true);
     expect(info.localPrecisionValidation).toBe(true);
+  });
+
+  it("executes SELL close flow with FAK when flattening a leg", async () => {
+    const submitted: Array<{ side: string; size: number; price: number; tif: string }> = [];
+    const client = {
+      createAndPostOrder: async (
+        order: { side: string; size: number; price: number },
+        _opts: unknown,
+        tif: string,
+      ) => {
+        submitted.push({ side: order.side, size: order.size, price: order.price, tif });
+        return {
+          orderID: "sell-close-1",
+          status: "partially_filled",
+          avgPrice: "0.53",
+          sizeMatched: "6.0",
+        };
+      },
+      getOrderById: async () => ({
+        status: "partially_filled",
+        averagePrice: "0.53",
+        filledSize: "6.0",
+      }),
+    };
+
+    const record = await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        return yield* orders.executeSell(
+          "up-token",
+          "UP",
+          "efficiency-flatten",
+          6,
+          0.53,
+          Date.now() + 60_000,
+          "cond-close-1",
+          100_000,
+        );
+      }),
+      client,
+    );
+
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]?.side).toBe("SELL");
+    expect(submitted[0]?.tif).toBe("FAK");
+    expect(record.status).toBe("partial");
+    expect(record.shares).toBeCloseTo(6, 6);
+    expect(record.entryPrice).toBeCloseTo(0.53, 6);
+  });
+
+  it("returns rejected close record when SELL order fails", async () => {
+    const client = {
+      createAndPostOrder: async () => {
+        throw { message: "sell not allowed for token" };
+      },
+    };
+
+    const record = await runWithClient(
+      Effect.gen(function* () {
+        const orders = yield* OrderService;
+        return yield* orders.executeSell(
+          "down-token",
+          "DOWN",
+          "efficiency-flatten",
+          8,
+          0.47,
+          Date.now() + 60_000,
+          "cond-close-2",
+          100_000,
+        );
+      }),
+      client,
+    );
+
+    expect(record.status).toBe("rejected");
+    expect(record.clobReason).toContain("sell not allowed");
   });
 
   it("clamps IOC fallback orders to at least 5 shares", async () => {
@@ -470,7 +551,8 @@ describe("OrderService", () => {
     );
 
     expect(record).not.toBeNull();
-    expect(iocSubmittedSizes[0]).toBe(4.5);
+    // size sent to CLOB is shares (taker amount), not notional — the CLOB computes USDC internally.
+    expect(iocSubmittedSizes[0]).toBe(5);
     expect(record?.shares).toBe(5);
   });
 

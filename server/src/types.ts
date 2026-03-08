@@ -77,6 +77,13 @@ export interface SignalTelemetry {
   earlyEntry?: boolean;
   reversalImprobability?: number;
   orderBookImbalance?: number;
+  arbBinancePrice?: number;
+  arbReferencePrice?: number;
+  arbReferenceSources?: number;
+  arbSpreadPct?: number;
+  arbAbsSpreadPct?: number;
+  arbPtbDeltaPct?: number;
+  arbConfirmers?: number;
 }
 
 export interface Signal {
@@ -383,6 +390,10 @@ export interface RiskSnapshot {
   maxWindowSpend: number;
   windowTradeCount: number;
   maxWindowTrades: number;
+  maxLegImbalanceMs?: number;
+  maxHedgeRetries?: number;
+  maxResidualExposureUsd?: number;
+  maxUnwindSlippageBps?: number;
 }
 
 export interface StorageHealthStatus {

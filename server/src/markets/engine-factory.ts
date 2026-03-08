@@ -129,6 +129,7 @@ export interface StandaloneEngineSharedDeps {
     getOrderStatusById: (orderId: string) => Effect.Effect<any, any, never>;
     executeSignal: (...args: any[]) => Effect.Effect<any, any, never>;
     executeDualBuy: (...args: any[]) => Effect.Effect<any[], any, never>;
+    executeSell: (...args: any[]) => Effect.Effect<any, any, never>;
   };
   polyClient: {
     isConnected: Effect.Effect<boolean, never, never>;
@@ -239,6 +240,8 @@ export function createStandaloneMarketEngine(
           yield* s.appendEvent(trade.id, "partial_fill", { shares: trade.shares, price: trade.entryPrice, fee: trade.fee, orderId: trade.clobOrderId, result: trade.clobResult ?? "partial", reason: trade.clobReason });
         } else if (trade.status === "rejected") {
           yield* s.appendEvent(trade.id, "order_rejected", { shares: trade.shares, price: trade.entryPrice, orderId: trade.clobOrderId, result: trade.clobResult ?? "rejected", reason: trade.clobReason ?? "Order rejected by venue" });
+        } else if (trade.status === "cancelled") {
+          yield* s.appendEvent(trade.id, "cancel", { reason: trade.clobReason ?? "Order cancelled" });
         } else {
           yield* s.appendEvent(trade.id, "order_submitted", { shares: trade.shares, price: trade.entryPrice, orderId: trade.clobOrderId, result: trade.clobResult, reason: trade.clobReason });
         }
@@ -478,18 +481,31 @@ export function createStandaloneMarketEngine(
         }),
       ).pipe(Effect.asVoid);
 
+    const applyStrategyRuntimeConfig = (strategyName: string, overrides: Record<string, number> | undefined) =>
+      Effect.gen(function* () {
+        if (!overrides || Object.keys(overrides).length === 0) return;
+        const strategy = strategyMap.get(strategyName);
+        if (!strategy) return;
+        const result = yield* strategy.updateConfig(overrides);
+        if (!result.ok) {
+          yield* Effect.logWarning(
+            `[Engine:${marketId}] Failed to apply ${strategyName} runtime config: ${result.error ?? "invalid values"}`,
+          );
+        }
+      });
+
     const applyWhaleHuntRuntimeConfig = Effect.gen(function* () {
-      const strategy = strategyMap.get("whale-hunt");
-      if (!strategy) return;
-      const result = yield* strategy.updateConfig(toWhaleHuntStrategyConfig(whaleHuntConfig));
-      if (!result.ok) {
-        yield* Effect.logWarning(
-          `[Engine:${marketId}] Failed to apply whale-hunt runtime config: ${result.error ?? "invalid values"}`,
-        );
-      }
+      yield* applyStrategyRuntimeConfig("whale-hunt", toWhaleHuntStrategyConfig(whaleHuntConfig));
     });
 
+    const applyMarketStrategyRuntimeConfig = Effect.forEach(
+      Object.entries(marketConfig.strategyConfigOverrides ?? {}),
+      ([strategyName, overrides]) => applyStrategyRuntimeConfig(strategyName, overrides),
+      { discard: true },
+    );
+
     yield* applyWhaleHuntRuntimeConfig;
+    yield* applyMarketStrategyRuntimeConfig;
     const persistedStrategyState = yield* readPersistedStrategyState;
     yield* applyPersistedStrategyState(persistedStrategyState);
     const bootPersistResult = yield* persistStrategyStates;
@@ -712,6 +728,12 @@ export function createStandaloneMarketEngine(
       recordSignalLatency,
       haltTradingWithIncident,
       whaleHuntConfig,
+      efficiencyRecovery: {
+        maxLegImbalanceMs: riskConfig.maxLegImbalanceMs,
+        maxHedgeRetries: riskConfig.maxHedgeRetries,
+        maxResidualExposureUsd: riskConfig.maxResidualExposureUsd,
+        maxUnwindSlippageBps: riskConfig.maxUnwindSlippageBps,
+      },
       logPrefix: `[Engine:${marketId}]`,
     });
 

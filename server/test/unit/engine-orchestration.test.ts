@@ -250,6 +250,10 @@ function makeHarness(opts: {
   executeSignalClobReason?: string;
   /** Optional mocked CLOB result to attach to executeSignal trades */
   executeSignalClobResult?: string;
+  /** Override mocked executeSell trade status (default: rejected) */
+  executeSellStatus?: TradeRecord["status"];
+  /** Optional mocked CLOB reason to attach to executeSell trades */
+  executeSellClobReason?: string;
   configOverrides?: Partial<AppConfigShape>;
   /** Simulate persistence write failures after first boot write succeeds */
   failFileWrites?: boolean;
@@ -321,12 +325,12 @@ function makeHarness(opts: {
         capturedSignals.push(signal);
         const trade: TradeRecord = {
           id: `live-${executeSignalCalls}`,
-          strategy: "arb",
-          side: "UP",
-          tokenId: "up-token",
-          entryPrice: 0.55,
-          size: 5,
-          shares: 9,
+          strategy: signal.strategy,
+          side: signal.side,
+          tokenId: signal.side === "UP" ? "up-token" : "down-token",
+          entryPrice: signal.maxPrice,
+          size: signal.size,
+          shares: signal.maxPrice > 0 ? Number((signal.size / signal.maxPrice).toFixed(2)) : 0,
           fee: 0,
           status: opts.executeSignalStatus ?? "submitted",
           outcome: null,
@@ -368,6 +372,26 @@ function makeHarness(opts: {
           } as TradeRecord,
         ];
       }),
+    executeSell: (tokenId: string, side: "UP" | "DOWN", strategy: string, shares: number, price: number, windowEnd: number, conditionId: string, priceToBeatAtEntry: number) =>
+      Effect.sync(() => ({
+        id: `close-${Date.now()}`,
+        strategy,
+        side,
+        tokenId,
+        entryPrice: price,
+        size: Number((shares * price).toFixed(2)),
+        shares,
+        fee: 0,
+        status: opts.executeSellStatus ?? "rejected",
+        outcome: null,
+        pnl: 0,
+        timestamp: Date.now(),
+        windowEnd,
+        shadow: false,
+        conditionId,
+        priceToBeatAtEntry,
+        ...(opts.executeSellClobReason ? { clobReason: opts.executeSellClobReason } : {}),
+      })),
     getOrderBook: () =>
       Effect.succeed({
         bids: [{ price: String(askPrice - 0.03), size: "100" }],
@@ -565,13 +589,40 @@ describe("TradingEngine orchestration", () => {
     );
   });
 
-  it("auto-pauses trading when efficiency dual-leg incident is detected", async () => {
+  it("keeps trading active when efficiency partial can be hedged", async () => {
     mockState.emitByStrategy.arb = false;
     mockState.emitByStrategy.efficiency = true;
 
     const harness = makeHarness({
       window1: "cond-eff",
       dualBuyIncident: true,
+      orderBookAsk: 0.45,
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        yield* engine.setTradingActive(true);
+        yield* TestClock.adjust("2 seconds");
+
+        expect(harness.executeDualCalls).toBeGreaterThan(0);
+        const active = yield* engine.isTradingActive;
+        expect(active).toBe(true);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("auto-pauses trading when efficiency partial cannot be hedged or flattened", async () => {
+    mockState.emitByStrategy.arb = false;
+    mockState.emitByStrategy.efficiency = true;
+
+    const harness = makeHarness({
+      window1: "cond-eff-fail",
+      dualBuyIncident: true,
+      executeSignalStatus: "rejected",
+      executeSignalClobReason: "hedge reject",
+      executeSellStatus: "rejected",
+      executeSellClobReason: "flatten reject",
     });
 
     await Effect.runPromise(
@@ -830,6 +881,22 @@ describe("TradingEngine orchestration", () => {
         const engine = yield* TradingEngine;
         const result = yield* engine.updateStrategyConfig("arb", { tradeSize: 77 });
         expect(result.status).toBe("persist_failed");
+      }).pipe(Effect.scoped, Effect.provide(harness.layer)),
+    );
+  });
+
+  it("applies btc-specific arb runtime defaults on boot", async () => {
+    const harness = makeHarness({
+      window1: "cond-btc-arb-defaults",
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* TradingEngine;
+        const states = yield* engine.getStrategyStates;
+        const arb = states.find((s) => s.name === "arb");
+        expect(arb?.config.minSpreadPct).toBe(0.08);
+        expect(arb?.config.minConfirmingExchanges).toBe(2);
       }).pipe(Effect.scoped, Effect.provide(harness.layer)),
     );
   });

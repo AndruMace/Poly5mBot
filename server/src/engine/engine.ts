@@ -323,18 +323,31 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         }),
       ).pipe(Effect.asVoid);
 
+    const applyStrategyRuntimeConfig = (strategyName: string, overrides: Record<string, number> | undefined) =>
+      Effect.gen(function* () {
+        if (!overrides || Object.keys(overrides).length === 0) return;
+        const strategy = strategyMap.get(strategyName);
+        if (!strategy) return;
+        const result = yield* strategy.updateConfig(overrides);
+        if (!result.ok) {
+          yield* Effect.logWarning(
+            `${ENGINE_LOG_PREFIX} Failed to apply ${strategyName} runtime config: ${result.error ?? "invalid values"}`,
+          );
+        }
+      });
+
     const applyWhaleHuntRuntimeConfig = Effect.gen(function* () {
-      const strategy = strategyMap.get("whale-hunt");
-      if (!strategy) return;
-      const result = yield* strategy.updateConfig(toWhaleHuntStrategyConfig(whaleHuntConfig));
-      if (!result.ok) {
-        yield* Effect.logWarning(
-          `${ENGINE_LOG_PREFIX} Failed to apply whale-hunt runtime config: ${result.error ?? "invalid values"}`,
-        );
-      }
+      yield* applyStrategyRuntimeConfig("whale-hunt", toWhaleHuntStrategyConfig(whaleHuntConfig));
     });
 
+    const applyMarketStrategyRuntimeConfig = Effect.forEach(
+      Object.entries(marketConfig?.strategyConfigOverrides ?? {}),
+      ([strategyName, overrides]) => applyStrategyRuntimeConfig(strategyName, overrides),
+      { discard: true },
+    );
+
     yield* applyWhaleHuntRuntimeConfig;
+    yield* applyMarketStrategyRuntimeConfig;
     const persistedStrategyState = yield* readPersistedStrategyState;
     yield* applyPersistedStrategyState(persistedStrategyState);
     const bootPersistResult = yield* persistStrategyStates;
@@ -873,6 +886,12 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       recordSignalLatency,
       haltTradingWithIncident,
       whaleHuntConfig,
+      efficiencyRecovery: {
+        maxLegImbalanceMs: config.risk.maxLegImbalanceMs,
+        maxHedgeRetries: config.risk.maxHedgeRetries,
+        maxResidualExposureUsd: config.risk.maxResidualExposureUsd,
+        maxUnwindSlippageBps: config.risk.maxUnwindSlippageBps,
+      },
       logPrefix: ENGINE_LOG_PREFIX,
     });
 

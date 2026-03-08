@@ -1,6 +1,7 @@
 import { Effect, Ref } from "effect";
 import { makeStrategyBase, makeInitialState, type Strategy, type StrategyInternalState } from "./base.js";
 import type { MarketContext, Signal } from "../types.js";
+import { DEFAULT_EXCHANGE_WEIGHTS } from "../feeds/volume-weights.js";
 
 const DEFAULT_CONFIG: Record<string, number> = {
   minSpreadPct: 0.04,
@@ -8,6 +9,7 @@ const DEFAULT_CONFIG: Record<string, number> = {
   persistenceMs: 3000,
   persistenceCount: 4,
   minConfirmingExchanges: 1,
+  minReferenceSources: 2,
   minWindowElapsedSec: 180,
   maxWindowElapsedSec: 270,
   maxSharePrice: 0.55,
@@ -46,19 +48,21 @@ export const makeArbStrategy = Effect.gen(function* () {
 
       yield* Ref.update(ref, (st) => ({ ...st, status: "watching" as const }));
 
-      const oraclePrice = ctx.oracleEstimate;
-      if (oraclePrice <= 0) return null;
-
       const maxOracleAgeMs = (s.config["maxOracleAgeSec"] ?? 5) * 1000;
-      if (ctx.oracleTimestamp > 0 && Date.now() - ctx.oracleTimestamp > maxOracleAgeMs) {
+      const reference = buildCrossExchangeReference(
+        ctx,
+        Math.max(1, Math.floor(s.config["minReferenceSources"] ?? 2)),
+        maxOracleAgeMs,
+      );
+      if (!reference) {
         yield* Ref.update(ref, (st) => ({
           ...st,
-          statusReason: `Oracle stale (${((Date.now() - ctx.oracleTimestamp) / 1000).toFixed(1)}s > ${s.config["maxOracleAgeSec"]}s)`,
+          statusReason: "Waiting for fresh cross-exchange reference",
         }));
         return null;
       }
 
-      const spreadPct = ((binance.price - oraclePrice) / oraclePrice) * 100;
+      const spreadPct = ((priceOf(binance) - reference.price) / reference.price) * 100;
       const absSpread = Math.abs(spreadPct);
 
       if (absSpread < s.config["minSpreadPct"]!) {
@@ -67,7 +71,7 @@ export const makeArbStrategy = Effect.gen(function* () {
       }
 
       const side: "UP" | "DOWN" = spreadPct > 0 ? "UP" : "DOWN";
-      const btcDelta = ((binance.price - ctx.priceToBeat) / ctx.priceToBeat) * 100;
+      const btcDelta = ((priceOf(binance) - ctx.priceToBeat) / ctx.priceToBeat) * 100;
       const minPtbDistancePct = Math.max(0, s.config["minPtbDistancePct"]!);
       if (Math.abs(btcDelta) < minPtbDistancePct) return null;
       if (side === "UP" && btcDelta <= 0) return null;
@@ -89,7 +93,7 @@ export const makeArbStrategy = Effect.gen(function* () {
         return null;
       }
 
-      const confirmers = countConfirmingExchanges(ctx, side);
+      const confirmers = countConfirmingExchanges(ctx, side, minPtbDistancePct);
       if (confirmers < s.config["minConfirmingExchanges"]!) {
         yield* Ref.update(ref, (st) => ({
           ...st,
@@ -108,8 +112,17 @@ export const makeArbStrategy = Effect.gen(function* () {
         size: s.config["tradeSize"]!,
         maxPrice,
         strategy: "arb",
-        reason: `Binance ${spreadPct > 0 ? "leads" : "lags"} oracle by ${absSpread.toFixed(3)}% (${confirmers + 1} exchanges agree, persisted ${sameSideCount} ticks)`,
+        reason: `Binance ${spreadPct > 0 ? "leads" : "lags"} cross-exchange reference by ${absSpread.toFixed(3)}% (${confirmers} confirmers, persisted ${sameSideCount} ticks)`,
         timestamp: Date.now(),
+        telemetry: {
+          arbBinancePrice: priceOf(binance),
+          arbReferencePrice: reference.price,
+          arbReferenceSources: reference.sourceCount,
+          arbSpreadPct: spreadPct,
+          arbAbsSpreadPct: absSpread,
+          arbPtbDeltaPct: btcDelta,
+          arbConfirmers: confirmers,
+        },
       };
       yield* Ref.update(ref, (st) => ({ ...st, status: "trading" as const, lastSignal: signal }));
       return signal;
@@ -118,17 +131,72 @@ export const makeArbStrategy = Effect.gen(function* () {
   return { name: "arb", evaluate, stateRef: ref, ...base } satisfies Strategy;
 });
 
-function countConfirmingExchanges(ctx: MarketContext, side: "UP" | "DOWN"): number {
-  const others = ["bybit", "coinbase", "kraken", "okx"];
+const REFERENCE_EXCHANGES = ["bybit", "coinbase", "kraken", "okx", "bitstamp"] as const;
+const REFERENCE_OUTLIER_PCT = 0.0015;
+
+function priceOf(point: { price: number; bid?: number; ask?: number }): number {
+  const bid = Number(point.bid);
+  const ask = Number(point.ask);
+  if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
+    return (bid + ask) / 2;
+  }
+  return Number(point.price);
+}
+
+function median(sorted: number[]): number {
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1]! + sorted[mid]!) / 2
+    : sorted[mid]!;
+}
+
+function buildCrossExchangeReference(
+  ctx: MarketContext,
+  minReferenceSources: number,
+  maxAgeMs: number,
+): { price: number; sourceCount: number } | null {
+  const now = Date.now();
+  const candidates = REFERENCE_EXCHANGES.flatMap((name) => {
+    const feed = ctx.prices[name];
+    if (!feed) return [];
+    const ageMs = now - feed.timestamp;
+    const price = priceOf(feed);
+    if (!Number.isFinite(price) || price <= 0 || ageMs > maxAgeMs) return [];
+    return [{ exchange: name, price }];
+  });
+  if (candidates.length < minReferenceSources) return null;
+
+  const sortedPrices = candidates.map((c) => c.price).sort((a, b) => a - b);
+  const center = median(sortedPrices);
+  const filtered = candidates.filter((candidate) => Math.abs(candidate.price - center) / center < REFERENCE_OUTLIER_PCT);
+  const usable = filtered.length >= minReferenceSources ? filtered : candidates;
+
+  let weightSum = 0;
+  let weightedPriceSum = 0;
+  for (const candidate of usable) {
+    const weight = DEFAULT_EXCHANGE_WEIGHTS[candidate.exchange] ?? 1;
+    weightedPriceSum += candidate.price * weight;
+    weightSum += weight;
+  }
+  if (weightSum <= 0) return null;
+
+  return {
+    price: weightedPriceSum / weightSum,
+    sourceCount: usable.length,
+  };
+}
+
+function countConfirmingExchanges(ctx: MarketContext, side: "UP" | "DOWN", minPtbDistancePct: number): number {
+  if (ctx.priceToBeat === null || ctx.priceToBeat <= 0) return 0;
   let count = 0;
-  const oracle = ctx.oracleEstimate;
-  if (oracle <= 0) return 0;
-  for (const name of others) {
+  const thresholdPct = Math.max(0.01, minPtbDistancePct / 2);
+  for (const name of REFERENCE_EXCHANGES) {
     const feed = ctx.prices[name];
     if (!feed) continue;
-    const feedSpread = ((feed.price - oracle) / oracle) * 100;
-    if (side === "UP" && feedSpread > 0.01) count++;
-    if (side === "DOWN" && feedSpread < -0.01) count++;
+    const feedPrice = priceOf(feed);
+    const feedDeltaPct = ((feedPrice - ctx.priceToBeat) / ctx.priceToBeat) * 100;
+    if (side === "UP" && feedDeltaPct >= thresholdPct) count++;
+    if (side === "DOWN" && feedDeltaPct <= -thresholdPct) count++;
   }
   return count;
 }

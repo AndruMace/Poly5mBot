@@ -113,6 +113,21 @@ describe("computeOracleEstimate", () => {
     expect(sourceCount).toBe(0);
   });
 
+  it("preserves sub-cent precision for low-priced assets", () => {
+    const m = makeMap(
+      makePoint("binance", 2.1234, 100),
+      makePoint("bybit", 2.1235, 100),
+      makePoint("coinbase", 2.1236, 100),
+    );
+    const { price, sourceCount } = computeOracleEstimate(m, {
+      binance: 1,
+      bybit: 1,
+      coinbase: 1,
+    });
+    expect(sourceCount).toBe(3);
+    expect(price).toBeCloseTo(2.1235, 4);
+  });
+
   it("outlier rejection still works when staleFactor is present", () => {
     // Bybit at 200000 is a clear outlier vs binance/coinbase/okx near 100000
     // Median ≈ 100003; Bybit deviation >> 0.15% → filtered out

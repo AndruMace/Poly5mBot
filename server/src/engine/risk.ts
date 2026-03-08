@@ -256,6 +256,10 @@ export class RiskManager extends Effect.Service<RiskManager>()("RiskManager", {
         maxWindowSpend: config.risk.maxWindowSpend,
         windowTradeCount: s.windowTradeCount,
         maxWindowTrades: config.risk.maxWindowTrades,
+        maxLegImbalanceMs: config.risk.maxLegImbalanceMs,
+        maxHedgeRetries: config.risk.maxHedgeRetries,
+        maxResidualExposureUsd: config.risk.maxResidualExposureUsd,
+        maxUnwindSlippageBps: config.risk.maxUnwindSlippageBps,
       })),
     );
 
@@ -438,6 +442,10 @@ export function createRiskManager(
         maxWindowSpend: riskConfig.maxWindowSpend,
         windowTradeCount: s.windowTradeCount,
         maxWindowTrades: riskConfig.maxWindowTrades,
+        maxLegImbalanceMs: riskConfig.maxLegImbalanceMs,
+        maxHedgeRetries: riskConfig.maxHedgeRetries,
+        maxResidualExposureUsd: riskConfig.maxResidualExposureUsd,
+        maxUnwindSlippageBps: riskConfig.maxUnwindSlippageBps,
       })),
     );
 

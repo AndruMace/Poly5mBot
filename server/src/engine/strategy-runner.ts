@@ -60,6 +60,12 @@ interface StrategyRunnerDeps {
 
 const PTB_REQUIRED_STRATEGIES = new Set(["arb", "momentum", "whale-hunt"]);
 const CHOP_SENSITIVE_STRATEGIES = new Set(["momentum", "orderflow-imbalance", "whale-hunt"]);
+const PTB_REJECT_THROTTLE_MS = 15_000;
+
+interface PtbRejectState {
+  lastReason: string;
+  lastAt: number;
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -94,7 +100,57 @@ function computeLatencyGuardLeadMs(observedLatencyMs: number, cfg: WhaleHuntConf
   );
 }
 
+function isPtbCheckRelevant(
+  strategyName: string,
+  config: Record<string, number>,
+  ctx: MarketContext,
+): boolean {
+  if (!PTB_REQUIRED_STRATEGIES.has(strategyName)) return false;
+  if (ctx.priceToBeat !== null) return false;
+  if (!ctx.currentWindow) return false;
+
+  const elapsedSec = ctx.windowElapsedMs / 1000;
+  const remainingSec = ctx.windowRemainingMs / 1000;
+
+  const minWindowElapsedSec = config["minWindowElapsedSec"];
+  if (typeof minWindowElapsedSec === "number" && Number.isFinite(minWindowElapsedSec) && elapsedSec < minWindowElapsedSec) {
+    return false;
+  }
+
+  const maxWindowElapsedSec = config["maxWindowElapsedSec"];
+  if (typeof maxWindowElapsedSec === "number" && Number.isFinite(maxWindowElapsedSec) && elapsedSec > maxWindowElapsedSec) {
+    return false;
+  }
+
+  const minWindowRemainingSec = config["minWindowRemainingSec"];
+  if (typeof minWindowRemainingSec === "number" && Number.isFinite(minWindowRemainingSec) && remainingSec <= minWindowRemainingSec) {
+    return false;
+  }
+
+  if (strategyName === "whale-hunt" && remainingSec < 3) {
+    return false;
+  }
+
+  return true;
+}
+
 export function makeStrategyRunner(deps: StrategyRunnerDeps) {
+  const ptbRejectStateByKey = new Map<string, PtbRejectState>();
+
+  const shouldEmitPtbReject = (strategy: string, conditionId: string, reason: string, now: number): boolean => {
+    const key = `${strategy}:${conditionId}`;
+    const previous = ptbRejectStateByKey.get(key);
+    if (!previous) {
+      ptbRejectStateByKey.set(key, { lastReason: reason, lastAt: now });
+      return true;
+    }
+    if (previous.lastReason !== reason || now - previous.lastAt >= PTB_REJECT_THROTTLE_MS) {
+      ptbRejectStateByKey.set(key, { lastReason: reason, lastAt: now });
+      return true;
+    }
+    return false;
+  };
+
   return (ctx: MarketContext, regime: RegimeState, isShadow: boolean, now: number) =>
     Effect.gen(function* () {
       for (const strategy of deps.strategies) {
@@ -133,31 +189,34 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         const entries = sCurrent.entriesThisWindow.get(strategy.name) ?? 0;
         if (entries >= maxEntries) continue;
 
-        if (PTB_REQUIRED_STRATEGIES.has(strategy.name) && ctx.priceToBeat === null) {
+        if (isPtbCheckRelevant(strategy.name, sState.config, ctx)) {
           const reason = ctx.currentWindow?.priceToBeatReason ?? "price_to_beat_unavailable";
           yield* Ref.update(deps.stateRef, (stUpd) => {
             deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
             return stUpd;
           });
-          yield* deps.obs({
-            category: "signal",
-            source: "engine",
-            action: "signal_rejected_preflight",
-            entityType: "signal",
-            entityId: `${strategy.name}:${now}`,
-            status: "rejected",
-            strategy: strategy.name,
-            mode: isShadow ? "shadow" : "live",
-            payload: {
-              reason,
-              gate: "missing_price_to_beat",
-              priceToBeatStatus: ctx.currentWindow?.priceToBeatStatus ?? "pending",
-              priceToBeatSource: ctx.currentWindow?.priceToBeatSource ?? "unavailable",
-            },
-          });
-          yield* Effect.log(
-            `${deps.logPrefix} ${strategy.name} skipped: priceToBeat unavailable (${reason})`,
-          );
+          const conditionId = ctx.currentWindow?.conditionId ?? "no_window";
+          if (shouldEmitPtbReject(strategy.name, conditionId, reason, now)) {
+            yield* deps.obs({
+              category: "signal",
+              source: "engine",
+              action: "signal_rejected_preflight",
+              entityType: "signal",
+              entityId: `${strategy.name}:${now}`,
+              status: "rejected",
+              strategy: strategy.name,
+              mode: isShadow ? "shadow" : "live",
+              payload: {
+                reason,
+                gate: "missing_price_to_beat",
+                priceToBeatStatus: ctx.currentWindow?.priceToBeatStatus ?? "pending",
+                priceToBeatSource: ctx.currentWindow?.priceToBeatSource ?? "unavailable",
+              },
+            });
+            yield* Effect.log(
+              `${deps.logPrefix} ${strategy.name} skipped: priceToBeat unavailable (${reason})`,
+            );
+          }
           continue;
         }
 
@@ -326,6 +385,7 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             sideSpreadPct: getSideSpreadPct(ctx, signal.side),
             regimeTrend: regime.trendRegime,
             regimeVolatility: regime.volatilityRegime,
+            telemetry: signal.telemetry ? { ...signal.telemetry } : null,
           },
         });
 
@@ -521,22 +581,6 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             rejectReason: execution.rejectReason ?? null,
           },
         });
-        if (
-          !isShadow
-          && !executed
-          && (execution.rejectClass === "precision_invalid_local" || execution.rejectClass === "precision_rejected_by_venue")
-        ) {
-          yield* Ref.update(deps.stateRef, (s) => {
-            const newMap = new Map(s.entriesThisWindow);
-            newMap.set(strategy.name, (newMap.get(strategy.name) ?? 0) + 1);
-            const sideKey = `${strategy.name}:${signal.side}`;
-            newMap.set(sideKey, (newMap.get(sideKey) ?? 0) + 1);
-            return { ...s, entriesThisWindow: newMap };
-          });
-          yield* Effect.logWarning(
-            `${deps.logPrefix} ${strategy.name} ${signal.side} precision reject consumed entry budget (${execution.rejectClass})`,
-          );
-        }
         if (executed) {
           yield* Ref.update(deps.stateRef, (s) => {
             const newMap = new Map(s.entriesThisWindow);

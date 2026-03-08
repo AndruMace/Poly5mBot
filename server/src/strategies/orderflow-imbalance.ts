@@ -20,7 +20,7 @@ export const DEFAULT_CONFIG: Record<string, number> = {
   maxEntriesPerWindow: 1,
   maxSameSideEntriesPerWindow: 1,
   allowSameSideStacking: 0,
-  chopConfidenceFloor: 0.6,
+  chopConfidenceFloor: 0.55,
   chopSizeMultiplier: 0.75,
   qualityMinMultiplier: 0.5,
   qualityMaxMultiplier: 1.15,

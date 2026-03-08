@@ -40,6 +40,8 @@ export interface MarketAssetConfig {
   readonly feeds: ReadonlyArray<FeedAssetConfig>;
   /** Which strategy names to run for this market */
   readonly strategies: ReadonlyArray<string>;
+  /** Optional per-market strategy config overrides applied before persisted state. */
+  readonly strategyConfigOverrides?: Partial<Record<string, Record<string, number>>>;
   /** Optional per-market risk overrides (merged on top of global config) */
   readonly riskOverrides?: Partial<{
     maxTradeSize: number;
@@ -49,6 +51,10 @@ export interface MarketAssetConfig {
     maxHourlyLoss: number;
     maxWindowSpend: number;
     maxWindowTrades: number;
+    maxLegImbalanceMs: number;
+    maxHedgeRetries: number;
+    maxResidualExposureUsd: number;
+    maxUnwindSlippageBps: number;
   }>;
   /** Optional per-market whale-hunt runtime overrides (merged over global defaults). */
   readonly whaleHuntOverrides?: WhaleHuntConfigOverrides;

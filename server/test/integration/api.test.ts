@@ -42,6 +42,10 @@ const baseConfig: AppConfigShape = {
     maxSignalAgeMs: 2000,
     maxWindowSpend: 15,
     maxWindowTrades: 6,
+    maxLegImbalanceMs: 5000,
+    maxHedgeRetries: 2,
+    maxResidualExposureUsd: 1.5,
+    maxUnwindSlippageBps: 35,
   },
   trading: { mode: "shadow", whaleHunt: { ...DEFAULT_WHALE_HUNT_CONFIG } },
   redemption: {
@@ -58,7 +62,7 @@ const baseConfig: AppConfigShape = {
     databaseUrl: "",
   },
   markets: {
-    enabledIds: ["btc"],
+    enabledIds: ["btc", "eth", "sol"],
   },
   test: {
     ciLiveIntegration: false,
@@ -261,32 +265,49 @@ const fakeObservabilityStore = {
   latest: (_limit = 200) => Effect.succeed([]),
 };
 
-const fakeMarketEngine = {
-  marketId: "btc",
-  displayName: "BTC",
-  feedManager: {
-    marketId: "btc",
-    getLatestPrices: fakeFeedService.getLatestPrices,
-    getOracleEstimate: fakeFeedService.getOracleEstimate,
-    getOracleTimestamp: Effect.succeed(0),
-    getCurrentAssetPrice: fakeFeedService.getCurrentAssetPrice,
+function makeFakeMarketEngine(marketId: string, displayName: string) {
+  return {
+    marketId,
+    displayName,
+    feedManager: {
+      marketId,
+      getLatestPrices: fakeFeedService.getLatestPrices,
+      getOracleEstimate: fakeFeedService.getOracleEstimate,
+      getOracleTimestamp: Effect.succeed(0),
+      getCurrentAssetPrice: fakeFeedService.getCurrentAssetPrice,
+      getFeedHealth: fakeFeedService.getFeedHealth,
+      getRecentPrices: Effect.succeed([]),
+      priceChanges: Effect.succeed({ "1m": 0, "5m": 0 }),
+    },
+    ...fakeEngine,
+    listTrades: fakeEngine.tracker.listTrades,
+    getTradeRecords: (_limit?: number) => Effect.succeed([]),
+    getPnLSummary: fakeEngine.tracker.getSummary(false),
+    getShadowPnLSummary: fakeEngine.tracker.getSummary(true),
     getFeedHealth: fakeFeedService.getFeedHealth,
-    getRecentPrices: Effect.succeed([]),
-    priceChanges: Effect.succeed({ "1m": 0, "5m": 0 }),
-  },
-  ...fakeEngine,
-  listTrades: fakeEngine.tracker.listTrades,
-  getTradeRecords: (_limit?: number) => Effect.succeed([]),
-  getPnLSummary: fakeEngine.tracker.getSummary(false),
-  getShadowPnLSummary: fakeEngine.tracker.getSummary(true),
-  getFeedHealth: fakeFeedService.getFeedHealth,
+  };
+}
+
+const fakeMarketEngineBtc = makeFakeMarketEngine("btc", "BTC");
+const fakeMarketEngineEth = makeFakeMarketEngine("eth", "ETH");
+const fakeMarketEngineSol = makeFakeMarketEngine("sol", "SOL");
+const fakeMarketEngineById: Record<string, ReturnType<typeof makeFakeMarketEngine>> = {
+  btc: fakeMarketEngineBtc,
+  eth: fakeMarketEngineEth,
+  sol: fakeMarketEngineSol,
 };
 
+const enabledMarkets = [
+  { id: "btc", displayName: "BTC" },
+  { id: "eth", displayName: "ETH" },
+  { id: "sol", displayName: "SOL" },
+];
+
 const fakeOrchestrator = {
-  getEngine: (id: string) => (id === "btc" ? fakeMarketEngine : null),
-  getAllEngines: () => [fakeMarketEngine],
-  getEnabledMarketIds: () => ["btc"],
-  getEnabledMarkets: () => [{ id: "btc", displayName: "BTC" }],
+  getEngine: (id: string) => fakeMarketEngineById[id] ?? null,
+  getAllEngines: () => Object.values(fakeMarketEngineById),
+  getEnabledMarketIds: () => enabledMarkets.map((m) => m.id),
+  getEnabledMarkets: () => enabledMarkets,
 };
 
 const testLayer = Layer.mergeAll(
@@ -303,6 +324,16 @@ const testLayer = Layer.mergeAll(
 );
 
 describe("API handler integration", () => {
+  it("returns enabled market list", async () => {
+    const res = await Effect.runPromise(
+      handleRequest("/api/markets", "GET", undefined, false, {}).pipe(
+        Effect.provide(testLayer),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(enabledMarkets);
+  });
+
   it("returns status payload", async () => {
     const res = await Effect.runPromise(
       handleRequest("/api/status", "GET", undefined, false, {}).pipe(
@@ -312,6 +343,17 @@ describe("API handler integration", () => {
     expect(res.status).toBe(200);
     expect((res.body as any).mode).toBe("shadow");
     expect((res.body as any).metrics.latency.ptbWindowToExactLastMs).toBe(0);
+    expect((res.body as any).enabledMarkets).toEqual(enabledMarkets);
+  });
+
+  it("returns status payload for specific enabled market", async () => {
+    const res = await Effect.runPromise(
+      handleRequest("/api/status?market=eth", "GET", undefined, false, {}).pipe(
+        Effect.provide(testLayer),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as any).enabledMarkets).toEqual(enabledMarkets);
   });
 
   it("rejects unauthenticated control routes", async () => {
@@ -433,7 +475,7 @@ describe("API handler integration", () => {
     };
     const failingEngineLayer = Layer.succeed(TradingEngine, failingEngine as any);
     const failingMarketEngine = {
-      ...fakeMarketEngine,
+      ...fakeMarketEngineBtc,
       ...failingEngine,
       listTrades: fakeEngine.tracker.listTrades,
       getTradeRecords: (_limit?: number) => Effect.succeed([]),

@@ -42,6 +42,10 @@ export const TestAppConfig = Layer.succeed(AppConfig, {
     maxSignalAgeMs: 2000,
     maxWindowSpend: 15,
     maxWindowTrades: 6,
+    maxLegImbalanceMs: 5000,
+    maxHedgeRetries: 2,
+    maxResidualExposureUsd: 1.5,
+    maxUnwindSlippageBps: 35,
   },
   trading: { mode: "shadow", whaleHunt: { ...DEFAULT_WHALE_HUNT_CONFIG } },
   redemption: {
@@ -121,6 +125,10 @@ export const makeTestConfigLayer = (
       maxSignalAgeMs: 2000,
       maxWindowSpend: 15,
       maxWindowTrades: 6,
+      maxLegImbalanceMs: 5000,
+      maxHedgeRetries: 2,
+      maxResidualExposureUsd: 1.5,
+      maxUnwindSlippageBps: 35,
       ...(overrides.risk ?? {}),
     },
     trading: {

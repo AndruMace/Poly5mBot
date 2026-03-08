@@ -32,6 +32,10 @@ export interface AppConfigShape {
     readonly maxSignalAgeMs: number;
     readonly maxWindowSpend: number;
     readonly maxWindowTrades: number;
+    readonly maxLegImbalanceMs: number;
+    readonly maxHedgeRetries: number;
+    readonly maxResidualExposureUsd: number;
+    readonly maxUnwindSlippageBps: number;
   };
   readonly trading: {
     readonly mode: "live" | "shadow";
@@ -85,6 +89,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
     const maxSignalAgeMs = yield* Config.integer("MAX_SIGNAL_AGE_MS").pipe(Config.withDefault(2000));
     const maxWindowSpend = yield* Config.number("MAX_WINDOW_SPEND").pipe(Config.withDefault(15));
     const maxWindowTrades = yield* Config.integer("MAX_WINDOW_TRADES").pipe(Config.withDefault(6));
+    const maxLegImbalanceMs = yield* Config.integer("MAX_LEG_IMBALANCE_MS").pipe(Config.withDefault(5000));
+    const maxHedgeRetries = yield* Config.integer("MAX_HEDGE_RETRIES").pipe(Config.withDefault(2));
+    const maxResidualExposureUsd = yield* Config.number("MAX_RESIDUAL_EXPOSURE_USD").pipe(Config.withDefault(1.5));
+    const maxUnwindSlippageBps = yield* Config.integer("MAX_UNWIND_SLIPPAGE_BPS").pipe(Config.withDefault(35));
 
     const tradingMode = yield* Config.literal("live", "shadow")("TRADING_MODE").pipe(Config.withDefault("shadow" as const));
     const whaleHuntOrderBookBandPct = yield* Config.number("WHALE_HUNT_ORDERBOOK_BAND_PCT").pipe(
@@ -167,6 +175,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
         maxSignalAgeMs,
         maxWindowSpend,
         maxWindowTrades,
+        maxLegImbalanceMs,
+        maxHedgeRetries,
+        maxResidualExposureUsd,
+        maxUnwindSlippageBps,
       },
       trading: {
         mode: tradingMode,

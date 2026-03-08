@@ -34,6 +34,15 @@ function median(sorted: number[]): number {
     : sorted[mid]!;
 }
 
+function roundOraclePrice(price: number): number {
+  if (!Number.isFinite(price) || price <= 0) return 0;
+  if (price >= 1_000) return Math.round(price * 100) / 100;
+  if (price >= 10) return Math.round(price * 1_000) / 1_000;
+  if (price >= 1) return Math.round(price * 10_000) / 10_000;
+  if (price >= 0.1) return Math.round(price * 100_000) / 100_000;
+  return Math.round(price * 1_000_000) / 1_000_000;
+}
+
 export function computeOracleEstimate(
   prices: Map<string, PricePoint>,
   weights: Record<string, number> = DEFAULT_EXCHANGE_WEIGHTS,
@@ -63,5 +72,5 @@ export function computeOracleEstimate(
   const vals = filtered.length >= 3 ? filtered : recent;
   const result = weightedMean(vals, weights);
 
-  return { price: Math.round(result * 100) / 100, sourceCount: vals.length };
+  return { price: roundOraclePrice(result), sourceCount: vals.length };
 }

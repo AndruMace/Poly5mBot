@@ -53,13 +53,13 @@ describe("Strategies", () => {
       Effect.gen(function* () {
         const strategy = yield* makeArbStrategy;
         const ctx = makeContext({
-          // Binance leads oracle by 0.2% — above 0.04% threshold
+          // Binance leads the non-Binance reference by ~0.08% and peers still confirm UP vs PTB.
           prices: {
             binance: { exchange: "binance", price: 100_200, timestamp: Date.now() },
-            bybit: { exchange: "bybit", price: 100_180, timestamp: Date.now() },
-            coinbase: { exchange: "coinbase", price: 100_190, timestamp: Date.now() },
-            kraken: { exchange: "kraken", price: 100_175, timestamp: Date.now() },
-            okx: { exchange: "okx", price: 100_185, timestamp: Date.now() },
+            bybit: { exchange: "bybit", price: 100_120, timestamp: Date.now() },
+            coinbase: { exchange: "coinbase", price: 100_125, timestamp: Date.now() },
+            kraken: { exchange: "kraken", price: 100_115, timestamp: Date.now() },
+            okx: { exchange: "okx", price: 100_130, timestamp: Date.now() },
           },
           oracleEstimate: 100_000,
           oracleTimestamp: Date.now(),
@@ -74,6 +74,10 @@ describe("Strategies", () => {
         expect(signal).not.toBeNull();
         expect(signal?.strategy).toBe("arb");
         expect(signal?.side).toBe("UP");
+        expect(signal?.telemetry?.arbBinancePrice).toBeGreaterThan(0);
+        expect(signal?.telemetry?.arbReferencePrice).toBeGreaterThan(0);
+        expect(signal?.telemetry?.arbReferenceSources).toBeGreaterThanOrEqual(2);
+        expect(signal?.telemetry?.arbAbsSpreadPct).toBeGreaterThan(0);
       }),
     ));
 
@@ -100,13 +104,13 @@ describe("Strategies", () => {
       Effect.gen(function* () {
         const strategy = yield* makeArbStrategy;
         const ctx = makeContext({
-          // Binance lags oracle by 0.3% (negative spread) AND btcDelta < 0
+          // Binance lags the non-Binance reference by ~0.09% and peers still confirm DOWN vs PTB.
           prices: {
             binance: { exchange: "binance", price: 99_700, timestamp: Date.now() },
-            bybit: { exchange: "bybit", price: 99_720, timestamp: Date.now() },
-            coinbase: { exchange: "coinbase", price: 99_710, timestamp: Date.now() },
-            kraken: { exchange: "kraken", price: 99_705, timestamp: Date.now() },
-            okx: { exchange: "okx", price: 99_695, timestamp: Date.now() },
+            bybit: { exchange: "bybit", price: 99_790, timestamp: Date.now() },
+            coinbase: { exchange: "coinbase", price: 99_780, timestamp: Date.now() },
+            kraken: { exchange: "kraken", price: 99_785, timestamp: Date.now() },
+            okx: { exchange: "okx", price: 99_775, timestamp: Date.now() },
           },
           oracleEstimate: 100_000,
           oracleTimestamp: Date.now(),
@@ -119,6 +123,30 @@ describe("Strategies", () => {
         const signal = yield* strategy.evaluate(ctx);
         expect(signal).not.toBeNull();
         expect(signal?.side).toBe("DOWN");
+      }),
+    ));
+
+  it("arb ignores a laggy oracle when non-binance venues already match binance", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeArbStrategy;
+        const ctx = makeContext({
+          prices: {
+            binance: { exchange: "binance", price: 100_200, timestamp: Date.now() },
+            bybit: { exchange: "bybit", price: 100_198, timestamp: Date.now() },
+            coinbase: { exchange: "coinbase", price: 100_201, timestamp: Date.now() },
+            kraken: { exchange: "kraken", price: 100_199, timestamp: Date.now() },
+            okx: { exchange: "okx", price: 100_202, timestamp: Date.now() },
+          },
+          // A stale/smoothed oracle would have produced a false positive before this change.
+          oracleEstimate: 100_000,
+          oracleTimestamp: Date.now(),
+        });
+        yield* strategy.evaluate(ctx);
+        yield* strategy.evaluate(ctx);
+        yield* strategy.evaluate(ctx);
+        const signal = yield* strategy.evaluate(ctx);
+        expect(signal).toBeNull();
       }),
     ));
 
@@ -184,12 +212,41 @@ describe("Strategies", () => {
       }),
     ));
 
-  it("arb emits null when oracle stale", () =>
+  it("efficiency respects slippage buffer when evaluating net edge", () =>
+    runTest(
+      Effect.gen(function* () {
+        const strategy = yield* makeEfficiencyStrategy;
+        yield* strategy.updateConfig({ slippageBufferBps: 750, minProfitBps: 8 });
+        const signal = yield* strategy.evaluate(
+          makeContext({
+            orderBook: {
+              up: { bids: [], asks: [{ price: 0.46, size: 100 }] },
+              down: { bids: [], asks: [{ price: 0.46, size: 100 }] },
+              bestAskUp: 0.46,
+              bestAskDown: 0.46,
+              bestBidUp: 0.45,
+              bestBidDown: 0.45,
+            },
+          }),
+        );
+        expect(signal).toBeNull();
+      }),
+    ));
+
+  it("arb emits null when non-binance reference feeds are stale", () =>
     runTest(
       Effect.gen(function* () {
         const strategy = yield* makeArbStrategy;
         const signal = yield* strategy.evaluate(
-          makeContext({ oracleTimestamp: Date.now() - 10_000 }),
+          makeContext({
+            prices: {
+              binance: { exchange: "binance", price: 100_200, timestamp: Date.now() },
+              bybit: { exchange: "bybit", price: 100_180, timestamp: Date.now() - 10_000 },
+              coinbase: { exchange: "coinbase", price: 100_190, timestamp: Date.now() - 10_000 },
+              kraken: { exchange: "kraken", price: 100_175, timestamp: Date.now() - 10_000 },
+              okx: { exchange: "okx", price: 100_185, timestamp: Date.now() - 10_000 },
+            },
+          }),
         );
         expect(signal).toBeNull();
       }),

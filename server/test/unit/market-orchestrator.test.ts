@@ -122,6 +122,7 @@ const fakeFeedLayer = Layer.succeed(FeedService, {
 const fakeOrderLayer = Layer.succeed(OrderService, {
   executeSignal: () => Effect.succeed(null),
   executeDualBuy: () => Effect.succeed([]),
+  executeSell: () => Effect.succeed(null),
   getOrderBook: () => Effect.succeed({ bids: [], asks: [] }),
   getOrderStatusById: () =>
     Effect.succeed({ mappedStatus: null, rawStatus: null, avgPrice: null, filledShares: null, reason: null }),
@@ -232,6 +233,20 @@ describe("MarketOrchestrator", () => {
         const ids = orch.getEnabledMarketIds();
         expect(ids).toContain("btc");
         expect(ids).toHaveLength(1);
+      }),
+    ));
+
+  it("loads eth and sol when enabled alongside btc", () =>
+    runOrchestrator(
+      ["btc", "eth", "sol"],
+      Effect.gen(function* () {
+        const orch = yield* MarketOrchestrator;
+        const ids = orch.getEnabledMarketIds();
+        expect(ids).toEqual(expect.arrayContaining(["btc", "eth", "sol"]));
+        expect(orch.getEngine("eth")).not.toBeNull();
+        expect(orch.getEngine("sol")).not.toBeNull();
+        const markets = orch.getEnabledMarkets();
+        expect(markets.map((m) => m.id)).toEqual(expect.arrayContaining(["btc", "eth", "sol"]));
       }),
     ));
 });

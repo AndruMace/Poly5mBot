@@ -82,13 +82,22 @@ describe("strategy PTB distance gating", () => {
       minWindowElapsedSec: 0,
       maxWindowElapsedSec: 300,
       minConfirmingExchanges: 0,
+      minReferenceSources: 1,
     }));
 
-    const blocked = await Effect.runPromise(strategy.evaluate(baseContext()));
+    const ctx = {
+      ...baseContext(),
+      prices: {
+        binance: { exchange: "binance", price: 100_050, timestamp: Date.now() },
+        bybit: { exchange: "bybit", price: 100_020, timestamp: Date.now() },
+      },
+    };
+
+    const blocked = await Effect.runPromise(strategy.evaluate(ctx));
     expect(blocked).toBeNull();
 
     await Effect.runPromise(strategy.updateConfig({ minPtbDistancePct: 0.01 }));
-    const allowed = await Effect.runPromise(strategy.evaluate(baseContext()));
+    const allowed = await Effect.runPromise(strategy.evaluate(ctx));
     expect(allowed).not.toBeNull();
     expect(allowed?.strategy).toBe("arb");
   });

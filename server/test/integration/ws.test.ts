@@ -150,11 +150,11 @@ describe("WebSocketService integration", () => {
       query: (_text: string, _values?: unknown[]) => Effect.succeed([]),
     } as any);
 
-    const fakeMarketEngine = {
-      marketId: "btc",
-      displayName: "BTC",
+    const makeFakeMarketEngine = (marketId: string, displayName: string) => ({
+      marketId,
+      displayName,
       feedManager: {
-        marketId: "btc",
+        marketId,
         getLatestPrices: Effect.succeed({}),
         getOracleEstimate: Effect.succeed(0),
         getFeedHealth: Effect.succeed({
@@ -253,13 +253,27 @@ describe("WebSocketService integration", () => {
         oracleSourceCount: 0,
         updatedAt: Date.now(),
       }),
+    });
+
+    const fakeMarketEngineBtc = makeFakeMarketEngine("btc", "BTC");
+    const fakeMarketEngineEth = makeFakeMarketEngine("eth", "ETH");
+    const fakeMarketEngineSol = makeFakeMarketEngine("sol", "SOL");
+    const enabledMarkets = [
+      { id: "btc", displayName: "BTC" },
+      { id: "eth", displayName: "ETH" },
+      { id: "sol", displayName: "SOL" },
+    ];
+    const fakeMarketEngineById: Record<string, ReturnType<typeof makeFakeMarketEngine>> = {
+      btc: fakeMarketEngineBtc,
+      eth: fakeMarketEngineEth,
+      sol: fakeMarketEngineSol,
     };
 
     const orchestratorLayer = Layer.succeed(MarketOrchestrator, {
-      getEngine: (id: string) => (id === "btc" ? fakeMarketEngine : null),
-      getAllEngines: () => [fakeMarketEngine],
-      getEnabledMarketIds: () => ["btc"],
-      getEnabledMarkets: () => [{ id: "btc", displayName: "BTC" }],
+      getEngine: (id: string) => fakeMarketEngineById[id] ?? null,
+      getAllEngines: () => Object.values(fakeMarketEngineById),
+      getEnabledMarketIds: () => enabledMarkets.map((m) => m.id),
+      getEnabledMarkets: () => enabledMarkets,
     } as any);
 
     const layer = WebSocketService.Default.pipe(
@@ -339,6 +353,8 @@ describe("WebSocketService integration", () => {
     );
 
     expect(messages.some((m: any) => m.type === "status")).toBe(true);
+    const statusMsg = messages.find((m: any) => m.type === "status");
+    expect(statusMsg?.data?.enabledMarkets).toEqual(enabledMarkets);
     const tradeMsg = messages.find((m: any) => m.type === "trade" && m.data.id === "t-1");
     expect(tradeMsg).not.toBeUndefined();
     // marketId must be included so the frontend routes the event to the correct market

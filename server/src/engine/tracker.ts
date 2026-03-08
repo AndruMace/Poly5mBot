@@ -120,6 +120,10 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
             result: trade.clobResult ?? "rejected",
             reason: trade.clobReason ?? "Order rejected by venue",
           });
+        } else if (trade.status === "cancelled") {
+          yield* s.appendEvent(trade.id, "cancel", {
+            reason: trade.clobReason ?? "Order cancelled",
+          });
         } else {
           yield* s.appendEvent(trade.id, "order_submitted", {
             shares: trade.shares,

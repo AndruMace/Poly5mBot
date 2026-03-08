@@ -23,9 +23,10 @@ describe("AccountActivityStore", () => {
         expect(second.imported).toBe(0);
         expect(second.skipped).toBe(2);
 
-        const page = yield* store.list({ limit: 10 });
+        const page = yield* store.list({ limit: 1000 });
         expect(page.items.length).toBeGreaterThanOrEqual(2);
-        expect(page.items.some((r) => r.action === "Redeem")).toBe(true);
+        expect(page.items.some((r) => r.hash === `0xabc${unique}` && r.action === "Buy")).toBe(true);
+        expect(page.items.some((r) => r.hash === `0xdef${unique}` && r.action === "Redeem")).toBe(true);
       }),
     ));
 
