@@ -5,7 +5,7 @@ import { makeFeedStream } from "./common.js";
 
 export const bybitFeed: Stream.Stream<PricePoint, never, never> = makeFeedStream({
   name: "bybit",
-  url: "wss://stream.bybit.com/v5/public/linear",
+  url: "wss://stream.bybit.com/v5/public/spot",
   onOpen: (ws) => {
     ws.send(JSON.stringify({ op: "subscribe", args: ["tickers.BTCUSDT"] }));
   },

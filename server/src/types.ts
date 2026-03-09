@@ -221,6 +221,9 @@ export interface RegimeState {
   spreadRegime: "tight" | "normal" | "wide" | "blowout";
   volatilityValue?: number;
   trendStrength?: number;
+  trendSampleCount?: number;
+  trendSlope?: number;
+  trendResidualStddev?: number;
   liquidityDepth?: number;
   spreadValue?: number;
 }
@@ -346,7 +349,7 @@ export interface EngineMetrics {
 export interface FeedSourceHealth {
   name: string;
   connected: boolean;
-  status: "healthy" | "stale" | "down";
+  status: "healthy" | "stale" | "down" | "warming_up";
   lastUpdateTs: number | null;
   ageMs: number | null;
   price: number | null;

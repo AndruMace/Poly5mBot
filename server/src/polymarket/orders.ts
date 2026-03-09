@@ -12,7 +12,7 @@ const MIN_CLOB_NOTIONAL = 1.0;
 const FOK_LIQUIDITY_BACKOFF_BASE_MS = 8_000;
 const FOK_LIQUIDITY_BACKOFF_MAX_MS = 120_000;
 const SHARE_UNITS_SCALE = 10_000;
-export const ORDER_PRECISION_GUARD_VERSION = "2026-03-06-quantized-market-buy-v2";
+export const ORDER_PRECISION_GUARD_VERSION = "2026-03-08-dual-buy-shares-fix-v3";
 interface FokBackoffState {
   consecutiveFailures: number;
   blockedUntil: number;
@@ -110,6 +110,22 @@ function classifyPrecisionReason(reason: string | null | undefined): "precision_
   return null;
 }
 
+function sanitizeBuyOrder(price: number, shares: number): { price: number; shares: number } | null {
+  const priceCents = Math.round(price * 100);
+  const shareUnits = Math.round(shares * SHARE_UNITS_SCALE);
+  const priceFits2Dp = Math.abs(price * 100 - priceCents) < 1e-9;
+  const sharesFit2Dp = Math.abs(shares * 100 - Math.round(shares * 100)) < 1e-9;
+  const makerProduct = priceCents * shareUnits;
+  const makerDivisible = makerProduct % SHARE_UNITS_SCALE === 0;
+  if (!priceFits2Dp || !sharesFit2Dp || !makerDivisible || priceCents <= 0 || shareUnits <= 0) {
+    return null;
+  }
+  return {
+    price: toFixedNumber(priceCents / 100, 2),
+    shares: toFixedNumber(shareUnits / SHARE_UNITS_SCALE, 2),
+  };
+}
+
 function quantizeBuyOrder(notional: number, rawPrice: number) {
   const priceCents = toPriceCents(rawPrice);
   const maxQuoteCents = Math.floor(floorTo(notional, 2) * 100);
@@ -160,57 +176,70 @@ function enforceMinSharesSingleLeg(price: number, shares: number) {
 }
 
 function quantizeDualBuyOrder(totalNotional: number, upPriceRaw: number, downPriceRaw: number) {
+  const zero = { shares: 0, upNotional: 0, downNotional: 0, upPrice: 0, downPrice: 0, shareStepUnits: 0 };
   const upPrice = floorTo(upPriceRaw, 2);
   const downPrice = floorTo(downPriceRaw, 2);
   if (upPrice <= 0 || downPrice <= 0 || totalNotional <= 0) {
-    return { shares: 0, upNotional: 0, downNotional: 0, upPrice: 0, downPrice: 0 };
+    return zero;
   }
 
   const rawShares = totalNotional / (upPrice + downPrice);
   if (rawShares <= 0) {
-    return { shares: 0, upNotional: 0, downNotional: 0, upPrice: 0, downPrice: 0 };
+    return zero;
   }
 
   const upPriceCents = Math.round(upPrice * 100);
   const downPriceCents = Math.round(downPrice * 100);
   if (upPriceCents <= 0 || downPriceCents <= 0) {
-    return { shares: 0, upNotional: 0, downNotional: 0, upPrice: 0, downPrice: 0 };
+    return zero;
   }
 
-  // Ensure both legs satisfy: quote = shares * price has at most 2 decimal places.
-  // shares are represented as 1e-4 units, so we need (shareUnits * priceCents) divisible by 10_000.
-  const upStep = Math.floor(10_000 / gcd(10_000, upPriceCents));
-  const downStep = Math.floor(10_000 / gcd(10_000, downPriceCents));
-  const shareStepUnits = lcm(upStep, downStep);
+  // Use clobShareStepUnitsForPriceCents (which lcm's with 100) to guarantee shares
+  // have ≤2dp. The CLOB client does roundDown(size, 2) before computing
+  // makerAmt = roundedShares * price; ≤2dp shares make that round-down a no-op
+  // and keep the USDC product ≤2dp (venue requirement).
+  const shareStepUnits = lcm(
+    clobShareStepUnitsForPriceCents(upPriceCents),
+    clobShareStepUnitsForPriceCents(downPriceCents),
+  );
 
   const rawShareUnits = Math.floor(rawShares * 10_000);
   const shareUnits = Math.floor(rawShareUnits / shareStepUnits) * shareStepUnits;
   if (shareUnits <= 0) {
-    return { shares: 0, upNotional: 0, downNotional: 0, upPrice: 0, downPrice: 0 };
+    return zero;
   }
 
-  const shares = toFixedNumber(shareUnits / 10_000, 4);
+  const shares = toFixedNumber(shareUnits / 10_000, 2);
   const upNotional = toFixedNumber((shareUnits * upPriceCents) / 1_000_000, 2);
   const downNotional = toFixedNumber((shareUnits * downPriceCents) / 1_000_000, 2);
 
-  return { shares, upNotional, downNotional, upPrice, downPrice };
+  return { shares, upNotional, downNotional, upPrice, downPrice, shareStepUnits };
 }
 
 function enforceMinSharesDualLeg(
   shares: number,
   upPrice: number,
   downPrice: number,
+  stepUnits: number,
 ) {
-  if (shares <= 0 || upPrice <= 0 || downPrice <= 0) {
+  if (shares <= 0 || upPrice <= 0 || downPrice <= 0 || stepUnits <= 0) {
     return { shares: 0, upNotional: 0, downNotional: 0, clamped: false };
   }
-  const clamped = shares > 0 && shares < MIN_SHARES;
-  const safeShares = clamped ? MIN_SHARES : shares;
-  const normalizedShares = toFixedNumber(safeShares, 4);
+  const clamped = shares < MIN_SHARES;
+  const targetUnits = clamped ? MIN_SHARES * SHARE_UNITS_SCALE : Math.round(shares * SHARE_UNITS_SCALE);
+  const alignedUnits = clamped
+    ? Math.ceil(targetUnits / stepUnits) * stepUnits
+    : Math.floor(targetUnits / stepUnits) * stepUnits;
+  if (alignedUnits <= 0) {
+    return { shares: 0, upNotional: 0, downNotional: 0, clamped };
+  }
+  const normalizedShares = toFixedNumber(alignedUnits / SHARE_UNITS_SCALE, 2);
+  const upPriceCents = Math.round(upPrice * 100);
+  const downPriceCents = Math.round(downPrice * 100);
   return {
     shares: normalizedShares,
-    upNotional: toFixedNumber(normalizedShares * upPrice, 2),
-    downNotional: toFixedNumber(normalizedShares * downPrice, 2),
+    upNotional: toFixedNumber((alignedUnits * upPriceCents) / 1_000_000, 2),
+    downNotional: toFixedNumber((alignedUnits * downPriceCents) / 1_000_000, 2),
     clamped,
   };
 }
@@ -490,14 +519,19 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             }
           }
 
+          const sanitized = sanitizeBuyOrder(price, shares);
+          if (!sanitized) {
+            lastReason = "precision_sanitizer_blocked";
+            yield* Effect.logWarning(
+              `[Orders] Sanitizer blocked FOK for ${signal.strategy} ${signal.side} [scale=${scale}]: price=${price}, shares=${shares}`,
+            );
+            continue;
+          }
+
           const result = yield* Effect.tryPromise({
             try: () =>
               (client as any).createAndPostOrder(
-                // clob-client BUY semantics: size = shares (taker amount). The library
-                // internally computes USDC cost = roundDown(shares,2) * price. Using
-                // clobShareStepUnitsForPriceCents() ensures shares have ≤2dp so the
-                // library's roundDown is a no-op and the USDC product stays ≤2dp.
-                { tokenID: tokenId, price, side: "BUY", size: shares },
+                { tokenID: tokenId, price: sanitized.price, side: "BUY", size: sanitized.shares },
                 { tickSize: "0.01", negRisk: false },
                 "FOK",
               ) as Promise<unknown>,
@@ -637,16 +671,18 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         const fakQ = quantizeBuyOrder(signal.size, signal.maxPrice);
         const fakNorm = enforceMinSharesSingleLeg(fakQ.price, fakQ.shares);
         const fakPrecision = validateClobPrecision(fakQ.price, fakNorm.shares);
+        const fakSanitized = sanitizeBuyOrder(fakQ.price, fakNorm.shares);
         if (
           fakQ.price > 0 &&
           fakNorm.shares > 0 &&
           fakNorm.quote >= MIN_CLOB_NOTIONAL &&
-          fakPrecision.valid
+          fakPrecision.valid &&
+          fakSanitized
         ) {
           const fakResult = yield* Effect.tryPromise({
             try: () =>
               (client as any).createAndPostOrder(
-                { tokenID: tokenId, price: fakQ.price, side: "BUY", size: fakNorm.shares },
+                { tokenID: tokenId, price: fakSanitized.price, side: "BUY", size: fakSanitized.shares },
                 { tickSize: "0.01", negRisk: false },
                 "FAK",
               ) as Promise<unknown>,
@@ -771,7 +807,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         const q = quantizeDualBuyOrder(size, upPrice, downPrice);
         const pxUp = q.upPrice;
         const pxDown = q.downPrice;
-        const normalized = enforceMinSharesDualLeg(q.shares, pxUp, pxDown);
+        const normalized = enforceMinSharesDualLeg(q.shares, pxUp, pxDown, q.shareStepUnits);
         const shares = normalized.shares;
         if (shares <= 0) return trades;
         if (normalized.clamped) {
@@ -832,10 +868,21 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             break;
           }
 
+          const dualSanitized = sanitizeBuyOrder(px, shares);
+          if (!dualSanitized) {
+            yield* Effect.logError(
+              `[Orders] Sanitizer blocked dual-buy ${side}: price=${px}, shares=${shares}`,
+            );
+            if (trades.length === 1) {
+              trades[0]!.strategy = "efficiency-partial";
+            }
+            break;
+          }
+
           const result = yield* Effect.tryPromise({
             try: () =>
               (client as any).createAndPostOrder(
-                { tokenID: tokenId, price: px, side: "BUY", size: legNotional },
+                { tokenID: tokenId, price: dualSanitized.price, side: "BUY", size: dualSanitized.shares },
                 { tickSize: "0.01", negRisk: false },
                 "FOK",
               ) as Promise<unknown>,
@@ -862,16 +909,35 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
             break;
           }
 
-          const mappedStatus = parsed.mappedStatus;
-          const fee = mappedStatus === "filled" || mappedStatus === "partial" ? calculateFee(shares, px) : 0;
+          let resolvedMappedStatus = parsed.mappedStatus;
+          let resolvedAvgPrice: number | null = null;
+          let resolvedFilledShares: number | null = null;
+          if (
+            resolvedMappedStatus !== "filled" &&
+            resolvedMappedStatus !== "rejected" &&
+            resolvedMappedStatus !== "cancelled" &&
+            parsed.orderId
+          ) {
+            const refreshed = yield* getOrderStatusById(parsed.orderId);
+            if (refreshed.mappedStatus) {
+              resolvedMappedStatus = refreshed.mappedStatus;
+              resolvedAvgPrice = refreshed.avgPrice;
+              resolvedFilledShares = refreshed.filledShares;
+            }
+          }
+
+          const finalAvgPrice = resolvedAvgPrice ?? px;
+          const finalShares = resolvedFilledShares ?? shares;
+          const mappedStatus = resolvedMappedStatus;
+          const fee = mappedStatus === "filled" || mappedStatus === "partial" ? calculateFee(finalShares, finalAvgPrice) : 0;
           trades.push({
             id: `trade-${++tradeCounter}-${Date.now()}`,
             strategy: "efficiency",
             side,
             tokenId,
-            entryPrice: px,
-            size: legNotional,
-            shares,
+            entryPrice: finalAvgPrice,
+            size: finalShares > 0 && finalAvgPrice > 0 ? toFixedNumber(finalShares * finalAvgPrice, 2) : legNotional,
+            shares: finalShares,
             fee,
             status: mappedStatus,
             shadow: false,

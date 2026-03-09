@@ -64,16 +64,19 @@ export function SpreadPanel() {
           {sources.map((src) => {
             const isDown = src.status === "down";
             const isStale = src.status === "stale";
+            const isWarmingUp = src.status === "warming_up";
             const rowClass = isDown
               ? "opacity-40"
-              : isStale
+              : isStale || isWarmingUp
                 ? "opacity-60"
                 : "";
             const ageClass = isDown
               ? "text-[var(--accent-red)]"
               : isStale
                 ? "text-[var(--accent-yellow)]"
-                : "text-[var(--text-secondary)]";
+                : isWarmingUp
+                  ? "text-[var(--accent-blue)]"
+                  : "text-[var(--text-secondary)]";
 
             const delta =
               oracleEstimate > 0 && src.price != null && src.price > 0

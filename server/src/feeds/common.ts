@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect";
+import { Duration, Effect, Stream } from "effect";
 import WebSocket from "ws";
 import type { PricePoint } from "../types.js";
 
@@ -10,6 +10,10 @@ export interface FeedConfig {
   readonly pingIntervalMs?: number;
   readonly pingPayload?: string;
 }
+
+const INITIAL_BACKOFF_MS = 3_000;
+const MAX_BACKOFF_MS = 30_000;
+const BACKOFF_MULTIPLIER = 1.5;
 
 function connectOnce(config: FeedConfig): Stream.Stream<PricePoint, Error> {
   return Stream.async<PricePoint, Error>((emit) => {
@@ -61,13 +65,31 @@ function connectOnce(config: FeedConfig): Stream.Stream<PricePoint, Error> {
   });
 }
 
+/**
+ * Sentinel PricePoint emitted on WebSocket disconnect.
+ * Feed managers detect this to trigger reconnect grace periods.
+ */
+export function isDisconnectSentinel(p: PricePoint): boolean {
+  return p.price <= 0 && p.timestamp <= 0;
+}
+
 export function makeFeedStream(config: FeedConfig): Stream.Stream<PricePoint, never, never> {
+  let backoffMs = INITIAL_BACKOFF_MS;
+
+  const disconnectSentinel: PricePoint = { exchange: config.name, price: 0, timestamp: 0 };
+
   const go: Stream.Stream<PricePoint, never, never> = connectOnce(config).pipe(
-    Stream.catchAll(() =>
-      Stream.fromEffect(Effect.sleep("3 seconds")).pipe(
-        Stream.flatMap(() => go),
-      ),
-    ),
+    Stream.tap(() => Effect.sync(() => { backoffMs = INITIAL_BACKOFF_MS; })),
+    Stream.catchAll(() => {
+      const delay = backoffMs;
+      backoffMs = Math.min(backoffMs * BACKOFF_MULTIPLIER, MAX_BACKOFF_MS);
+      const reconnect = Stream.fromEffect(
+        Effect.log(`[Feed:${config.name}] disconnected, reconnecting in ${(delay / 1000).toFixed(1)}s`).pipe(
+          Effect.andThen(Effect.sleep(Duration.millis(delay))),
+        ),
+      ).pipe(Stream.flatMap(() => go));
+      return Stream.concat(Stream.make(disconnectSentinel), reconnect);
+    }),
   );
   return go;
 }

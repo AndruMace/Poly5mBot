@@ -30,7 +30,7 @@ const fetchers: { exchange: string; url: string; parse: (d: any) => number }[] =
   },
   {
     exchange: "bybit",
-    url: "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT",
+    url: "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",
     parse: (d) => Number(d.result.list[0].turnover24h),
   },
   {

@@ -12,6 +12,8 @@ export interface StrategyInternalState {
   totalPnl: number;
   regimeBlockReason: string | null;
   regimeFilter: RegimeFilter;
+  consecutiveLosses: number;
+  lossCooldownUntil: number;
 }
 
 export interface Strategy {
@@ -79,9 +81,15 @@ export function makeStrategyBase(
     Ref.update(ref, (s) => {
       if (trade.strategy !== name) return s;
       if (trade.outcome === "win") {
-        return { ...s, wins: s.wins + 1, totalPnl: s.totalPnl + trade.pnl };
+        return { ...s, wins: s.wins + 1, totalPnl: s.totalPnl + trade.pnl, consecutiveLosses: 0 };
       } else if (trade.outcome === "loss") {
-        return { ...s, losses: s.losses + 1, totalPnl: s.totalPnl + trade.pnl };
+        const newConsec = s.consecutiveLosses + 1;
+        const cooldownThreshold = Math.max(1, Math.floor(s.config["lossCooldownAfter"] ?? 3));
+        const cooldownMs = Math.max(0, (s.config["lossCooldownMinutes"] ?? 10) * 60_000);
+        const lossCooldownUntil = newConsec >= cooldownThreshold && cooldownMs > 0
+          ? Date.now() + cooldownMs
+          : s.lossCooldownUntil;
+        return { ...s, losses: s.losses + 1, totalPnl: s.totalPnl + trade.pnl, consecutiveLosses: newConsec, lossCooldownUntil };
       }
       return s;
     });
@@ -149,5 +157,7 @@ export function makeInitialState(
     totalPnl: 0,
     regimeBlockReason: null,
     regimeFilter: { ...regimeFilter },
+    consecutiveLosses: 0,
+    lossCooldownUntil: 0,
   };
 }

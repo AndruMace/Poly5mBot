@@ -5,7 +5,11 @@ const VOL_THRESHOLDS = { low: 0.0003, normal: 0.001, high: 0.003 };
 const VOL_SMOOTHING_ALPHA = 0.2;
 const SPREAD_SMOOTHING_ALPHA = 0.3;
 const TREND_STRONG = 1.2;
-const TREND_WEAK = 0.35;
+const TREND_WEAK_ENTER = 0.24;
+const TREND_WEAK_EXIT = 0.34;
+const TREND_LONG_CONFIRM_MIN = 0.18;
+const TREND_SHORT_LOOKBACK_MS = 120_000;
+const TREND_LONG_LOOKBACK_MS = 300_000;
 const TREND_BUCKET_MS = 5000;
 
 function buildMedianExchangeBuckets(
@@ -102,10 +106,17 @@ function computeVolatility(
   return { regime: classifyVolatilityByValue(newSmoothed), vol: newSmoothed, smoothed: newSmoothed };
 }
 
-function computeTrend(priceBuffer: PricePoint[]): { regime: RegimeState["trendRegime"]; strength: number } {
-  const ys = buildMedianExchangeBuckets(priceBuffer, 120_000, TREND_BUCKET_MS);
+function computeTrendStats(priceBuffer: PricePoint[], lookbackMs: number): {
+  sampleCount: number;
+  slope: number;
+  residualStddev: number;
+  strength: number;
+} {
+  const ys = buildMedianExchangeBuckets(priceBuffer, lookbackMs, TREND_BUCKET_MS);
   const n = ys.length;
-  if (n < 8) return { regime: "chop", strength: 0 };
+  if (n < 8) {
+    return { sampleCount: n, slope: 0, residualStddev: 0, strength: 0 };
+  }
 
   const xMean = (n - 1) / 2;
   const yMean = ys.reduce((s, v) => s + v, 0) / n;
@@ -120,11 +131,76 @@ function computeTrend(priceBuffer: PricePoint[]): { regime: RegimeState["trendRe
   const stddev = Math.sqrt(residuals.reduce((s, r) => s + r * r, 0) / Math.max(1, n - 2));
   const normalizedSlope = stddev > 0 ? Math.abs(slope) / stddev : 0;
   const strength = Number.isFinite(normalizedSlope) ? normalizedSlope : 0;
+  return {
+    sampleCount: n,
+    slope,
+    residualStddev: stddev,
+    strength,
+  };
+}
 
-  if (strength < TREND_WEAK) return { regime: "chop", strength };
-  const dir = slope > 0 ? 1 : -1;
-  if (strength > TREND_STRONG) return { regime: dir > 0 ? "strong_up" : "strong_down", strength };
-  return { regime: dir > 0 ? "up" : "down", strength };
+function computeTrend(
+  priceBuffer: PricePoint[],
+  previousTrendRegime: RegimeState["trendRegime"],
+  volatilityValue: number,
+  spreadValue: number,
+): {
+  regime: RegimeState["trendRegime"];
+  strength: number;
+  sampleCount: number;
+  slope: number;
+  residualStddev: number;
+} {
+  const short = computeTrendStats(priceBuffer, TREND_SHORT_LOOKBACK_MS);
+  const long = computeTrendStats(priceBuffer, TREND_LONG_LOOKBACK_MS);
+  if (short.sampleCount < 8) {
+    return { regime: "chop", strength: short.strength, sampleCount: short.sampleCount, slope: short.slope, residualStddev: short.residualStddev };
+  }
+  const shortDir = short.slope > 0 ? 1 : short.slope < 0 ? -1 : 0;
+  const longDir = long.slope > 0 ? 1 : long.slope < 0 ? -1 : 0;
+  const longAgreement = long.sampleCount >= 12 && shortDir !== 0 && shortDir === longDir && long.strength >= TREND_LONG_CONFIRM_MIN;
+
+  // Adaptive weak threshold: relax chop in low-noise regimes, tighten in noisier conditions.
+  const volTightener = volatilityValue > VOL_THRESHOLDS.normal ? 0.03 : 0;
+  const spreadTightener = spreadValue > 0.02 ? 0.03 : 0;
+  const enterWeak = TREND_WEAK_ENTER + volTightener + spreadTightener;
+  const exitWeak = TREND_WEAK_EXIT + volTightener + spreadTightener;
+  const weakThreshold = previousTrendRegime === "chop" ? exitWeak : enterWeak;
+
+  if (shortDir === 0) {
+    return {
+      regime: "chop",
+      strength: short.strength,
+      sampleCount: short.sampleCount,
+      slope: short.slope,
+      residualStddev: short.residualStddev,
+    };
+  }
+  if (short.strength < weakThreshold && !longAgreement) {
+    return {
+      regime: "chop",
+      strength: short.strength,
+      sampleCount: short.sampleCount,
+      slope: short.slope,
+      residualStddev: short.residualStddev,
+    };
+  }
+  if (short.strength > TREND_STRONG && longAgreement) {
+    return {
+      regime: shortDir > 0 ? "strong_up" : "strong_down",
+      strength: short.strength,
+      sampleCount: short.sampleCount,
+      slope: short.slope,
+      residualStddev: short.residualStddev,
+    };
+  }
+  return {
+    regime: shortDir > 0 ? "up" : "down",
+    strength: short.strength,
+    sampleCount: short.sampleCount,
+    slope: short.slope,
+    residualStddev: short.residualStddev,
+  };
 }
 
 function computeLiquidity(ctx: MarketContext): { regime: RegimeState["liquidityRegime"]; depth: number } {
@@ -200,10 +276,16 @@ export function createRegimeDetector(): Effect.Effect<{
         const buf = yield* Ref.get(priceBufferRef);
         const smoothed = yield* Ref.get(smoothedVolRef);
         const smoothedSpread = yield* Ref.get(smoothedSpreadRef);
+        const prevRegime = yield* Ref.get(regimeRef);
         const volResult = computeVolatility(buf, smoothed);
-        const trendResult = computeTrend(buf);
         const liqResult = computeLiquidity(ctx);
         const spreadResult = computeSpread(ctx, smoothedSpread);
+        const trendResult = computeTrend(
+          buf,
+          prevRegime.trendRegime,
+          volResult.vol,
+          spreadResult.value,
+        );
 
         yield* Ref.set(smoothedVolRef, volResult.smoothed);
         yield* Ref.set(smoothedSpreadRef, spreadResult.smoothed);
@@ -214,6 +296,9 @@ export function createRegimeDetector(): Effect.Effect<{
           spreadRegime: spreadResult.regime,
           volatilityValue: volResult.vol,
           trendStrength: trendResult.strength,
+          trendSampleCount: trendResult.sampleCount,
+          trendSlope: trendResult.slope,
+          trendResidualStddev: trendResult.residualStddev,
           liquidityDepth: liqResult.depth,
           spreadValue: spreadResult.value,
         });
@@ -257,10 +342,16 @@ export class RegimeDetector extends Effect.Service<RegimeDetector>()("RegimeDete
         const buf = yield* Ref.get(priceBufferRef);
         const smoothed = yield* Ref.get(smoothedVolRef);
         const smoothedSpread = yield* Ref.get(smoothedSpreadRef);
+        const prevRegime = yield* Ref.get(regimeRef);
         const volResult = computeVolatility(buf, smoothed);
-        const trendResult = computeTrend(buf);
         const liqResult = computeLiquidity(ctx);
         const spreadResult = computeSpread(ctx, smoothedSpread);
+        const trendResult = computeTrend(
+          buf,
+          prevRegime.trendRegime,
+          volResult.vol,
+          spreadResult.value,
+        );
 
         yield* Ref.set(smoothedVolRef, volResult.smoothed);
         yield* Ref.set(smoothedSpreadRef, spreadResult.smoothed);
@@ -271,6 +362,9 @@ export class RegimeDetector extends Effect.Service<RegimeDetector>()("RegimeDete
           spreadRegime: spreadResult.regime,
           volatilityValue: volResult.vol,
           trendStrength: trendResult.strength,
+          trendSampleCount: trendResult.sampleCount,
+          trendSlope: trendResult.slope,
+          trendResidualStddev: trendResult.residualStddev,
           liquidityDepth: liqResult.depth,
           spreadValue: spreadResult.value,
         });

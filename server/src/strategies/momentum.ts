@@ -6,24 +6,30 @@ import type { MarketContext, Signal, PricePoint } from "../types.js";
 const DEFAULT_CONFIG: Record<string, number> = {
   rsiPeriod: 14,
   rsiOverbought: 66,
-  rsiOversold: 34,
+  rsiOversold: 28,
   minWindowElapsedSec: 180,
   maxWindowElapsedSec: 270,
   minPriceMovePct: 0.05,
   minPtbDistancePct: 0.03,
-  maxSharePrice: 0.67,
-  maxExecutionPrice: 0.66,
+  maxSharePrice: 0.58,
+  maxExecutionPrice: 0.55,
   tradeSize: 8,
   maxEntriesPerWindow: 2,
-  maxSameSideEntriesPerWindow: 2,
+  maxSameSideEntriesPerWindow: 1,
   allowSameSideStacking: 0,
   chopConfidenceFloor: 0.58,
   chopSizeMultiplier: 0.75,
+  chopDownSizeMultiplier: 0.50,
   qualityMinMultiplier: 0.5,
   qualityMaxMultiplier: 1.15,
   spreadPenaltyK: 8,
   thinLiquidityDiscount: 0.02,
   blowoutSpreadDiscount: 0.03,
+  downChopConfidenceFloor: 0.70,
+  downMinTrendStrength: 0.05,
+  downMaxSpreadRegime: 2,
+  lossCooldownAfter: 2,
+  lossCooldownMinutes: 10,
 };
 
 const DEFAULT_REGIME_FILTER = {
@@ -78,7 +84,11 @@ export const makeMomentumStrategy = Effect.gen(function* () {
 
       if (!side) return null;
 
-      const confidence = Math.min(1, Math.abs(rsi - 50) / 30);
+      let confidence = Math.min(1, Math.abs(rsi - 50) / 30);
+      if (side === "DOWN") {
+        confidence = Math.min(0.65, 0.3 + (s.config["rsiOversold"]! - rsi) * 0.01);
+        confidence = Math.max(0.3, confidence);
+      }
 
       const signal: Signal = {
         side,

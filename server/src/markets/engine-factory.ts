@@ -610,7 +610,56 @@ export function createStandaloneMarketEngine(
       for (const trade of openTrades) {
         if (trade.status !== "submitted" || !trade.clobOrderId) continue;
         const status = yield* orderService.getOrderStatusById(trade.clobOrderId);
-        if (!status.mappedStatus || status.mappedStatus === "submitted") continue;
+        const signalToStatusMs = Math.max(0, Date.now() - (trade.events[0]?.timestamp ?? Date.now()));
+        yield* obs({
+          category: "trade_lifecycle",
+          source: "engine",
+          action: "order_status_polled",
+          entityType: "trade",
+          entityId: trade.id,
+          status: status.mappedStatus ?? "unknown",
+          strategy: trade.strategy,
+          mode: "live",
+          payload: {
+            tradeId: trade.id,
+            orderId: trade.clobOrderId,
+            signalToStatusMs,
+            mappedStatus: status.mappedStatus,
+            rawStatus: status.rawStatus,
+            filledShares: status.filledShares,
+            avgPrice: status.avgPrice,
+            reason: status.reason,
+          },
+        });
+        if (!status.mappedStatus || status.mappedStatus === "submitted") {
+          const staleThresholdMs = 30_000;
+          if (status.mappedStatus === "submitted" && signalToStatusMs >= staleThresholdMs) {
+            const lastAlertAt = submittedStaleLastAlertAt.get(trade.id) ?? 0;
+            if (Date.now() - lastAlertAt >= 30_000) {
+              submittedStaleLastAlertAt.set(trade.id, Date.now());
+              yield* obs({
+                category: "trade_lifecycle",
+                source: "engine",
+                action: "order_submitted_stale",
+                entityType: "trade",
+                entityId: trade.id,
+                status: "submitted",
+                strategy: trade.strategy,
+                mode: "live",
+                payload: {
+                  tradeId: trade.id,
+                  orderId: trade.clobOrderId,
+                  signalToStatusMs,
+                  staleThresholdMs,
+                  mappedStatus: status.mappedStatus,
+                  rawStatus: status.rawStatus,
+                },
+              });
+            }
+          }
+          continue;
+        }
+        submittedStaleLastAlertAt.delete(trade.id);
 
         if (status.mappedStatus === "cancelled" || status.mappedStatus === "rejected") {
           const eventType = status.mappedStatus === "rejected" ? "order_rejected" : "cancel";
@@ -620,6 +669,26 @@ export function createStandaloneMarketEngine(
           });
           const updated = yield* getTradeRecordById(trade.id, false);
           if (updated) {
+            yield* obs({
+              category: "trade_lifecycle",
+              source: "engine",
+              action: "order_lifecycle_transition",
+              entityType: "trade",
+              entityId: trade.id,
+              status: updated.status,
+              strategy: updated.strategy,
+              mode: "live",
+              payload: {
+                tradeId: trade.id,
+                orderId: trade.clobOrderId,
+                fromStatus: trade.status,
+                toStatus: updated.status,
+                signalToStatusMs,
+                mappedStatus: status.mappedStatus,
+                rawStatus: status.rawStatus,
+                reason: status.reason,
+              },
+            });
             yield* emit({ _tag: "Trade", data: updated });
             yield* Ref.update(stateRef, (s) => { bumpDiag(s, updated.strategy, "liveRejected", 1, false); return s; });
           }
@@ -648,6 +717,29 @@ export function createStandaloneMarketEngine(
 
         const updated = yield* getTradeRecordById(trade.id, false);
         if (updated) {
+          yield* obs({
+            category: "trade_lifecycle",
+            source: "engine",
+            action: "order_lifecycle_transition",
+            entityType: "trade",
+            entityId: trade.id,
+            status: updated.status,
+            strategy: updated.strategy,
+            mode: "live",
+            payload: {
+              tradeId: trade.id,
+              orderId: trade.clobOrderId,
+              fromStatus: trade.status,
+              toStatus: updated.status,
+              signalToStatusMs,
+              mappedStatus: status.mappedStatus,
+              rawStatus: status.rawStatus,
+              cumulativeFilled,
+              deltaShares,
+              avgPrice: price,
+              fee,
+            },
+          });
           if (trade.status === "submitted" && (updated.status === "partial" || updated.status === "filled")) {
             yield* riskManager.onTradeOpened(updated);
           }
@@ -706,6 +798,7 @@ export function createStandaloneMarketEngine(
 
     const settlementPendingLastLog = new Map<string, number>();
     const settlementPendingLastCheck = new Map<string, number>();
+    const submittedStaleLastAlertAt = new Map<string, number>();
 
     const emitTick = makeSnapshotEmitter({
       stateRef, strategies, emit, recomputeReconciliation,
@@ -885,7 +978,45 @@ export function createStandaloneMarketEngine(
 
       yield* regimeDetector.update(ctx);
       const regime = yield* regimeDetector.getRegime;
+      const prevRegime = sNow.regime;
       yield* Ref.update(stateRef, (s) => ({ ...s, regime }));
+      if (
+        prevRegime.trendRegime !== regime.trendRegime
+        || prevRegime.volatilityRegime !== regime.volatilityRegime
+        || prevRegime.liquidityRegime !== regime.liquidityRegime
+        || prevRegime.spreadRegime !== regime.spreadRegime
+      ) {
+        yield* obs({
+          category: "engine",
+          source: "engine",
+          action: "regime_transition",
+          entityType: "system",
+          entityId: "regime",
+          status: "updated",
+          mode: isShadow ? "shadow" : "live",
+          payload: {
+            from: {
+              trend: prevRegime.trendRegime,
+              volatility: prevRegime.volatilityRegime,
+              liquidity: prevRegime.liquidityRegime,
+              spread: prevRegime.spreadRegime,
+            },
+            to: {
+              trend: regime.trendRegime,
+              volatility: regime.volatilityRegime,
+              liquidity: regime.liquidityRegime,
+              spread: regime.spreadRegime,
+            },
+            trendStrength: regime.trendStrength ?? null,
+            trendSampleCount: regime.trendSampleCount ?? null,
+            trendSlope: regime.trendSlope ?? null,
+            trendResidualStddev: regime.trendResidualStddev ?? null,
+            volatilityValue: regime.volatilityValue ?? null,
+            spreadValue: regime.spreadValue ?? null,
+            liquidityDepth: regime.liquidityDepth ?? null,
+          },
+        });
+      }
 
       if (!isShadow && !connected) { yield* emitTick(isShadow); return; }
 

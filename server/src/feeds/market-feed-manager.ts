@@ -1,12 +1,14 @@
-import { Effect, Ref, Scope, Stream, SubscriptionRef } from "effect";
+import { Duration, Effect, Ref, Scope, Stream, SubscriptionRef } from "effect";
 import { computeOracleEstimate } from "./oracle.js";
-import { DEFAULT_EXCHANGE_WEIGHTS } from "./volume-weights.js";
+import { isDisconnectSentinel } from "./common.js";
+import { fetchExchangeWeights, DEFAULT_EXCHANGE_WEIGHTS } from "./volume-weights.js";
 import type { PricePoint, FeedHealthSnapshot, FeedSourceHealth } from "../types.js";
 
 const STALE_MS = 5000;
 const DOWN_MS = 15000;
 const MAX_HISTORY = 3000;
 const ORACLE_EMA_ALPHA = 0.2;
+const GRACE_PERIOD_MS = 5_000;
 
 interface FeedState {
   readonly latestByExchange: Map<string, PricePoint>;
@@ -45,15 +47,72 @@ export function createMarketFeedManager(
     const historyRef = yield* Ref.make<PricePoint[]>([]);
     const weightsRef = yield* Ref.make<Record<string, number>>(weights ?? DEFAULT_EXCHANGE_WEIGHTS);
 
+    // Fetch real volume-based weights on startup, fall back to defaults
+    yield* fetchExchangeWeights.pipe(
+      Effect.timeout(Duration.seconds(8)),
+      Effect.orElse(() => Effect.succeed(weights ?? DEFAULT_EXCHANGE_WEIGHTS)),
+      Effect.tap((w) => Ref.set(weightsRef, w)),
+      Effect.tap(() => Effect.log(`[FeedManager:${marketId}] Exchange weights updated from live volumes`)),
+      Effect.catchAll(() => Effect.void),
+    );
+
+    // Hourly refresh of volume-based weights
+    yield* fetchExchangeWeights.pipe(
+      Effect.tap((w) => Ref.set(weightsRef, w)),
+      Effect.tap(() => Effect.log(`[FeedManager:${marketId}] Exchange weights refreshed`)),
+      Effect.catchAll(() => Effect.void),
+      Effect.delay(Duration.hours(1)),
+      Effect.forever,
+      Effect.forkScoped,
+    );
+
+    const pendingReconnect = new Set<string>();
+    const reconnectedAt = new Map<string, number>();
+
+    const isInGracePeriod = (exchange: string, now: number): boolean => {
+      const reconAt = reconnectedAt.get(exchange);
+      if (!reconAt) return false;
+      if (now - reconAt < GRACE_PERIOD_MS) return true;
+      reconnectedAt.delete(exchange);
+      return false;
+    };
+
     const updatePrice = (point: PricePoint) =>
       Effect.gen(function* () {
+        if (isDisconnectSentinel(point)) {
+          pendingReconnect.add(point.exchange);
+          yield* SubscriptionRef.update(stateRef, (s) => {
+            const newConn = new Map(s.connectionByExchange);
+            newConn.set(point.exchange, false);
+            return { ...s, connectionByExchange: newConn };
+          });
+          return;
+        }
+
+        const now = Date.now();
+        if (pendingReconnect.has(point.exchange)) {
+          pendingReconnect.delete(point.exchange);
+          reconnectedAt.set(point.exchange, now);
+          yield* Effect.log(
+            `[FeedManager:${marketId}] ${point.exchange} reconnected — grace period ${GRACE_PERIOD_MS}ms`,
+          );
+        }
+
         const w = yield* Ref.get(weightsRef);
+
+        const effectiveWeights = { ...w };
+        for (const [exchange] of reconnectedAt) {
+          if (isInGracePeriod(exchange, now)) {
+            effectiveWeights[exchange] = 0;
+          }
+        }
+
         yield* SubscriptionRef.update(stateRef, (s) => {
           const newLatest = new Map(s.latestByExchange);
           newLatest.set(point.exchange, point);
           const newConn = new Map(s.connectionByExchange);
           newConn.set(point.exchange, true);
-          const oracle = computeOracleEstimate(newLatest, w);
+          const oracle = computeOracleEstimate(newLatest, effectiveWeights);
           const rawOracle = oracle.price;
           const smoothedOracle = rawOracle > 0
             ? (s.oracleEstimate > 0
@@ -87,8 +146,12 @@ export function createMarketFeedManager(
 
     const getLatestPrices = SubscriptionRef.get(stateRef).pipe(
       Effect.map((s) => {
+        const now = Date.now();
         const result: Record<string, PricePoint> = {};
-        for (const [name, p] of s.latestByExchange) result[name] = p;
+        for (const [name, p] of s.latestByExchange) {
+          if (isInGracePeriod(name, now)) continue;
+          result[name] = p;
+        }
         return result;
       }),
     );
@@ -122,9 +185,10 @@ export function createMarketFeedManager(
             : null;
           const connected = s.connectionByExchange.get(name) ?? false;
 
-          let status: "healthy" | "stale" | "down" = "down";
+          let status: "healthy" | "stale" | "down" | "warming_up" = "down";
           if (connected && ageMs !== null) {
-            if (ageMs <= STALE_MS) status = "healthy";
+            if (isInGracePeriod(name, now)) status = "warming_up";
+            else if (ageMs <= STALE_MS) status = "healthy";
             else if (ageMs <= DOWN_MS) status = "stale";
           }
 

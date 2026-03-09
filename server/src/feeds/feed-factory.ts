@@ -64,7 +64,7 @@ export function createBybitFeed(symbol: ExchangeSymbolConfig): Stream.Stream<Pri
 
   return makeFeedStream({
     name: "bybit",
-    url: "wss://stream.bybit.com/v5/public/linear",
+    url: "wss://stream.bybit.com/v5/public/spot",
     onOpen: (ws) => {
       ws.send(JSON.stringify({ op: "subscribe", args: [ticker] }));
     },

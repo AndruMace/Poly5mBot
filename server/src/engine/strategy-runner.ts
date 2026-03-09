@@ -153,6 +153,30 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
 
   return (ctx: MarketContext, regime: RegimeState, isShadow: boolean, now: number) =>
     Effect.gen(function* () {
+      const emitPreflightReject = (
+        strategyName: string,
+        entitySuffix: string,
+        payload: Record<string, unknown>,
+      ) =>
+        deps.obs({
+          category: "signal",
+          source: "engine",
+          action: "signal_rejected_preflight",
+          entityType: "signal",
+          entityId: `${strategyName}:${entitySuffix}`,
+          status: "rejected",
+          strategy: strategyName,
+          mode: isShadow ? "shadow" : "live",
+          payload: {
+            ...payload,
+            regimeTrend: regime.trendRegime,
+            regimeTrendStrength: regime.trendStrength ?? null,
+            regimeVolatility: regime.volatilityRegime,
+            regimeLiquidity: regime.liquidityRegime,
+            regimeSpread: regime.spreadRegime,
+          },
+        });
+
       for (const strategy of deps.strategies) {
         const sState = yield* Ref.get(strategy.stateRef);
         if (!sState.enabled) continue;
@@ -165,6 +189,10 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             status: "regime_blocked" as const,
             statusReason: "Blocked: unresolved efficiency dual-leg incident",
           }));
+          yield* emitPreflightReject(strategy.name, String(now), {
+            reason: "efficiency_incident_blocked",
+            gate: "efficiency_incident_blocked",
+          });
           continue;
         }
 
@@ -175,19 +203,63 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             status: "regime_blocked" as const,
             statusReason: regimeCheck.reason,
           }));
+          yield* emitPreflightReject(strategy.name, String(now), {
+            reason: regimeCheck.reason ?? "regime_blocked",
+            gate: "regime_filter",
+            regimeFilter: { ...sState.regimeFilter },
+          });
           continue;
+        }
+
+        if (sState.lossCooldownUntil > 0 && now < sState.lossCooldownUntil) {
+          const remainingMin = Math.ceil((sState.lossCooldownUntil - now) / 60_000);
+          yield* Ref.update(strategy.stateRef, (s) => ({
+            ...s,
+            status: "regime_blocked" as const,
+            statusReason: `Loss cooldown: ${remainingMin}min remaining (${sState.consecutiveLosses} consecutive losses)`,
+          }));
+          yield* emitPreflightReject(strategy.name, String(now), {
+            reason: "loss_cooldown_active",
+            gate: "loss_cooldown",
+            remainingMin,
+            consecutiveLosses: sState.consecutiveLosses,
+          });
+          continue;
+        }
+        if (sState.lossCooldownUntil > 0 && now >= sState.lossCooldownUntil) {
+          yield* Ref.update(strategy.stateRef, (s) => ({
+            ...s,
+            consecutiveLosses: 0,
+            lossCooldownUntil: 0,
+          }));
         }
 
         const cooldownMs = deps.strategyCooldownMs[strategy.name] ?? 3000;
         const lastExec = sCurrent.lastStrategyExecution.get(strategy.name) ?? 0;
-        if (now - lastExec < cooldownMs) continue;
+        if (now - lastExec < cooldownMs) {
+          yield* emitPreflightReject(strategy.name, String(now), {
+            reason: "strategy_cooldown_active",
+            gate: "strategy_cooldown",
+            cooldownMs,
+            elapsedMs: now - lastExec,
+          });
+          continue;
+        }
 
         // Read from the strategy's own config (set via UI) first; fall back to the hardcoded constant.
         const maxEntries = (sState.config["maxEntriesPerWindow"] as number | undefined)
           ?? deps.maxEntriesPerWindow[strategy.name]
           ?? 2;
         const entries = sCurrent.entriesThisWindow.get(strategy.name) ?? 0;
-        if (entries >= maxEntries) continue;
+        if (entries >= maxEntries) {
+          yield* emitPreflightReject(strategy.name, String(now), {
+            reason: "max_entries_per_window_reached",
+            gate: "max_entries_per_window",
+            entries,
+            maxEntries,
+          });
+          continue;
+        }
 
         if (isPtbCheckRelevant(strategy.name, sState.config, ctx)) {
           const reason = ctx.currentWindow?.priceToBeatReason ?? "price_to_beat_unavailable";
@@ -271,6 +343,13 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
           const sideKey = `${strategy.name}:${signal.side}`;
           const sideEntries = sCurrent.entriesThisWindow.get(sideKey) ?? 0;
           if (sideEntries >= perSideMax) {
+            yield* emitPreflightReject(strategy.name, String(signal.timestamp), {
+              reason: "per_side_entry_limit_reached",
+              gate: "per_side_entries",
+              side: signal.side,
+              sideEntries,
+              perSideMax,
+            });
             yield* Effect.log(
               `${deps.logPrefix} ${strategy.name} ${signal.side} skipped: side entry limit reached (${sideEntries}/${perSideMax})`,
             );
@@ -338,7 +417,9 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         }
 
         if (regime.trendRegime === "chop" && CHOP_SENSITIVE_STRATEGIES.has(strategy.name)) {
-          const chopConfidenceFloor = clamp(sState.config["chopConfidenceFloor"] ?? 0.55, 0, 1);
+          const baseChopFloor = clamp(sState.config["chopConfidenceFloor"] ?? 0.55, 0, 1);
+          const downChopFloor = clamp(sState.config["downChopConfidenceFloor"] ?? baseChopFloor, 0, 1);
+          const chopConfidenceFloor = signal.side === "DOWN" ? Math.max(baseChopFloor, downChopFloor) : baseChopFloor;
           if (signal.confidence < chopConfidenceFloor) {
             yield* Ref.update(deps.stateRef, (stUpd) => {
               deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
@@ -358,8 +439,72 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
                 gate: "chop_confidence_floor",
                 confidence: signal.confidence,
                 required: chopConfidenceFloor,
+                side: signal.side,
               },
             });
+            continue;
+          }
+        }
+
+        if (signal.side === "DOWN" && strategy.name === "momentum") {
+          const downMinTrendStrength = Math.max(0, sState.config["downMinTrendStrength"] ?? 0);
+          const currentTrendStrength = regime.trendStrength ?? 0;
+          if (downMinTrendStrength > 0 && currentTrendStrength < downMinTrendStrength && regime.trendRegime === "chop") {
+            yield* Ref.update(deps.stateRef, (stUpd) => {
+              deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
+              return stUpd;
+            });
+            yield* deps.obs({
+              category: "signal",
+              source: "engine",
+              action: "signal_rejected_preflight",
+              entityType: "signal",
+              entityId: `${strategy.name}:${signal.timestamp}`,
+              status: "rejected",
+              strategy: strategy.name,
+              mode: isShadow ? "shadow" : "live",
+              payload: {
+                reason: "down_trend_strength_too_low",
+                gate: "down_min_trend_strength",
+                trendStrength: currentTrendStrength,
+                required: downMinTrendStrength,
+              },
+            });
+            yield* Effect.log(
+              `${deps.logPrefix} momentum DOWN skipped: trendStrength ${currentTrendStrength.toFixed(4)} < ${downMinTrendStrength} in chop`,
+            );
+            continue;
+          }
+
+          const spreadRegimeRank = regime.spreadRegime === "tight" ? 0
+            : regime.spreadRegime === "normal" ? 1
+            : regime.spreadRegime === "wide" ? 2
+            : 3;
+          const downMaxSpreadRegime = Math.floor(sState.config["downMaxSpreadRegime"] ?? 2);
+          if (spreadRegimeRank > downMaxSpreadRegime) {
+            yield* Ref.update(deps.stateRef, (stUpd) => {
+              deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);
+              return stUpd;
+            });
+            yield* deps.obs({
+              category: "signal",
+              source: "engine",
+              action: "signal_rejected_preflight",
+              entityType: "signal",
+              entityId: `${strategy.name}:${signal.timestamp}`,
+              status: "rejected",
+              strategy: strategy.name,
+              mode: isShadow ? "shadow" : "live",
+              payload: {
+                reason: "down_spread_too_wide",
+                gate: "down_max_spread_regime",
+                spreadRegime: regime.spreadRegime,
+                maxAllowed: downMaxSpreadRegime,
+              },
+            });
+            yield* Effect.log(
+              `${deps.logPrefix} momentum DOWN skipped: spread regime ${regime.spreadRegime} exceeds limit`,
+            );
             continue;
           }
         }
@@ -403,9 +548,11 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         const ptbReference = Math.max(minPtbDistancePct, 0.01);
         const ptbQuality = minPtbDistancePct > 0 ? clamp(ptbDistancePct / ptbReference, 0.4, 1.2) : 1;
         const confidenceQuality = clamp(signal.confidence, 0.35, 1.1);
+        const baseChopMultiplier = clamp(sState.config["chopSizeMultiplier"] ?? 0.75, 0.1, 1);
+        const downChopMultiplier = clamp(sState.config["chopDownSizeMultiplier"] ?? baseChopMultiplier, 0.1, 1);
         const chopSizeMultiplier =
           regime.trendRegime === "chop" && CHOP_SENSITIVE_STRATEGIES.has(strategy.name)
-            ? clamp(sState.config["chopSizeMultiplier"] ?? 0.75, 0.1, 1)
+            ? (signal.side === "DOWN" ? Math.min(baseChopMultiplier, downChopMultiplier) : baseChopMultiplier)
             : 1;
         const qualityMinMultiplier = clamp(sState.config["qualityMinMultiplier"] ?? 0.5, 0.1, 1);
         const qualityMaxMultiplier = clamp(sState.config["qualityMaxMultiplier"] ?? 1.15, qualityMinMultiplier, 2);
@@ -579,6 +726,14 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
             finalSize: signal.size,
             rejectClass: execution.rejectClass ?? null,
             rejectReason: execution.rejectReason ?? null,
+            regimeTrend: regime.trendRegime,
+            regimeTrendStrength: regime.trendStrength ?? null,
+            regimeVolatility: regime.volatilityRegime,
+            regimeLiquidity: regime.liquidityRegime,
+            regimeSpread: regime.spreadRegime,
+            trendSampleCount: regime.trendSampleCount ?? null,
+            trendSlope: regime.trendSlope ?? null,
+            trendResidualStddev: regime.trendResidualStddev ?? null,
           },
         });
         if (executed) {
