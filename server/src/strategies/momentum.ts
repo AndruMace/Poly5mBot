@@ -30,6 +30,8 @@ const DEFAULT_CONFIG: Record<string, number> = {
   downMaxSpreadRegime: 2,
   lossCooldownAfter: 2,
   lossCooldownMinutes: 10,
+  candleIntervalMs: 30_000,
+  priceBufferMs: 900_000,
 };
 
 const DEFAULT_REGIME_FILTER = {
@@ -43,9 +45,11 @@ export const makeMomentumStrategy = Effect.gen(function* () {
   const base = makeStrategyBase("momentum", DEFAULT_CONFIG, DEFAULT_REGIME_FILTER, ref);
 
   const addPrice = (point: PricePoint) =>
-    Ref.update(priceBufferRef, (buf) => {
-      const cutoff = Date.now() - 15 * 60_000;
-      return [...buf.filter((p) => p.timestamp > cutoff), point];
+    Effect.gen(function* () {
+      const s = yield* Ref.get(ref);
+      const priceBufferMs = Math.max(60_000, Math.floor(s.config["priceBufferMs"] ?? 900_000));
+      const cutoff = Date.now() - priceBufferMs;
+      yield* Ref.update(priceBufferRef, (buf) => [...buf.filter((p) => p.timestamp > cutoff), point]);
     });
 
   const evaluate = (ctx: MarketContext): Effect.Effect<Signal | null> =>
@@ -60,7 +64,8 @@ export const makeMomentumStrategy = Effect.gen(function* () {
       yield* Ref.update(ref, (st) => ({ ...st, status: "watching" as const }));
 
       const buffer = yield* Ref.get(priceBufferRef);
-      const candles = buildCandles(buffer, 30_000);
+      const candleIntervalMs = Math.max(5_000, Math.floor(s.config["candleIntervalMs"] ?? 30_000));
+      const candles = buildCandles(buffer, candleIntervalMs);
       if (candles.length < s.config["rsiPeriod"]! + 1) return null;
 
       const rsi = computeRSI(candles, s.config["rsiPeriod"]!);

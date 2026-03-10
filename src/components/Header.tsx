@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { useRxValue, useRxSet } from "@effect-rx/rx-react";
+import { useRxValue } from "@effect-rx/rx-react";
 import {
   connectedRx,
   exchangeConnectedRx,
@@ -25,7 +25,6 @@ export function Header() {
   const storageHealth = useRxValue(storageHealthRx);
   const activeMarketId = useRxValue(activeMarketIdRx);
   const enabledMarkets = useRxValue(enabledMarketsRx);
-  const setActiveMarketId = useRxSet(activeMarketIdRx);
   const [toggling, setToggling] = useState(false);
   const [switchingMode, setSwitchingMode] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
@@ -99,23 +98,9 @@ export function Header() {
         <h1 className="text-lg font-bold tracking-tight">
           <span className="text-[var(--accent-blue)]">5m</span>Tracker
         </h1>
-        {enabledMarkets.length > 1 && (
-          <div className="flex items-center gap-1">
-            {enabledMarkets.map((m) => (
-              <button
-                key={m.id}
-                onClick={() => setActiveMarketId(m.id)}
-                className={`px-2.5 py-1 rounded text-xs font-medium transition-all ${
-                  activeMarketId === m.id
-                    ? "bg-[var(--accent-blue)]/20 text-[var(--accent-blue)] border border-[var(--accent-blue)]/40"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-card)]"
-                }`}
-              >
-                {m.displayName}
-              </button>
-            ))}
-          </div>
-        )}
+        <div className="rounded-md border border-[var(--border)] bg-[var(--bg-card)] px-2 py-1 text-xs text-[var(--text-secondary)]">
+          {enabledMarkets.length} markets
+        </div>
         {latestPrice !== null && (
           <div className="flex items-center gap-2 px-3 py-1 rounded-md bg-[var(--bg-card)] text-sm">
             <span className="text-[var(--text-secondary)]">{enabledMarkets.find((m) => m.id === activeMarketId)?.displayName ?? activeMarketId.toUpperCase()}</span>

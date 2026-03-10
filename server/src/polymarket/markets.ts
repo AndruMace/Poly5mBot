@@ -66,7 +66,11 @@ function extractPriceToBeat(
   return null;
 }
 
-function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
+function parseGammaMarket(
+  m: GammaMarket,
+  evt: GammaEvent,
+  windowDurationMs: number,
+): MarketWindow {
   let outcomes: string[] = [];
   let tokenIds: string[] = [];
 
@@ -83,7 +87,7 @@ function parseGammaMarket(m: GammaMarket, evt: GammaEvent): MarketWindow {
   }
 
   const endTime = new Date(m.endDate).getTime();
-  const startTime = endTime - FIVE_MIN_MS;
+  const startTime = endTime - windowDurationMs;
   const priceToBeat = extractPriceToBeat(evt.title, m.description);
   const hasMetadataPtb = priceToBeat !== null;
   const priceToBeatStatus: PriceToBeatStatus = hasMetadataPtb ? "exact" : "pending";
@@ -251,8 +255,13 @@ export interface MarketPollerInstance {
   readonly formatWindowTitle: (window: MarketWindow) => string;
 }
 
-export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string): Effect.Effect<MarketPollerInstance> {
+export function createMarketPoller(
+  slugPrefix: string,
+  windowTitlePrefix: string,
+  windowDurationSec: number = FIVE_MIN_S,
+): Effect.Effect<MarketPollerInstance> {
   return Effect.gen(function* () {
+    const windowDurationMs = windowDurationSec * 1000;
     const cacheRef = yield* Ref.make<{ window: MarketWindow | null; lastFetch: number }>({
       window: null,
       lastFetch: 0,
@@ -315,10 +324,10 @@ export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string
       }
 
       const nowSec = Math.floor(now / 1000);
-      const currentStart = Math.floor(nowSec / FIVE_MIN_S) * FIVE_MIN_S;
+      const currentStart = Math.floor(nowSec / windowDurationSec) * windowDurationSec;
       const slugs = [
         `${slugPrefix}-${currentStart}`,
-        `${slugPrefix}-${currentStart + FIVE_MIN_S}`,
+        `${slugPrefix}-${currentStart + windowDurationSec}`,
       ];
 
       for (const slug of slugs) {
@@ -332,7 +341,7 @@ export function createMarketPoller(slugPrefix: string, windowTitlePrefix: string
             const evt = events[0]!;
             if (evt.closed || !evt.markets || evt.markets.length === 0) return null;
             const mkt = evt.markets[0]!;
-            const parsed = parseGammaMarket(mkt, evt);
+            const parsed = parseGammaMarket(mkt, evt, windowDurationMs);
             const market = await resolveWindowPriceToBeat(parsed, ptbCache);
             return { market, slug, title: evt.title };
           },
@@ -484,7 +493,7 @@ export class MarketService extends Effect.Service<MarketService>()("MarketServic
             const evt = events[0]!;
             if (evt.closed || !evt.markets || evt.markets.length === 0) return null;
             const mkt = evt.markets[0]!;
-            const parsed = parseGammaMarket(mkt, evt);
+            const parsed = parseGammaMarket(mkt, evt, FIVE_MIN_MS);
             const market = await resolveWindowPriceToBeat(parsed, ptbCache);
             return { market, slug, title: evt.title };
           },

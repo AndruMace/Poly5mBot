@@ -96,7 +96,7 @@ export function LiveMarket() {
             className={remaining > 0 ? "text-[var(--accent-green)] animate-pulse" : "text-[var(--text-secondary)]"}
           />
           <span className="text-sm font-semibold">
-            {currentMarket?.title ?? `${activeDisplayName} Up or Down — 5 Minutes`}
+            {currentMarket?.title ?? `${activeDisplayName} Up or Down`}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -122,7 +122,7 @@ export function LiveMarket() {
         {noMarket ? (
           <div className="text-center py-4">
             <p className="text-sm text-[var(--text-secondary)]">
-              Waiting for next 5-minute {activeDisplayName} market window...
+              Waiting for next {activeDisplayName} market window...
             </p>
             <p className="text-xs text-[var(--text-secondary)] mt-1 opacity-60">
               Markets refresh every ~10 seconds

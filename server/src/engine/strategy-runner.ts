@@ -605,7 +605,7 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         });
 
         const configuredTradeSize = signal.size;
-        const recentPrices = yield* deps.getRecentPrices(300_000, "binance");
+        const recentPrices = yield* deps.getRecentPrices(ctx.windowDurationMs, "binance");
 
         const strategyMetrics = sCurrent.metrics.reconciliation.strategies.find((m) => m.strategy === strategy.name);
         // Live sizing is intentionally based only on live execution stats and only

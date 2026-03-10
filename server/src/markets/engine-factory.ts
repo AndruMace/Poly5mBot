@@ -51,7 +51,7 @@ import type { ObservabilityEventInput } from "../observability/store.js";
 
 // ── Strategy constants (mirrored from engine.ts) ─────────────────────────────
 
-const STRATEGY_COOLDOWN_MS: Record<string, number> = {
+const BASE_STRATEGY_COOLDOWN_MS: Record<string, number> = {
   arb: 3000,
   efficiency: 5000,
   "whale-hunt": 6000,
@@ -59,7 +59,7 @@ const STRATEGY_COOLDOWN_MS: Record<string, number> = {
   "orderflow-imbalance": 4500,
 };
 
-const MAX_ENTRIES_PER_WINDOW: Record<string, number> = {
+const BASE_MAX_ENTRIES_PER_WINDOW: Record<string, number> = {
   arb: 2,
   efficiency: 1,
   "whale-hunt": 1,
@@ -173,6 +173,21 @@ export function createStandaloneMarketEngine(
   return Effect.gen(function* () {
     const { config, orderService, polyClient, eventBus, fillSimulator, positionSizer, incidentStore, observability, postgres } = shared;
     const marketId = marketConfig.id;
+    const windowDurationSec = Math.max(60, Math.floor(marketConfig.windowDurationSec || 300));
+    const windowDurationMs = windowDurationSec * 1000;
+    const durationRatio = Math.max(1, windowDurationSec / 300);
+    const strategyCooldownMs = Object.fromEntries(
+      Object.entries(BASE_STRATEGY_COOLDOWN_MS).map(([name, cooldownMs]) => [
+        name,
+        Math.round(cooldownMs * Math.min(1.5, Math.sqrt(durationRatio))),
+      ]),
+    ) as Record<string, number>;
+    const maxEntriesPerWindow = Object.fromEntries(
+      Object.entries(BASE_MAX_ENTRIES_PER_WINDOW).map(([name, baseMax]) => [
+        name,
+        Math.max(1, Math.round(baseMax * durationRatio)),
+      ]),
+    ) as Record<string, number>;
     const DATA_DIR = "data";
     const STRATEGY_STATE_FILE = `data/${marketId}-strategy-state.json`;
     const fs = yield* FileSystem.FileSystem;
@@ -188,7 +203,11 @@ export function createStandaloneMarketEngine(
 
     // ── Per-market market poller ────────────────────────────────────────────
 
-    const marketPoller = yield* createMarketPoller(marketConfig.slugPrefix, marketConfig.windowTitlePrefix);
+    const marketPoller = yield* createMarketPoller(
+      marketConfig.slugPrefix,
+      marketConfig.windowTitlePrefix,
+      windowDurationSec,
+    );
 
     // ── Per-market risk manager ─────────────────────────────────────────────
 
@@ -317,7 +336,7 @@ export function createStandaloneMarketEngine(
 
     // ── Per-market regime detector ──────────────────────────────────────────
 
-    const regimeDetector = yield* createRegimeDetector();
+    const regimeDetector = yield* createRegimeDetector(windowDurationMs);
 
     // ── Engine state ────────────────────────────────────────────────────────
 
@@ -832,8 +851,8 @@ export function createStandaloneMarketEngine(
 
     const runStrategies = makeStrategyRunner({
       stateRef, strategies,
-      strategyCooldownMs: STRATEGY_COOLDOWN_MS,
-      maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
+      strategyCooldownMs,
+      maxEntriesPerWindow,
       perSideStrategies: PER_SIDE_STRATEGIES,
       maxTradeSize: riskConfig.maxTradeSize,
       getRecentPrices: (windowMs, source) => feedManager.getRecentPrices(windowMs, source),
@@ -969,6 +988,7 @@ export function createStandaloneMarketEngine(
         prices,
         oracleEstimate: oracleEst,
         oracleTimestamp: oracleTs,
+        windowDurationMs,
         windowElapsedMs: now - sNow.currentWindow.startTime,
         windowRemainingMs: sNow.currentWindow.endTime - now,
         priceToBeat: sNow.currentWindow.priceToBeat,

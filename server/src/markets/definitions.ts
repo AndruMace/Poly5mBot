@@ -4,6 +4,7 @@ export const BTC_MARKET: MarketAssetConfig = {
   id: "btc",
   displayName: "BTC",
   slugPrefix: "btc-updown-5m",
+  windowDurationSec: 300,
   windowTitlePrefix: "BTC Up or Down",
   feeds: [
     {
@@ -61,6 +62,7 @@ export const XRP_MARKET: MarketAssetConfig = {
   id: "xrp",
   displayName: "XRP",
   slugPrefix: "xrp-updown-5m",
+  windowDurationSec: 300,
   windowTitlePrefix: "XRP Up or Down",
   feeds: [
     {
@@ -116,6 +118,7 @@ export const ETH_MARKET: MarketAssetConfig = {
   id: "eth",
   displayName: "ETH",
   slugPrefix: "eth-updown-5m",
+  windowDurationSec: 300,
   windowTitlePrefix: "ETH Up or Down",
   feeds: [
     {
@@ -183,6 +186,7 @@ export const SOL_MARKET: MarketAssetConfig = {
   id: "sol",
   displayName: "SOL",
   slugPrefix: "sol-updown-5m",
+  windowDurationSec: 300,
   windowTitlePrefix: "SOL Up or Down",
   feeds: [
     {
@@ -248,9 +252,144 @@ export const SOL_MARKET: MarketAssetConfig = {
 
 export const ALL_MARKETS: ReadonlyArray<MarketAssetConfig> = [
   BTC_MARKET,
+  {
+    ...BTC_MARKET,
+    id: "btc-15m",
+    displayName: "BTC 15m",
+    slugPrefix: "btc-updown-15m",
+    windowDurationSec: 900,
+    windowTitlePrefix: "BTC Up or Down (15m)",
+    strategyConfigOverrides: {
+      ...BTC_MARKET.strategyConfigOverrides,
+      arb: {
+        ...(BTC_MARKET.strategyConfigOverrides?.arb ?? {}),
+        minWindowElapsedSec: 540,
+        maxWindowElapsedSec: 810,
+        persistenceMs: 6000,
+        persistenceCount: 6,
+        maxEntriesPerWindow: 3,
+      },
+      momentum: {
+        minWindowElapsedSec: 540,
+        maxWindowElapsedSec: 810,
+        rsiPeriod: 18,
+        minPriceMovePct: 0.08,
+        minPtbDistancePct: 0.05,
+        candleIntervalMs: 60_000,
+        priceBufferMs: 2_700_000,
+        maxEntriesPerWindow: 3,
+      },
+      "whale-hunt": {
+        minWindowElapsedSec: 540,
+        entryWindowSec: 180,
+        maxDynamicEntryWindowSec: 360,
+        minPriceMovePct: 0.05,
+        maxEntriesPerWindow: 2,
+      },
+      efficiency: {
+        minWindowElapsedSec: 540,
+        maxEntriesPerWindow: 3,
+      },
+      "orderflow-imbalance": {
+        minWindowElapsedSec: 540,
+        minWindowRemainingSec: 90,
+        lookbackSec: 20,
+        maxEntriesPerWindow: 2,
+      },
+    },
+  },
   XRP_MARKET,
+  {
+    ...XRP_MARKET,
+    id: "xrp-15m",
+    displayName: "XRP 15m",
+    slugPrefix: "xrp-updown-15m",
+    windowDurationSec: 900,
+    windowTitlePrefix: "XRP Up or Down (15m)",
+    strategyConfigOverrides: {
+      ...XRP_MARKET.strategyConfigOverrides,
+      arb: {
+        ...(XRP_MARKET.strategyConfigOverrides?.arb ?? {}),
+        minWindowElapsedSec: 540,
+        maxWindowElapsedSec: 810,
+        persistenceMs: 6000,
+        persistenceCount: 6,
+        maxEntriesPerWindow: 3,
+      },
+      momentum: {
+        minWindowElapsedSec: 540,
+        maxWindowElapsedSec: 810,
+        rsiPeriod: 18,
+        minPriceMovePct: 0.08,
+        minPtbDistancePct: 0.05,
+        candleIntervalMs: 60_000,
+        priceBufferMs: 2_700_000,
+        maxEntriesPerWindow: 3,
+      },
+    },
+  },
   ETH_MARKET,
+  {
+    ...ETH_MARKET,
+    id: "eth-15m",
+    displayName: "ETH 15m",
+    slugPrefix: "eth-updown-15m",
+    windowDurationSec: 900,
+    windowTitlePrefix: "ETH Up or Down (15m)",
+    strategyConfigOverrides: {
+      ...ETH_MARKET.strategyConfigOverrides,
+      arb: {
+        ...(ETH_MARKET.strategyConfigOverrides?.arb ?? {}),
+        minWindowElapsedSec: 540,
+        maxWindowElapsedSec: 810,
+        persistenceMs: 6000,
+        persistenceCount: 6,
+        maxEntriesPerWindow: 3,
+      },
+      momentum: {
+        ...(ETH_MARKET.strategyConfigOverrides?.momentum ?? {}),
+        minWindowElapsedSec: 540,
+        maxWindowElapsedSec: 810,
+        rsiPeriod: 18,
+        minPriceMovePct: 0.08,
+        minPtbDistancePct: 0.05,
+        candleIntervalMs: 60_000,
+        priceBufferMs: 2_700_000,
+        maxEntriesPerWindow: 3,
+      },
+    },
+  },
   SOL_MARKET,
+  {
+    ...SOL_MARKET,
+    id: "sol-15m",
+    displayName: "SOL 15m",
+    slugPrefix: "sol-updown-15m",
+    windowDurationSec: 900,
+    windowTitlePrefix: "SOL Up or Down (15m)",
+    strategyConfigOverrides: {
+      ...SOL_MARKET.strategyConfigOverrides,
+      arb: {
+        ...(SOL_MARKET.strategyConfigOverrides?.arb ?? {}),
+        minWindowElapsedSec: 540,
+        maxWindowElapsedSec: 810,
+        persistenceMs: 6000,
+        persistenceCount: 6,
+        maxEntriesPerWindow: 3,
+      },
+      momentum: {
+        ...(SOL_MARKET.strategyConfigOverrides?.momentum ?? {}),
+        minWindowElapsedSec: 540,
+        maxWindowElapsedSec: 810,
+        rsiPeriod: 18,
+        minPriceMovePct: 0.08,
+        minPtbDistancePct: 0.05,
+        candleIntervalMs: 60_000,
+        priceBufferMs: 2_700_000,
+        maxEntriesPerWindow: 3,
+      },
+    },
+  },
 ];
 
 export function getMarketConfig(marketId: string): MarketAssetConfig | undefined {

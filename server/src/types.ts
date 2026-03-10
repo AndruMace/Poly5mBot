@@ -478,6 +478,7 @@ export interface MarketContext {
   prices: Record<string, PricePoint>;
   oracleEstimate: number;
   oracleTimestamp: number;
+  windowDurationMs: number;
   windowElapsedMs: number;
   windowRemainingMs: number;
   priceToBeat: number | null;

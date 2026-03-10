@@ -934,6 +934,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         prices,
         oracleEstimate: oracleEst,
         oracleTimestamp: oracleTs,
+        windowDurationMs: sNow.currentWindow.endTime - sNow.currentWindow.startTime,
         windowElapsedMs: now - sNow.currentWindow.startTime,
         windowRemainingMs: sNow.currentWindow.endTime - now,
         priceToBeat: sNow.currentWindow.priceToBeat,

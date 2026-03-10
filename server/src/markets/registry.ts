@@ -34,6 +34,8 @@ export interface MarketAssetConfig {
   readonly displayName: string;
   /** Polymarket slug prefix, e.g. "btc-updown-5m" */
   readonly slugPrefix: string;
+  /** Market window duration in seconds (300 = 5m, 900 = 15m). */
+  readonly windowDurationSec: number;
   /** Window title prefix, e.g. "BTC Up or Down" */
   readonly windowTitlePrefix: string;
   /** Exchange feed configurations for this asset */

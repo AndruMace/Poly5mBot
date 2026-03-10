@@ -124,6 +124,25 @@ export interface EnabledMarket {
   displayName: string;
 }
 
+export type WorkspaceDensity = "compact" | "comfortable";
+export type WorkspaceSortField =
+  | "symbol"
+  | "pnl"
+  | "todayPnl"
+  | "winRate"
+  | "risk"
+  | "latency";
+
+export interface WorkspaceLayoutPrefs {
+  density: WorkspaceDensity;
+  showFocusPanel: boolean;
+  focusMarketId: string | null;
+  query: string;
+  riskOnly: boolean;
+  sortBy: WorkspaceSortField;
+  sortDir: "asc" | "desc";
+}
+
 /** Snapshot of one market's display state, used when switching tabs. */
 export interface PerMarketSnapshot {
   tradingActive: boolean;
@@ -149,6 +168,126 @@ export const activeMarketIdRx = Rx.make(
 );
 export const enabledMarketsRx = Rx.make<EnabledMarket[]>([{ id: "btc", displayName: "BTC" }]);
 export const perMarketStateRx = Rx.keepAlive(Rx.make<Record<string, PerMarketSnapshot>>({}));
+export const pinnedMarketsRx = Rx.make<string[]>([]);
+export const workspaceLayoutPrefsRx = Rx.make<WorkspaceLayoutPrefs>({
+  density: "comfortable",
+  showFocusPanel: false,
+  focusMarketId: null,
+  query: "",
+  riskOnly: false,
+  sortBy: "pnl",
+  sortDir: "desc",
+});
+
+export interface MarketListViewRow {
+  marketId: string;
+  displayName: string;
+  pinned: boolean;
+  tradingActive: boolean;
+  mode: "live" | "shadow";
+  latestPrice: number | null;
+  upMid: number | null;
+  downMid: number | null;
+  totalPnl: number;
+  todayPnl: number;
+  winRate: number;
+  riskScore: number;
+  latencyMs: number;
+  stale: boolean;
+  volatilityRegime: string;
+  trendRegime: string;
+}
+
+export const marketListViewRx = Rx.make((get: Rx.Context): MarketListViewRow[] => {
+  const enabled = get(enabledMarketsRx);
+  const perMarket = get(perMarketStateRx);
+  const pinned = new Set(get(pinnedMarketsRx));
+
+  return enabled.map((market) => {
+    const snapshot = perMarket[market.id];
+    const prices = snapshot?.prices ?? {};
+    let latestPrice: number | null = null;
+    let latestTs = 0;
+    for (const point of Object.values(prices)) {
+      if (point.price > 0 && point.timestamp > latestTs) {
+        latestPrice = point.price;
+        latestTs = point.timestamp;
+      }
+    }
+
+    const orderbook = snapshot?.orderbook ?? emptyOrderBook;
+    const upMid = orderbook.bestBidUp !== null && orderbook.bestAskUp !== null
+      ? (orderbook.bestBidUp + orderbook.bestAskUp) / 2
+      : null;
+    const downMid = orderbook.bestBidDown !== null && orderbook.bestAskDown !== null
+      ? (orderbook.bestBidDown + orderbook.bestAskDown) / 2
+      : null;
+    const feed = snapshot?.feedHealth ?? emptyFeedHealth;
+    const pnl = snapshot?.pnl ?? emptyPnl;
+    const risk = snapshot?.risk ?? emptyRisk;
+    const regime = snapshot?.regime ?? defaultRegime;
+    const metrics = snapshot?.metrics ?? emptyMetrics;
+    const riskScore = Math.abs(risk.dailyPnl) + risk.openExposure + risk.windowSpend;
+
+    return {
+      marketId: market.id,
+      displayName: market.displayName,
+      pinned: pinned.has(market.id),
+      tradingActive: snapshot?.tradingActive ?? false,
+      mode: snapshot?.mode ?? "shadow",
+      latestPrice,
+      upMid,
+      downMid,
+      totalPnl: pnl.totalPnl ?? 0,
+      todayPnl: pnl.todayPnl ?? 0,
+      winRate: pnl.winRate ?? 0,
+      riskScore,
+      latencyMs: metrics.latency?.avgRecentSignalToSubmitMs ?? 0,
+      stale: feed.staleCount > 0 || feed.sources.some((s) => s.status === "stale" || s.status === "down"),
+      volatilityRegime: regime.volatilityRegime,
+      trendRegime: regime.trendRegime,
+    };
+  });
+});
+
+function compareRows(a: MarketListViewRow, b: MarketListViewRow, sortBy: WorkspaceSortField): number {
+  switch (sortBy) {
+    case "symbol":
+      return a.displayName.localeCompare(b.displayName);
+    case "todayPnl":
+      return a.todayPnl - b.todayPnl;
+    case "winRate":
+      return a.winRate - b.winRate;
+    case "risk":
+      return a.riskScore - b.riskScore;
+    case "latency":
+      return a.latencyMs - b.latencyMs;
+    case "pnl":
+    default:
+      return a.totalPnl - b.totalPnl;
+  }
+}
+
+export const marketComparisonRx = Rx.make((get: Rx.Context): MarketListViewRow[] => {
+  const rows = [...get(marketListViewRx)];
+  const prefs = get(workspaceLayoutPrefsRx);
+  const query = prefs.query.trim().toLowerCase();
+  const filtered = rows.filter((row) => {
+    if (prefs.riskOnly && row.riskScore <= 0) return false;
+    if (query.length > 0) {
+      const text = `${row.marketId} ${row.displayName}`.toLowerCase();
+      if (!text.includes(query)) return false;
+    }
+    return true;
+  });
+
+  filtered.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    const cmp = compareRows(a, b, prefs.sortBy);
+    return prefs.sortDir === "asc" ? cmp : -cmp;
+  });
+  return filtered;
+});
 
 // Writable Rx atoms
 export const connectedRx = Rx.make(false);

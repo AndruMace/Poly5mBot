@@ -150,14 +150,14 @@ const CONFIG_HELP: Record<string, { description: string }> = {
     description: "RSI threshold for confirming downward momentum before DOWN entries.",
   },
   minWindowElapsedSec: {
-    description: "Earliest second in a 5-minute market where entries are allowed.",
+    description: "Earliest second in a market window where entries are allowed.",
   },
   maxWindowElapsedSec: {
-    description: "Latest second in a 5-minute market where entries are allowed.",
+    description: "Latest second in a market window where entries are allowed.",
   },
   maxEntriesPerWindow: {
     description:
-      "Maximum successful entries this strategy can place in a single 5-minute window.",
+      "Maximum successful entries this strategy can place in a single market window.",
   },
   orderBookBandPct: {
     description:
