@@ -9,6 +9,7 @@ const DEFAULT_CONFIG: Record<string, number> = {
   slippageBufferBps: 4,
   tradeSize: 20,
   maxEntriesPerWindow: 2,
+  maxVolatilityValue: 0.0003,
 };
 
 const DEFAULT_REGIME_FILTER = {
@@ -26,6 +27,9 @@ export const makeEfficiencyStrategy = Effect.gen(function* () {
       if (!ctx.currentWindow) return null;
       const elapsedSec = ctx.windowElapsedMs / 1000;
       if (elapsedSec < s.config["minWindowElapsedSec"]!) return null;
+
+      const maxVol = s.config["maxVolatilityValue"] ?? 0.0003;
+      if (ctx.volatilityValue !== undefined && ctx.volatilityValue > maxVol) return null;
 
       const { bestAskUp, bestAskDown } = ctx.orderBook;
       if (bestAskUp === null || bestAskDown === null) return null;

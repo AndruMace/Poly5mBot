@@ -5,6 +5,8 @@ import type { MarketContext, OrderBookSide, Side, Signal } from "../types.js";
 export const DEFAULT_CONFIG: Record<string, number> = {
   orderBookBandPct: 0.05,
   minImbalanceRatio: 3.5,
+  minImbalanceRatioChop: 6,
+  minImbalanceRatioOpposing: 8,
   maxImbalanceRatioForConfidence: 10,
   maxSpreadPct: 0.03,
   minWindowElapsedSec: 180,
@@ -25,6 +27,7 @@ export const DEFAULT_CONFIG: Record<string, number> = {
   qualityMinMultiplier: 0.5,
   qualityMaxMultiplier: 1.15,
   spreadPenaltyK: 8,
+  minConfidence: 0.5,
 };
 
 export const DEFAULT_REGIME_FILTER = {
@@ -144,9 +147,20 @@ export const makeOrderFlowImbalanceStrategy = Effect.gen(function* () {
       const upRatioDelta = upPressure.ratio - baseline.upRatio;
       const downRatioDelta = downPressure.ratio - baseline.downRatio;
 
+      const effectiveImbalanceThreshold = (side: Side): number => {
+        const trend = ctx.trendRegime;
+        if (!trend) return minImbalanceRatio;
+        const opposing =
+          (side === "UP" && (trend === "down" || trend === "strong_down")) ||
+          (side === "DOWN" && (trend === "up" || trend === "strong_up"));
+        if (opposing) return s.config["minImbalanceRatioOpposing"] ?? 8;
+        if (trend === "chop") return s.config["minImbalanceRatioChop"] ?? 6;
+        return minImbalanceRatio;
+      };
+
       const candidates: Array<{ side: Side; pressure: SidePressure; ratioDelta: number }> = [];
       if (
-        upPressure.ratio >= minImbalanceRatio
+        upPressure.ratio >= effectiveImbalanceThreshold("UP")
         && upPressure.spreadPct <= maxSpreadPct
         && upPressure.totalNotional >= minBookNotional
         && upPressure.bestAsk <= maxSharePrice
@@ -156,7 +170,7 @@ export const makeOrderFlowImbalanceStrategy = Effect.gen(function* () {
         candidates.push({ side: "UP", pressure: upPressure, ratioDelta: upRatioDelta });
       }
       if (
-        downPressure.ratio >= minImbalanceRatio
+        downPressure.ratio >= effectiveImbalanceThreshold("DOWN")
         && downPressure.spreadPct <= maxSpreadPct
         && downPressure.totalNotional >= minBookNotional
         && downPressure.bestAsk <= maxSharePrice
@@ -173,13 +187,17 @@ export const makeOrderFlowImbalanceStrategy = Effect.gen(function* () {
         return current.ratioDelta > best.ratioDelta ? current : best;
       });
 
+      const effectiveThreshold = effectiveImbalanceThreshold(selected.side);
       const ratioConfidence = clamp(
-        (selected.pressure.ratio - minImbalanceRatio) / (maxImbalanceRatioForConfidence - minImbalanceRatio),
+        (selected.pressure.ratio - effectiveThreshold) / (maxImbalanceRatioForConfidence - effectiveThreshold),
         0,
         1,
       );
       const velocityConfidence = clamp(selected.ratioDelta / maxRatioDelta10sForConfidence, 0, 1);
       const confidence = clamp(ratioConfidence * 0.8 + velocityConfidence * 0.2, 0, 1);
+
+      const minConf = s.config["minConfidence"] ?? 0.5;
+      if (confidence < minConf) return null;
 
       const signal: Signal = {
         side: selected.side,

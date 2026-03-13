@@ -5,7 +5,6 @@ import { fetchPriceToBeatFromPolymarketPage } from "./price-to-beat.js";
 import { fetchWithTimeout } from "./fetch.js";
 
 const FIVE_MIN_S = 300;
-const FIVE_MIN_MS = FIVE_MIN_S * 1000;
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const GAMMA_FETCH_TIMEOUT_MS = 2_500;
 const PTB_PAGE_FETCH_TIMEOUT_MS = 3_000;
@@ -234,11 +233,7 @@ export function inferSettlementWinnerFromMarket(market: GammaMarket): Settlement
   return { resolved: true, winnerSide: null };
 }
 
-export function formatWindowTitle(window: MarketWindow): string {
-  return formatWindowTitleForAsset("BTC Up or Down")(window);
-}
-
-export function formatWindowTitleForAsset(prefix: string) {
+function formatWindowTitleForAsset(prefix: string) {
   return (window: MarketWindow): string => {
     const start = new Date(window.startTime);
     const end = new Date(window.endTime);
@@ -414,113 +409,11 @@ const CACHE_TTL = 8_000;
 
 export class MarketService extends Effect.Service<MarketService>()("MarketService", {
   effect: Effect.gen(function* () {
-    const cacheRef = yield* Ref.make<{ window: MarketWindow | null; lastFetch: number }>({
-      window: null,
-      lastFetch: 0,
-    });
-    const ptbCache = new Map<string, MarketWindow>();
-    const ptbRetryState = new Map<string, PtbRetryState>();
-
-    const fetchCurrentBtc5mWindow = Effect.gen(function* () {
-      const now = Date.now();
-      const cache = yield* Ref.get(cacheRef);
-
-      if (cache.window && now - cache.lastFetch < CACHE_TTL && cache.window.endTime > now) {
-        if (cache.window.priceToBeat !== null) return cache.window;
-
-        // PTB still unresolved — check ptbCache for a success that arrived since last poll
-        const ptbHit = ptbCache.get(cache.window.conditionId);
-        if (ptbHit && ptbHit.priceToBeat !== null) {
-          const merged: MarketWindow = {
-            ...cache.window,
-            priceToBeat: ptbHit.priceToBeat,
-            priceToBeatStatus: "exact",
-            priceToBeatSource: ptbHit.priceToBeatSource ?? "polymarket_page_json",
-            priceToBeatObservedAt: ptbHit.priceToBeatObservedAt,
-            priceToBeatReason: undefined,
-          };
-          yield* Ref.set(cacheRef, { window: merged, lastFetch: cache.lastFetch });
-          ptbRetryState.delete(cache.window.conditionId);
-          return merged;
-        }
-
-        const retryState = ptbRetryState.get(cache.window.conditionId);
-        const retryDelay = retryState
-          ? getPtbRetryCooldownMs(cache.window.conditionId, retryState.attempts)
-          : 0;
-        if (retryState && now - retryState.lastAttemptAt < retryDelay) {
-          return cache.window;
-        }
-
-        // Attempt PTB resolution without re-fetching Gamma
-        const lookupStart = Date.now();
-        const resolved = yield* Effect.tryPromise({
-          try: () => resolveWindowPriceToBeat(cache.window!, ptbCache),
-          catch: () => null,
-        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
-        const lookupMs = Date.now() - lookupStart;
-        if (resolved && resolved.priceToBeat !== null) {
-          yield* Ref.set(cacheRef, { window: resolved, lastFetch: cache.lastFetch });
-          ptbRetryState.delete(cache.window.conditionId);
-          yield* Effect.log(
-            `[Markets] PTB resolved in ${lookupMs}ms (source=${resolved.priceToBeatSource ?? "unknown"})`,
-          );
-          return resolved;
-        }
-        const nextAttempts = (retryState?.attempts ?? 0) + 1;
-        ptbRetryState.set(cache.window.conditionId, { attempts: nextAttempts, lastAttemptAt: now });
-        yield* Effect.log(
-          `[Markets] PTB unresolved after ${lookupMs}ms (attempt=${nextAttempts}, reason=${resolved?.priceToBeatReason ?? "unknown"})`,
-        );
-        return resolved ?? cache.window;
-      }
-
-      const nowSec = Math.floor(now / 1000);
-      const currentStart = Math.floor(nowSec / FIVE_MIN_S) * FIVE_MIN_S;
-      const slugs = [
-        `btc-updown-5m-${currentStart}`,
-        `btc-updown-5m-${currentStart + FIVE_MIN_S}`,
-      ];
-
-      for (const slug of slugs) {
-        const result = yield* Effect.tryPromise({
-          try: async () => {
-            const url = `${GAMMA_API}/events?slug=${slug}`;
-            const res = await fetchWithTimeout(url, undefined, GAMMA_FETCH_TIMEOUT_MS);
-            if (!res.ok) return null;
-            const events = (await res.json()) as GammaEvent[];
-            if (!events || events.length === 0) return null;
-            const evt = events[0]!;
-            if (evt.closed || !evt.markets || evt.markets.length === 0) return null;
-            const mkt = evt.markets[0]!;
-            const parsed = parseGammaMarket(mkt, evt, FIVE_MIN_MS);
-            const market = await resolveWindowPriceToBeat(parsed, ptbCache);
-            return { market, slug, title: evt.title };
-          },
-          catch: (err) => new PolymarketError({ message: `Error fetching ${slug}: ${err}`, cause: err }),
-        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
-
-        if (result && result.market.endTime > now) {
-          const isNew = cache.window?.conditionId !== result.market.conditionId;
-          yield* Ref.set(cacheRef, { window: result.market, lastFetch: now });
-          if (isNew) {
-            yield* Effect.log(`[Markets] Found: ${result.title} (${result.slug})`);
-          }
-          return result.market;
-        }
-      }
-
-      yield* Ref.update(cacheRef, (c) => {
-        const updated = { ...c, lastFetch: now };
-        if (c.window && c.window.endTime <= now) {
-          return { ...updated, window: null };
-        }
-        return updated;
-      });
-      const final = yield* Ref.get(cacheRef);
-      return final.window;
-    });
-
-    return { fetchCurrentBtc5mWindow, fetchSettlementByCondition: fetchSettlementByConditionImpl, formatWindowTitle } as const;
+    const poller = yield* createMarketPoller("btc-updown-5m", "BTC Up or Down", FIVE_MIN_S);
+    return {
+      fetchCurrentBtc5mWindow: poller.fetchCurrentWindow,
+      fetchSettlementByCondition: poller.fetchSettlementByCondition,
+      formatWindowTitle: poller.formatWindowTitle,
+    } as const;
   }),
 }) {}

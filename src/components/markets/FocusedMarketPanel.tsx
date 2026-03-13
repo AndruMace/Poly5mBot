@@ -11,6 +11,7 @@ import { RecentTrades } from "../RecentTrades.js";
 import { FeedHealthCard } from "../FeedHealthCard.js";
 import { RiskStatusCard } from "../RiskStatusCard.js";
 import { ExecutionMetricsCard } from "../ExecutionMetricsCard.js";
+import { setMarketMode, toggleMarketTrading } from "../../utils/market-actions.js";
 
 type FocusTab = "execution" | "strategies" | "performance" | "ops";
 
@@ -50,15 +51,7 @@ export function FocusedMarketPanel({ marketId, onClose }: FocusedMarketPanelProp
     setActionError(null);
     try {
       const nextMode = mode === "live" ? "shadow" : "live";
-      const res = await fetch(`/api/mode/${marketId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: nextMode }),
-      });
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(payload.error ?? "Failed to switch mode");
-      }
+      await setMarketMode(marketId, nextMode);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Failed to switch mode");
     } finally {
@@ -70,11 +63,7 @@ export function FocusedMarketPanel({ marketId, onClose }: FocusedMarketPanelProp
     setTogglingTrading(true);
     setActionError(null);
     try {
-      const res = await fetch(`/api/trading/${marketId}/toggle`, { method: "POST" });
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(payload.error ?? "Failed to toggle trading");
-      }
+      await toggleMarketTrading(marketId);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Failed to toggle trading");
     } finally {

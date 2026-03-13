@@ -13,6 +13,7 @@ import {
   enabledMarketsRx,
 } from "../store/index.js";
 import { Wifi, WifiOff, Wallet, Play, Square, Loader2, Eye, Radio } from "lucide-react";
+import { setMarketMode, toggleMarketTrading } from "../utils/market-actions.js";
 
 export function Header() {
   const wsConnected = useRxValue(connectedRx);
@@ -55,11 +56,7 @@ export function Header() {
     setToggling(true);
     setControlError(null);
     try {
-      const res = await fetch(`/api/trading/${activeMarketId}/toggle`, { method: "POST" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error ?? "Failed to toggle trading");
-      }
+      await toggleMarketTrading(activeMarketId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to toggle trading";
       setControlError(msg);
@@ -74,15 +71,7 @@ export function Header() {
     setControlError(null);
     try {
       const newMode = mode === "live" ? "shadow" : "live";
-      const res = await fetch(`/api/mode/${activeMarketId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: newMode }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error ?? "Failed to switch mode");
-      }
+      await setMarketMode(activeMarketId, newMode);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to switch mode";
       setControlError(msg);

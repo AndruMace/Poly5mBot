@@ -25,6 +25,7 @@ import type {
   TradeTimeframe,
   TradingMode,
 } from "../types/index.js";
+import { resetMarketKillSwitches, toggleMarketTrading } from "../utils/market-actions.js";
 
 type ViewMode = "timeline" | "table";
 
@@ -281,11 +282,7 @@ export function Observability() {
     setGateActionError(null);
     setGateActionLoading("reset");
     try {
-      const res = await fetch(`/api/killswitches/${activeMarketId}/reset`, { method: "POST" });
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(payload.error ?? `Reset failed (${res.status})`);
-      }
+      await resetMarketKillSwitches(activeMarketId);
     } catch (err) {
       setGateActionError(err instanceof Error ? err.message : "Failed to reset kill switches");
     } finally {
@@ -297,11 +294,7 @@ export function Observability() {
     setGateActionError(null);
     setGateActionLoading("start");
     try {
-      const res = await fetch(`/api/trading/${activeMarketId}/toggle`, { method: "POST" });
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(payload.error ?? `Trading toggle failed (${res.status})`);
-      }
+      await toggleMarketTrading(activeMarketId);
     } catch (err) {
       setGateActionError(err instanceof Error ? err.message : "Failed to start trading");
     } finally {

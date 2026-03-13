@@ -184,16 +184,25 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         const sCurrent = yield* Ref.get(deps.stateRef);
         if (!sCurrent.tradingActive) continue;
         if (strategy.name === "efficiency" && sCurrent.efficiencyIncidentBlocked) {
-          yield* Ref.update(strategy.stateRef, (s) => ({
-            ...s,
-            status: "regime_blocked" as const,
-            statusReason: "Blocked: unresolved efficiency dual-leg incident",
-          }));
-          yield* emitPreflightReject(strategy.name, String(now), {
-            reason: "efficiency_incident_blocked",
-            gate: "efficiency_incident_blocked",
-          });
-          continue;
+          if (sCurrent.efficiencyIncidentCooldownUntil > 0 && now >= sCurrent.efficiencyIncidentCooldownUntil) {
+            yield* Ref.update(deps.stateRef, (s) => ({
+              ...s,
+              efficiencyIncidentBlocked: false,
+              efficiencyIncidentCooldownUntil: 0,
+            }));
+            yield* Effect.log(`${deps.logPrefix} Efficiency cooldown expired — auto-unblocking`);
+          } else {
+            yield* Ref.update(strategy.stateRef, (s) => ({
+              ...s,
+              status: "regime_blocked" as const,
+              statusReason: "Blocked: unresolved efficiency dual-leg incident",
+            }));
+            yield* emitPreflightReject(strategy.name, String(now), {
+              reason: "efficiency_incident_blocked",
+              gate: "efficiency_incident_blocked",
+            });
+            continue;
+          }
         }
 
         const regimeCheck = shouldRunInRegime(sState.regimeFilter, regime);
@@ -391,7 +400,9 @@ export function makeStrategyRunner(deps: StrategyRunnerDeps) {
         }
 
         const ptbDistancePct = getPtbDistancePct(ctx);
-        const minPtbDistancePct = Math.max(0, sState.config["minPtbDistancePct"] ?? 0);
+        const basePtbDistancePct = Math.max(0, sState.config["minPtbDistancePct"] ?? 0);
+        const ptbChopMultiplier = regime.trendRegime === "chop" ? 1.75 : 1;
+        const minPtbDistancePct = basePtbDistancePct * ptbChopMultiplier;
         if (minPtbDistancePct > 0 && ptbDistancePct < minPtbDistancePct) {
           yield* Ref.update(deps.stateRef, (stUpd) => {
             deps.bumpDiag(stUpd, strategy.name, "riskRejected", 1, isShadow);

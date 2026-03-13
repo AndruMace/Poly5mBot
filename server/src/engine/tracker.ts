@@ -153,15 +153,6 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
     const expireTrade = (id: string, closingAssetPrice: number, shadow = false) =>
       getStore(shadow).appendEvent(id, "expired", { closingAssetPrice });
 
-    const cancelTrade = (id: string, reason: string, shadow = false) =>
-      Effect.gen(function* () {
-        const s = getStore(shadow);
-        const trade = yield* s.getTrade(id);
-        if (!trade) return;
-        if (trade.status === "cancelled" || trade.status === "resolved") return;
-        yield* s.appendEvent(id, "cancel", { reason });
-      });
-
     const listTrades = (query: TradeListQuery = {}) =>
       Effect.gen(function* () {
         const limit = Math.max(1, Math.min(query.limit ?? 100, 1000));
@@ -230,7 +221,6 @@ export class PnLTracker extends Effect.Service<PnLTracker>()("PnLTracker", {
       addTrade,
       resolveTrade,
       expireTrade,
-      cancelTrade,
       listTrades,
       getTrades,
       getSummary,

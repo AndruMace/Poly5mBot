@@ -21,7 +21,9 @@ import { makeTradeStore, toTradeRecord } from "../engine/trade-store.js";
 import { makeMarketPoller } from "../engine/window-manager.js";
 import { makeExecutionHandlers } from "../engine/execution.js";
 import { makeStrategyRunner } from "../engine/strategy-runner.js";
+import { evaluateExits, DEFAULT_EXIT_POLICIES } from "../engine/exit-policy.js";
 import { makeSnapshotEmitter } from "../engine/snapshot-emitter.js";
+import { inspectStrategyStateSchema, type StrategyStateSchema } from "../engine/strategy-state-schema.js";
 import {
   initialEngineState,
   zeroDiagnostics,
@@ -126,6 +128,7 @@ export interface StandaloneEngineSharedDeps {
   config: AppConfigShape;
   orderService: {
     getOrderBook: (tokenId: string) => Effect.Effect<any, any, never>;
+    getBalanceAllowance: (tokenId: string) => Effect.Effect<{ balance: number; allowance: number }, any, never>;
     getOrderStatusById: (orderId: string) => Effect.Effect<any, any, never>;
     executeSignal: (...args: any[]) => Effect.Effect<any, any, never>;
     executeDualBuy: (...args: any[]) => Effect.Effect<any[], any, never>;
@@ -342,7 +345,6 @@ export function createStandaloneMarketEngine(
 
     type PersistedStrategyStateEntry = { enabled?: boolean; config?: Record<string, unknown>; regimeFilter?: Record<string, unknown> };
     type PersistedStrategyState = Record<string, PersistedStrategyStateEntry>;
-    type StrategyStateSchema = "market_scoped" | "legacy";
 
     const stateRef = yield* Ref.make(initialEngineState(config.trading.mode));
     for (const s of strategies) {
@@ -356,37 +358,19 @@ export function createStandaloneMarketEngine(
     }
 
     // ── Strategy state persistence ──────────────────────────────────────────
-    const strategyStateSchema = yield* Effect.gen(function* () {
-      if (!usePostgresStorage) return null as StrategyStateSchema | null;
-      const rows = yield* postgres!.query<{ has_market_id: boolean }>(
-        `select exists(
-          select 1
-          from information_schema.columns
-          where table_schema = 'public'
-            and table_name = 'strategy_state'
-            and column_name = 'market_id'
-        ) as has_market_id`,
-      );
-      return rows[0]?.has_market_id ? "market_scoped" as const : "legacy" as const;
-    }).pipe(
-      Effect.catchAll((err) => {
-        if (config.storage.backend === "postgres") {
-          return Effect.fail(new Error(`[Engine:${marketId}] Failed to inspect strategy_state schema: ${String(err)}`));
-        }
-        return Effect.logWarning(
-          `[Engine:${marketId}] Failed to inspect strategy_state schema; falling back to file strategy state: ${String(err)}`,
-        ).pipe(Effect.as(null as StrategyStateSchema | null));
-      }),
-    );
+    const strategyStateSchema = (yield* inspectStrategyStateSchema({
+      backend: config.storage.backend,
+      marketId,
+      logPrefix: `[Engine:${marketId}]`,
+      postgres,
+    })) as StrategyStateSchema | null;
 
     const readPersistedStrategyState: Effect.Effect<PersistedStrategyState> = Effect.gen(function* () {
       const fromDb: PersistedStrategyState = {};
       if (usePostgresStorage && strategyStateSchema !== null) {
         const rows = yield* postgres!.query<{ strategy_name: string; payload: unknown }>(
-          strategyStateSchema === "market_scoped"
-            ? "select strategy_name, payload from strategy_state where market_id = $1"
-            : "select strategy_name, payload from strategy_state",
-          strategyStateSchema === "market_scoped" ? [marketId] : [],
+          "select strategy_name, payload from strategy_state where market_id = $1",
+          [marketId],
         ).pipe(
           Effect.catchAll((err) =>
             Effect.logError(`[Engine:${marketId}] Failed to read strategy state from database: ${String(err)}`).pipe(
@@ -456,19 +440,12 @@ export function createStandaloneMarketEngine(
         const dbErr = yield* Effect.forEach(
           Object.entries(payload),
           ([name, entry]) =>
-            strategyStateSchema === "market_scoped"
-              ? postgres!.execute(
-                  `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
-                   values ($1, $2, $3::jsonb, $4)
-                   on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
-                  [marketId, name, JSON.stringify(entry ?? {}), Date.now()],
-                )
-              : postgres!.execute(
-                  `insert into strategy_state (strategy_name, payload, updated_at_ms)
-                   values ($1, $2::jsonb, $3)
-                   on conflict (strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
-                  [name, JSON.stringify(entry ?? {}), Date.now()],
-                ),
+            postgres!.execute(
+              `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
+               values ($1, $2, $3::jsonb, $4)
+               on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+              [marketId, name, JSON.stringify(entry ?? {}), Date.now()],
+            ),
           { discard: true },
         ).pipe(
           Effect.as(null as string | null),
@@ -827,7 +804,7 @@ export function createStandaloneMarketEngine(
       getRiskSnapshot: riskManager.getSnapshot,
     });
 
-    const { executeStrategy } = makeExecutionHandlers({
+    const { executeStrategy, executeExit } = makeExecutionHandlers({
       stateRef,
       minFillRatioByStrategy: MIN_FILL_RATIO_BY_STRATEGY,
       shadowSimOptsByStrategy: SHADOW_SIM_OPTS_BY_STRATEGY,
@@ -998,6 +975,8 @@ export function createStandaloneMarketEngine(
 
       yield* regimeDetector.update(ctx);
       const regime = yield* regimeDetector.getRegime;
+      ctx.volatilityValue = regime.volatilityValue;
+      ctx.trendRegime = regime.trendRegime;
       const prevRegime = sNow.regime;
       yield* Ref.update(stateRef, (s) => ({ ...s, regime }));
       if (
@@ -1041,6 +1020,18 @@ export function createStandaloneMarketEngine(
       if (!isShadow && !connected) { yield* emitTick(isShadow); return; }
 
       yield* runStrategies(ctx, regime, isShadow, now);
+
+      if (!isShadow) {
+        const st2 = yield* Ref.get(stateRef);
+        const positions = Array.from(st2.openPositions.values());
+        if (positions.length > 0) {
+          const exits = evaluateExits(positions, ctx, DEFAULT_EXIT_POLICIES, now);
+          for (const exit of exits) {
+            yield* executeExit(exit);
+          }
+        }
+      }
+
       yield* emitTick(isShadow);
     });
 
@@ -1109,7 +1100,7 @@ export function createStandaloneMarketEngine(
 
     const setTradingActive = (active: boolean) =>
       Effect.gen(function* () {
-        yield* Ref.update(stateRef, (s) => ({ ...s, tradingActive: active, efficiencyIncidentBlocked: active ? false : s.efficiencyIncidentBlocked }));
+        yield* Ref.update(stateRef, (s) => ({ ...s, tradingActive: active, efficiencyIncidentBlocked: active ? false : s.efficiencyIncidentBlocked, efficiencyIncidentCooldownUntil: active ? 0 : s.efficiencyIncidentCooldownUntil }));
         yield* Effect.log(`[Engine:${marketId}] Trading ${active ? "STARTED" : "STOPPED"}`);
         yield* emit({ _tag: "TradingActive", data: { tradingActive: active } });
         yield* obs({ category: "operator", source: "engine", action: active ? "trading_started" : "trading_stopped", entityType: "system", entityId: "trading_active", status: active ? "active" : "inactive", mode: null, payload: { tradingActive: active } });

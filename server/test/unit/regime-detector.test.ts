@@ -57,12 +57,14 @@ describe("RegimeDetector", () => {
         const detector = yield* RegimeDetector;
         const now = Date.now();
         const exchanges = ["binance", "bybit", "coinbase", "kraken", "bitstamp", "okx"];
-        for (let bucket = 0; bucket < 24; bucket++) {
+        for (let bucket = 0; bucket < 30; bucket++) {
           for (let j = 0; j < exchanges.length; j++) {
             yield* detector.addPrice({
               exchange: exchanges[j]!,
-              price: 100_000 + bucket * 30 + j * 0.15,
-              timestamp: now - (24 - bucket) * 5000 + j * 300,
+              // Stronger monotonic slope with lower within-bucket noise so the
+              // trend detector clears chop hysteresis on the 5m lookback profile.
+              price: 100_000 + bucket * 60 + j * 0.05,
+              timestamp: now - (30 - bucket) * 5000 + j * 120,
             });
           }
         }

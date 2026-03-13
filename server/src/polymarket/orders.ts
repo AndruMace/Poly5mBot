@@ -1097,6 +1097,27 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
         }),
       );
 
+    const getBalanceAllowance = (tokenId: string) =>
+      Effect.gen(function* () {
+        const client = yield* polyClient.getClient;
+        const result = yield* Effect.tryPromise({
+          try: () =>
+            (client as any).getBalanceAllowance({
+              asset_type: "CONDITIONAL",
+              token_id: tokenId,
+            }) as Promise<{ balance?: string; allowance?: string }>,
+          catch: () => null,
+        });
+        if (!result) return { balance: 0, allowance: 0 };
+        return {
+          balance: parseFloat(result.balance ?? "0") || 0,
+          allowance: parseFloat(result.allowance ?? "0") || 0,
+        };
+      }).pipe(
+        Effect.timeout("2 seconds"),
+        Effect.catchAll(() => Effect.succeed({ balance: 0, allowance: 0 })),
+      );
+
     const getOrderBook = (tokenId: string) =>
       Effect.gen(function* () {
         const client = yield* polyClient.getClient;
@@ -1223,6 +1244,7 @@ export class OrderService extends Effect.Service<OrderService>()("OrderService",
       executeDualBuy,
       executeSell,
       getOrderBook,
+      getBalanceAllowance,
       getMidpoint,
       getOrderStatusById,
       listRecentOrders,

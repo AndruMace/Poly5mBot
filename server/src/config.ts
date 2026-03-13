@@ -1,4 +1,4 @@
-import { Config, Effect, Layer, Redacted } from "effect";
+import { Config, Effect } from "effect";
 import {
   DEFAULT_WHALE_HUNT_CONFIG,
   normalizeWhaleHuntConfig,

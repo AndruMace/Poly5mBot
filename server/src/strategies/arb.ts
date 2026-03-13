@@ -8,7 +8,7 @@ const DEFAULT_CONFIG: Record<string, number> = {
   minPtbDistancePct: 0.03,
   persistenceMs: 3000,
   persistenceCount: 4,
-  minConfirmingExchanges: 1,
+  minConfirmingExchanges: 3,
   minReferenceSources: 2,
   minWindowElapsedSec: 180,
   maxWindowElapsedSec: 270,
@@ -71,6 +71,12 @@ export const makeArbStrategy = Effect.gen(function* () {
       }
 
       const side: "UP" | "DOWN" = spreadPct > 0 ? "UP" : "DOWN";
+
+      if (ctx.trendRegime) {
+        if (side === "DOWN" && (ctx.trendRegime === "up" || ctx.trendRegime === "strong_up")) return null;
+        if (side === "UP" && (ctx.trendRegime === "down" || ctx.trendRegime === "strong_down")) return null;
+      }
+
       const btcDelta = ((priceOf(binance) - ctx.priceToBeat) / ctx.priceToBeat) * 100;
       const minPtbDistancePct = Math.max(0, s.config["minPtbDistancePct"]!);
       if (Math.abs(btcDelta) < minPtbDistancePct) return null;

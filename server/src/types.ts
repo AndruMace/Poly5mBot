@@ -1,5 +1,3 @@
-import { Schema } from "effect";
-
 // ── Primitives ──
 
 export type Side = "UP" | "DOWN";
@@ -484,6 +482,8 @@ export interface MarketContext {
   priceToBeat: number | null;
   currentAssetPrice: number;
   marketId: string;
+  volatilityValue?: number;
+  trendRegime?: "strong_up" | "up" | "chop" | "down" | "strong_down";
 }
 
 // ── WebSocket types ──
@@ -643,32 +643,3 @@ export type EngineEvent = (
   | { readonly _tag: "CriticalIncident"; readonly data: CriticalIncident }
   | { readonly _tag: "Observability"; readonly data: ObservabilityEvent }
 ) & { readonly marketId?: string };
-
-// ── Schema definitions for serialization boundaries ──
-
-export const PricePointSchema = Schema.Struct({
-  exchange: Schema.String,
-  price: Schema.Number,
-  timestamp: Schema.Number,
-  bid: Schema.optional(Schema.Number),
-  ask: Schema.optional(Schema.Number),
-});
-
-export const WSMessageSchema = Schema.Struct({
-  type: Schema.String,
-  data: Schema.Unknown,
-  timestamp: Schema.Number,
-});
-
-export const NotesPayloadSchema = Schema.Struct({
-  text: Schema.String,
-  updatedAt: Schema.Number,
-});
-
-export const TradeEventSchema = Schema.Struct({
-  id: Schema.String,
-  tradeId: Schema.String,
-  type: Schema.String,
-  timestamp: Schema.Number,
-  data: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
-});

@@ -61,6 +61,7 @@ export function makeMarketPoller(deps: WindowManagerDeps) {
         currentWindow: updatedWindow,
         windowTitle: title,
         entriesThisWindow: new Map(),
+        openPositions: new Map(),
         windowEndPriceSnapshot: null,
         windowEndSnapshotTs: 0,
         metrics: { ...s.metrics, windowConditionId: current.conditionId },

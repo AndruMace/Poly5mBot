@@ -19,6 +19,10 @@ dist-ssr
 # Server data
 server/data/
 server/dist/
+coverage/
+server/coverage/
+playwright-report/
+test-results/
 
 # Editor directories and files
 .vscode/*

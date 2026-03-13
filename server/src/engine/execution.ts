@@ -1,6 +1,7 @@
 import { Effect, Ref } from "effect";
 import type { EntryContext, EngineEvent, MarketContext, Signal, StrategyDiagnostics } from "../types.js";
 import type { EngineState } from "./state.js";
+import type { OpenPosition } from "./exit-policy.js";
 import { preflightShadowBuy } from "./shadow-preflight.js";
 import type { SimulatorOpts } from "./fill-simulator.js";
 import type { WhaleHuntConfig } from "../strategies/whale-hunt-config.js";
@@ -70,6 +71,7 @@ interface ExecutionDeps {
     executeSignal: (...args: any[]) => Effect.Effect<any | null, any, never>;
     executeSell: (...args: any[]) => Effect.Effect<any, any, never>;
     getOrderBook: (tokenId: string) => Effect.Effect<any, any, never>;
+    getBalanceAllowance: (tokenId: string) => Effect.Effect<{ balance: number; allowance: number }, any, never>;
   };
   riskManager: {
     onTradeOpened: (trade: any, shadow?: boolean) => Effect.Effect<void, any, never>;
@@ -267,6 +269,17 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
       }
 
       if (signal.strategy === "efficiency") {
+        const [upBal, downBal] = yield* Effect.all([
+          deps.orderService.getBalanceAllowance(st.currentWindow.upTokenId),
+          deps.orderService.getBalanceAllowance(st.currentWindow.downTokenId),
+        ]);
+        if (upBal.balance > 0 || downBal.balance > 0) {
+          yield* Effect.log(
+            `${deps.logPrefix} Efficiency skipped: existing token balance detected (UP=$${upBal.balance.toFixed(2)}, DOWN=$${downBal.balance.toFixed(2)}) — sell recovery would fail`,
+          );
+          return { executed: false, rejectReason: "existing_token_balance" } as ExecutionResult;
+        }
+
         const persistLiveTrade = (trade: any) =>
           Effect.gen(function* () {
             trade.entryContext = entryCtx;
@@ -357,6 +370,7 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
           }
 
           if (!recovered) {
+            yield* Effect.sleep("2500 millis");
             const sameLegBook = yield* deps.orderService.getOrderBook(partialIncidentTrade.tokenId);
             const sameLegBestBid = getBestBidFromBook(sameLegBook);
             if (sameLegBestBid !== null) {
@@ -393,15 +407,15 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
             const incidentReason = withinLegImbalanceLimit
               ? "hedge_or_flatten_failed"
               : "max_leg_imbalance_exceeded";
+            const cooldownUntil = Date.now() + 5 * 60_000;
             yield* Ref.update(deps.stateRef, (s) => ({
               ...s,
               efficiencyIncidentBlocked: true,
-              tradingActive: false,
+              efficiencyIncidentCooldownUntil: cooldownUntil,
             }));
-            yield* deps.emit({ _tag: "TradingActive", data: { tradingActive: false } });
             yield* deps.haltTradingWithIncident({
               kind: "efficiency_partial_incident",
-              message: "Efficiency dual-leg recovery failed. Trading paused until manual intervention.",
+              message: `Efficiency dual-leg recovery failed. Efficiency blocked for 5 minutes (residual $${residualExposureUsd.toFixed(2)}).`,
               fingerprint: `efficiency-partial:${conditionId}:${Date.now()}`,
               details: {
                 conditionId,
@@ -411,10 +425,11 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
                 reason: incidentReason,
                 terminalState,
                 residualExposureUsd: Number(residualExposureUsd.toFixed(2)),
+                cooldownUntil,
               },
             });
             yield* Effect.logError(
-              `${deps.logPrefix} Efficiency recovery failed (${incidentReason}); paused with residual $${residualExposureUsd.toFixed(2)}.`,
+              `${deps.logPrefix} Efficiency recovery failed (${incidentReason}); efficiency blocked for 5min with residual $${residualExposureUsd.toFixed(2)}.`,
             );
             return { executed: false } as ExecutionResult;
           }
@@ -474,6 +489,18 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
           yield* Ref.update(deps.stateRef, (s) => {
             const diagKey = trade.status === "partial" ? "partialFill" : trade.status === "submitted" ? "submitted" : "fullFill";
             deps.bumpDiag(s, signal.strategy, diagKey, 1, false);
+            const pos: OpenPosition = {
+              tradeId: trade.id,
+              strategy: trade.strategy,
+              side: trade.side,
+              tokenId: trade.tokenId,
+              entryPrice: trade.entryPrice,
+              entryAssetPrice: entryCtx.microstructure.currentAssetPrice,
+              shares: trade.shares,
+              timestamp: trade.timestamp,
+              entryArbAbsSpreadPct: signal.telemetry?.arbAbsSpreadPct,
+            };
+            s.openPositions.set(trade.id, pos);
             return s;
           });
         } else if (trade.status === "cancelled" || trade.status === "rejected") {
@@ -527,7 +554,62 @@ export function makeExecutionHandlers(deps: ExecutionDeps) {
       return yield* executeLive(signal, conditionId, ptb, entryCtx);
     });
 
+  const executeExit = (exit: {
+    tradeId: string;
+    tokenId: string;
+    side: "UP" | "DOWN";
+    strategy: string;
+    shares: number;
+    bestBid: number;
+    trigger: string;
+    reason: string;
+  }) =>
+    Effect.gen(function* () {
+      const st = yield* Ref.get(deps.stateRef);
+      if (!st.currentWindow) return false;
+
+      const slippageBps = deps.efficiencyRecovery.maxUnwindSlippageBps;
+      const minPrice = floorTo(Math.max(0.01, exit.bestBid * (1 - slippageBps / 10_000)), 2);
+
+      const closeTrade = yield* deps.orderService.executeSell(
+        exit.tokenId,
+        exit.side,
+        `${exit.strategy}-exit`,
+        exit.shares,
+        minPrice,
+        st.currentWindow.endTime,
+        st.currentWindow.conditionId,
+        st.currentWindow.priceToBeat ?? 0,
+      );
+
+      if (!closeTrade) {
+        yield* Effect.log(`${deps.logPrefix} Exit sell returned null for ${exit.tradeId} (${exit.trigger})`);
+        return false;
+      }
+
+      yield* deps.tracker.addTrade(closeTrade);
+      const stored = yield* deps.tracker.getTradeRecordById(closeTrade.id, false);
+      yield* deps.emit({ _tag: "Trade", data: stored ?? closeTrade });
+
+      const sold = isLiveExecutedStatus(closeTrade.status);
+      if (sold) {
+        yield* Ref.update(deps.stateRef, (s) => {
+          s.openPositions.delete(exit.tradeId);
+          return s;
+        });
+        yield* Effect.log(
+          `${deps.logPrefix} EXIT ${exit.strategy} ${exit.side} [${exit.trigger}]: ${exit.reason} — sold ${closeTrade.shares} @ $${closeTrade.entryPrice.toFixed(4)}`,
+        );
+      } else {
+        yield* Effect.log(
+          `${deps.logPrefix} Exit sell failed for ${exit.tradeId} (${exit.trigger}): ${closeTrade.clobReason ?? closeTrade.status}`,
+        );
+      }
+      return sold;
+    });
+
   return {
     executeStrategy,
+    executeExit,
   } as const;
 }

@@ -8,6 +8,7 @@ import {
   type MarketListViewRow,
 } from "../../store/index.js";
 import { ArrowDownAZ, ArrowUpAZ, Search, Star, Target, Play, Square } from "lucide-react";
+import { toggleMarketTrading } from "../../utils/market-actions.js";
 
 interface MarketsOverviewPanelProps {
   onSelectMarket: (marketId: string) => void;
@@ -59,11 +60,7 @@ export function MarketsOverviewPanel({
     setError(null);
     setTogglePending(row.marketId);
     try {
-      const res = await fetch(`/api/trading/${row.marketId}/toggle`, { method: "POST" });
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(payload.error ?? "Failed to toggle trading");
-      }
+      await toggleMarketTrading(row.marketId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to toggle trading");
     } finally {

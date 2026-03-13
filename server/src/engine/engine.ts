@@ -2,16 +2,14 @@ import { Effect, Ref, Schedule, Option } from "effect";
 import { FileSystem } from "@effect/platform";
 import { AppConfig } from "../config.js";
 import { FeedService } from "../feeds/manager.js";
-import { MarketService, formatWindowTitle } from "../polymarket/markets.js";
-import { OrderService, ORDER_PRECISION_GUARD_VERSION, calculateFeeStatic, effectiveFeeRateStatic } from "../polymarket/orders.js";
+import { MarketService } from "../polymarket/markets.js";
+import { OrderService, ORDER_PRECISION_GUARD_VERSION, calculateFeeStatic } from "../polymarket/orders.js";
 import { PolymarketClient } from "../polymarket/client.js";
-import { AutoRedeemer } from "../polymarket/redeemer.js";
 import { RiskManager } from "./risk.js";
 import { PnLTracker } from "./tracker.js";
 import { FillSimulator, type SimulatorOpts } from "./fill-simulator.js";
 import { PositionSizer } from "./position-sizer.js";
 import { RegimeDetector } from "./regime-detector.js";
-import { preflightShadowBuy } from "./shadow-preflight.js";
 import { EventBus } from "./event-bus.js";
 import {
   adjustMomentumMaxPrice,
@@ -24,6 +22,8 @@ import { makeAccountReconciler } from "./account-reconciliation.js";
 import { makeMarketPoller } from "./window-manager.js";
 import { makeExecutionHandlers } from "./execution.js";
 import { makeStrategyRunner } from "./strategy-runner.js";
+import { evaluateExits, DEFAULT_EXIT_POLICIES } from "./exit-policy.js";
+import { inspectStrategyStateSchema, type StrategyStateSchema } from "./strategy-state-schema.js";
 import { AccountActivityStore } from "../activity/store.js";
 import { CriticalIncidentStore } from "../incident/store.js";
 import { PostgresStorage } from "../storage/postgres.js";
@@ -38,22 +38,13 @@ import {
   toWhaleHuntStrategyConfig,
 } from "../strategies/whale-hunt-config.js";
 import type { Strategy } from "../strategies/base.js";
-import { shouldRunInRegime } from "../strategies/base.js";
 import { getMarketConfig } from "../markets/definitions.js";
 import type {
   MarketWindow,
   MarketContext,
-  OrderBookState,
-  StrategyState,
-  Signal,
-  TradeRecord,
-  RegimeState,
   StrategyDiagnostics,
   EngineMetrics,
-  OrderBookSide,
-  RiskSnapshot,
   EngineEvent,
-  EntryContext,
 } from "../types.js";
 
 const STRATEGY_COOLDOWN_MS: Record<string, number> = {
@@ -111,7 +102,6 @@ interface PersistedStrategyStateEntry {
 }
 
 type PersistedStrategyState = Record<string, PersistedStrategyStateEntry>;
-type StrategyStateSchema = "market_scoped" | "legacy";
 
 export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngine", {
   scoped: Effect.gen(function* () {
@@ -163,37 +153,19 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       config.trading.whaleHunt,
       marketConfig?.whaleHuntOverrides,
     );
-    const strategyStateSchema = yield* Effect.gen(function* () {
-      if (!usePostgresStorage) return null as StrategyStateSchema | null;
-      const rows = yield* postgres!.query<{ has_market_id: boolean }>(
-        `select exists(
-          select 1
-          from information_schema.columns
-          where table_schema = 'public'
-            and table_name = 'strategy_state'
-            and column_name = 'market_id'
-        ) as has_market_id`,
-      );
-      return rows[0]?.has_market_id ? "market_scoped" as const : "legacy" as const;
-    }).pipe(
-      Effect.catchAll((err) => {
-        if (config.storage.backend === "postgres") {
-          return Effect.fail(new Error(`${ENGINE_LOG_PREFIX} Failed to inspect strategy_state schema: ${String(err)}`));
-        }
-        return Effect.logWarning(
-          `${ENGINE_LOG_PREFIX} Failed to inspect strategy_state schema; falling back to file strategy state: ${String(err)}`,
-        ).pipe(Effect.as(null as StrategyStateSchema | null));
-      }),
-    );
+    const strategyStateSchema = (yield* inspectStrategyStateSchema({
+      backend: config.storage.backend,
+      marketId: MARKET_ID,
+      logPrefix: ENGINE_LOG_PREFIX,
+      postgres,
+    })) as StrategyStateSchema | null;
 
     const readPersistedStrategyState = Effect.gen(function* () {
       const fromDb: PersistedStrategyState = {};
       if (usePostgresStorage && strategyStateSchema !== null) {
         const rows = yield* postgres!.query<{ strategy_name: string; payload: unknown }>(
-          strategyStateSchema === "market_scoped"
-            ? "select strategy_name, payload from strategy_state where market_id = $1"
-            : "select strategy_name, payload from strategy_state",
-          strategyStateSchema === "market_scoped" ? [MARKET_ID] : [],
+          "select strategy_name, payload from strategy_state where market_id = $1",
+          [MARKET_ID],
         ).pipe(
           Effect.catchAll((err) =>
             Effect.logError(`${ENGINE_LOG_PREFIX} Failed to read strategy state from database: ${String(err)}`).pipe(
@@ -272,19 +244,12 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
         const dbErr = yield* Effect.forEach(
           Object.entries(payload),
           ([name, entry]) =>
-            strategyStateSchema === "market_scoped"
-              ? postgres!.execute(
-                  `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
-                   values ($1, $2, $3::jsonb, $4)
-                   on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
-                  [MARKET_ID, name, JSON.stringify(entry ?? {}), Date.now()],
-                )
-              : postgres!.execute(
-                  `insert into strategy_state (strategy_name, payload, updated_at_ms)
-                   values ($1, $2::jsonb, $3)
-                   on conflict (strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
-                  [name, JSON.stringify(entry ?? {}), Date.now()],
-                ),
+            postgres!.execute(
+              `insert into strategy_state (market_id, strategy_name, payload, updated_at_ms)
+               values ($1, $2, $3::jsonb, $4)
+               on conflict (market_id, strategy_name) do update set payload = excluded.payload, updated_at_ms = excluded.updated_at_ms`,
+              [MARKET_ID, name, JSON.stringify(entry ?? {}), Date.now()],
+            ),
           { discard: true },
         ).pipe(
           Effect.as(null as string | null),
@@ -743,7 +708,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       emit,
       obs,
       refreshOrderBook,
-      formatWindowTitle,
+      formatWindowTitle: marketService.formatWindowTitle,
       logPrefix: ENGINE_LOG_PREFIX,
     });
 
@@ -944,6 +909,8 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
       yield* regimeDetector.update(ctx);
       const regime = yield* regimeDetector.getRegime;
+      ctx.volatilityValue = regime.volatilityValue;
+      ctx.trendRegime = regime.trendRegime;
       const prevRegime = sNow.regime;
       yield* Ref.update(stateRef, (s) => ({ ...s, regime }));
       if (
@@ -991,6 +958,17 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
 
       yield* runStrategies(ctx, regime, isShadow, now);
 
+      if (!isShadow) {
+        const st2 = yield* Ref.get(stateRef);
+        const positions = Array.from(st2.openPositions.values());
+        if (positions.length > 0) {
+          const exits = evaluateExits(positions, ctx, DEFAULT_EXIT_POLICIES, now);
+          for (const exit of exits) {
+            yield* executeExit(exit);
+          }
+        }
+      }
+
       yield* emitTick(isShadow);
     });
 
@@ -1005,7 +983,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
       getRiskSnapshot: riskManager.getSnapshot,
     });
 
-    const { executeStrategy } = makeExecutionHandlers({
+    const { executeStrategy, executeExit } = makeExecutionHandlers({
       stateRef,
       minFillRatioByStrategy: MIN_FILL_RATIO_BY_STRATEGY,
       shadowSimOptsByStrategy: SHADOW_SIM_OPTS_BY_STRATEGY,
@@ -1115,6 +1093,7 @@ export class TradingEngine extends Effect.Service<TradingEngine>()("TradingEngin
           ...s,
           tradingActive: active,
           efficiencyIncidentBlocked: active ? false : s.efficiencyIncidentBlocked,
+          efficiencyIncidentCooldownUntil: active ? 0 : s.efficiencyIncidentCooldownUntil,
         }));
         yield* Effect.log(`${ENGINE_LOG_PREFIX} Trading ${active ? "STARTED" : "STOPPED"}`);
         yield* emit({ _tag: "TradingActive", data: { tradingActive: active } });

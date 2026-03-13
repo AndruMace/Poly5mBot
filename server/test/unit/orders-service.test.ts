@@ -239,12 +239,12 @@ describe("OrderService", () => {
     const client = {
       createAndPostOrder: async (order: { price: number; size: number }) => {
         calls += 1;
-        const makerCents = Math.round(order.size * 100);
-        const priceCents = Math.round(order.price * 100);
-        const makerIs2Dp = Math.abs(order.size * 100 - makerCents) < 1e-6;
-        const takerNumerator = makerCents * 10_000;
-        const takerIs4Dp = priceCents > 0 && takerNumerator % priceCents === 0;
-        if (!makerIs2Dp || !takerIs4Dp) {
+        // Simulate CLOB BUY semantics: submitted size is taker shares.
+        const roundedShares = Math.floor(order.size * 100) / 100;
+        const rawMaker = roundedShares * order.price;
+        const normalizedMaker = Number(rawMaker.toFixed(4));
+        const makerDp = (normalizedMaker.toString().split(".")[1] ?? "").length;
+        if (makerDp > 2) {
           throw {
             message:
               "invalid amounts, the market buy orders maker amount supports a max accuracy of 2 decimals, taker amount a max of 4 decimals",
@@ -583,7 +583,7 @@ describe("OrderService", () => {
     );
 
     expect(trades).toHaveLength(2);
-    expect(submittedSizes).toEqual([2.6, 2.35]);
+    expect(submittedSizes).toEqual([5, 5]);
     expect(trades[0]?.shares).toBe(5);
     expect(trades[1]?.shares).toBe(5);
     expect(trades[0]?.size).toBeCloseTo(2.6, 6);

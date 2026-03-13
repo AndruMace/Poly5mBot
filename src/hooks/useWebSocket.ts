@@ -8,7 +8,6 @@ import {
   tradingActiveRx,
   modeRx,
   pricesRx,
-  oracleEstimateRx,
   orderBookRx,
   strategiesRx,
   tradesRx,
@@ -55,6 +54,47 @@ const TRADE_BACKFILL_COOLDOWN_MS = 5000;
 const TRADE_BACKFILL_MAX_PAGES = 6;
 const TRADE_BUFFER_LIMIT = 2000;
 const OBSERVABILITY_BUFFER_LIMIT = 5000;
+
+type RxRegistry = {
+  set: (atom: unknown, value: unknown) => void;
+  get: (atom: unknown) => any;
+  update: (atom: unknown, fn: (current: any) => any) => void;
+};
+
+function defaultPerMarketSnapshot(): PerMarketSnapshot {
+  return {
+    tradingActive: false,
+    mode: "shadow",
+    strategies: [],
+    market: null,
+    orderbook: { ...emptyOrderBook },
+    prices: {},
+    oracleEstimate: 0,
+    feedHealth: { ...emptyFeedHealth },
+    pnl: { ...emptyPnl },
+    shadowPnl: { ...emptyPnl },
+    trades: [],
+    regime: { ...defaultRegime },
+    killSwitches: [],
+    risk: { ...emptyRisk },
+    metrics: { ...emptyMetrics },
+  };
+}
+
+function applyPerMarketSnapshot(registry: RxRegistry, snapshot: PerMarketSnapshot) {
+  registry.set(tradingActiveRx, snapshot.tradingActive);
+  registry.set(modeRx, snapshot.mode);
+  registry.set(strategiesRx, [...snapshot.strategies]);
+  registry.set(orderBookRx, snapshot.orderbook ?? { ...emptyOrderBook });
+  registry.set(pnlRx, normalizePnlSummary(snapshot.pnl));
+  registry.set(shadowPnlRx, normalizePnlSummary(snapshot.shadowPnl));
+  registry.set(pricesRx, snapshot.prices);
+  registry.set(regimeRx, { ...defaultRegime, ...snapshot.regime });
+  registry.set(killSwitchesRx, [...snapshot.killSwitches]);
+  registry.set(riskRx, { ...emptyRisk, ...snapshot.risk });
+  registry.set(metricsRx, { ...emptyMetrics, ...snapshot.metrics });
+  registry.set(feedHealthRx, { ...emptyFeedHealth, ...snapshot.feedHealth });
+}
 
 function shallowEqualPrices(
   a: Record<string, PricePoint>,
@@ -143,37 +183,9 @@ export function useWebSocket() {
     const perMarket = registry.get(perMarketStateRx);
     // Skip if we have no per-market data yet (WS hasn't connected) — handleInitialState will populate
     if (Object.keys(perMarket).length === 0) return;
-    const snap = perMarket[activeMarketId] ?? {
-      tradingActive: false,
-      mode: "shadow" as const,
-      strategies: [] as import("../types/index.js").StrategyState[],
-      market: null,
-      orderbook: { ...emptyOrderBook },
-      prices: {} as Record<string, import("../types/index.js").PricePoint>,
-      oracleEstimate: 0,
-      feedHealth: { ...emptyFeedHealth },
-      pnl: { ...emptyPnl },
-      shadowPnl: { ...emptyPnl },
-      trades: [] as import("../types/index.js").TradeRecord[],
-      regime: { ...defaultRegime },
-      killSwitches: [] as import("../types/index.js").KillSwitchStatus[],
-      risk: { ...emptyRisk },
-      metrics: { ...emptyMetrics },
-    };
+    const snap = perMarket[activeMarketId] ?? defaultPerMarketSnapshot();
     Rx.batch(() => {
-      registry.set(tradingActiveRx, snap.tradingActive);
-      registry.set(modeRx, snap.mode);
-      registry.set(strategiesRx, [...snap.strategies]);
-      registry.set(orderBookRx, snap.orderbook ?? { ...emptyOrderBook });
-      registry.set(pnlRx, normalizePnlSummary(snap.pnl));
-      registry.set(shadowPnlRx, normalizePnlSummary(snap.shadowPnl));
-      registry.set(pricesRx, snap.prices);
-      registry.set(oracleEstimateRx, snap.oracleEstimate);
-      registry.set(regimeRx, { ...defaultRegime, ...snap.regime });
-      registry.set(killSwitchesRx, [...snap.killSwitches]);
-      registry.set(riskRx, { ...emptyRisk, ...snap.risk });
-      registry.set(metricsRx, { ...emptyMetrics, ...snap.metrics });
-      registry.set(feedHealthRx, { ...emptyFeedHealth, ...snap.feedHealth });
+      applyPerMarketSnapshot(registry as RxRegistry, snap);
     });
   }, [activeMarketId, registry]);
 
@@ -240,44 +252,6 @@ export function useWebSocket() {
 
     // ── Per-market helpers ────────────────────────────────────────────────────
 
-    function emptyPerMarket(): PerMarketSnapshot {
-      return {
-        tradingActive: false,
-        mode: "shadow",
-        strategies: [],
-        market: null,
-        orderbook: { ...emptyOrderBook },
-        prices: {},
-        oracleEstimate: 0,
-        feedHealth: { ...emptyFeedHealth },
-        pnl: { ...emptyPnl },
-        shadowPnl: { ...emptyPnl },
-        trades: [],
-        regime: { ...defaultRegime },
-        killSwitches: [],
-        risk: { ...emptyRisk },
-        metrics: { ...emptyMetrics },
-      };
-    }
-
-    /** Apply a stored per-market snapshot to all display atoms (used on tab switch). */
-    function applyMarketSnapshot(snap: PerMarketSnapshot) {
-      registry.set(tradingActiveRx, snap.tradingActive);
-      registry.set(modeRx, snap.mode);
-      registry.set(strategiesRx, [...snap.strategies]);
-      registry.set(orderBookRx, snap.orderbook ?? { ...emptyOrderBook });
-      registry.set(pnlRx, normalizePnlSummary(snap.pnl));
-      registry.set(shadowPnlRx, normalizePnlSummary(snap.shadowPnl));
-      // Always overwrite prices/oracle so switching markets clears stale values
-      registry.set(pricesRx, snap.prices);
-      registry.set(oracleEstimateRx, snap.oracleEstimate);
-      registry.set(regimeRx, { ...defaultRegime, ...snap.regime });
-      registry.set(killSwitchesRx, [...snap.killSwitches]);
-      registry.set(riskRx, { ...emptyRisk, ...snap.risk });
-      registry.set(metricsRx, { ...emptyMetrics, ...snap.metrics });
-      registry.set(feedHealthRx, { ...emptyFeedHealth, ...snap.feedHealth });
-    }
-
     /** Patch one field in the per-market state store.
      *  Creates a default entry for the market if it hasn't been seen before. */
     function patchPerMarket<K extends keyof PerMarketSnapshot>(
@@ -286,7 +260,7 @@ export function useWebSocket() {
       value: PerMarketSnapshot[K],
     ) {
       registry.update(perMarketStateRx, (prev) => {
-        const ex = prev[mid] ?? emptyPerMarket();
+        const ex = prev[mid] ?? defaultPerMarketSnapshot();
         return { ...prev, [mid]: { ...ex, [key]: value } };
       });
     }
@@ -434,9 +408,6 @@ export function useWebSocket() {
       if (!shallowEqualPrices(prevPrices, prices)) {
         registry.set(pricesRx, prices);
       }
-      if (oracleEstimate > 0 && oracleEstimate !== registry.get(oracleEstimateRx)) {
-        registry.set(oracleEstimateRx, oracleEstimate);
-      }
     }
 
     function handleInitialState(data: WSStatusSnapshot) {
@@ -451,58 +422,41 @@ export function useWebSocket() {
         (prev) => mergeObservability(prev, [...(data.observabilityEvents ?? [])]),
       );
 
-      // Multi-market: populate perMarketStateRx from all market snapshots
-      if (data.markets && Object.keys(data.markets).length > 0) {
-        const perMarket: Record<string, PerMarketSnapshot> = {};
-        for (const [mid, snap] of Object.entries(data.markets)) {
-          perMarket[mid] = {
-            tradingActive: snap.tradingActive,
-            mode: snap.mode,
-            strategies: [...(snap.strategies ?? [])],
-            market: snap.market,
-            orderbook: snap.orderbook ?? { ...emptyOrderBook },
-            prices: snap.prices ?? {},
-            oracleEstimate: snap.oracleEstimate ?? 0,
-            feedHealth: snap.feedHealth ? { ...emptyFeedHealth, ...snap.feedHealth } : { ...emptyFeedHealth },
-            pnl: normalizePnlSummary(snap.pnl),
-            shadowPnl: normalizePnlSummary(snap.shadowPnl),
-            trades: [...(snap.trades ?? [])],
-            regime: { ...defaultRegime, ...snap.regime },
-            killSwitches: [...(snap.killSwitches ?? [])],
-            risk: { ...emptyRisk, ...snap.risk },
-            metrics: { ...emptyMetrics, ...snap.metrics },
-          };
-        }
-        registry.set(perMarketStateRx, perMarket);
+      const marketSnapshots = data.markets ?? {};
+      if (Object.keys(marketSnapshots).length === 0) {
+        rehydrateFromHttpStatus();
+        fetchIncidents();
+        return;
+      }
 
-        // Apply active market's snapshot to display atoms
-        const activeId = registry.get(activeMarketIdRx);
-        const activeSnap = perMarket[activeId] ?? perMarket["btc"];
-        if (activeSnap) {
-          applyMarketSnapshot(activeSnap);
-          registry.update(tradesRx, (prev) => mergeTrades(prev, activeSnap.trades));
-        }
-      } else {
-        // Fallback: single-market path (backward compat)
-        registry.set(tradingActiveRx, data.tradingActive ?? false);
-        registry.set(modeRx, data.mode ?? "shadow");
-        registry.set(strategiesRx, [...(data.strategies ?? [])]);
-        if (data.market) {
-          patchPerMarket("btc", "market", data.market);
-        } else {
-          rehydrateFromHttpStatus();
-        }
-        registry.set(orderBookRx, data.orderbook ?? { ...emptyOrderBook });
-        registry.set(pnlRx, normalizePnlSummary(data.pnl));
-        registry.set(shadowPnlRx, normalizePnlSummary(data.shadowPnl));
-        registry.update(tradesRx, (prev) => mergeTrades(prev, [...(data.trades ?? [])]));
-        if (data.prices) registry.set(pricesRx, data.prices);
-        if (data.oracleEstimate > 0) registry.set(oracleEstimateRx, data.oracleEstimate);
-        registry.set(regimeRx, data.regime ? { ...defaultRegime, ...data.regime } : { ...defaultRegime });
-        registry.set(killSwitchesRx, [...(data.killSwitches ?? [])]);
-        registry.set(riskRx, data.risk ? { ...emptyRisk, ...data.risk } : { ...emptyRisk });
-        registry.set(metricsRx, data.metrics ? { ...emptyMetrics, ...data.metrics } : { ...emptyMetrics });
-        registry.set(feedHealthRx, data.feedHealth ? { ...emptyFeedHealth, ...data.feedHealth } : { ...emptyFeedHealth });
+      const perMarket: Record<string, PerMarketSnapshot> = {};
+      for (const [mid, snap] of Object.entries(marketSnapshots)) {
+        perMarket[mid] = {
+          tradingActive: snap.tradingActive,
+          mode: snap.mode,
+          strategies: [...(snap.strategies ?? [])],
+          market: snap.market,
+          orderbook: snap.orderbook ?? { ...emptyOrderBook },
+          prices: snap.prices ?? {},
+          oracleEstimate: snap.oracleEstimate ?? 0,
+          feedHealth: snap.feedHealth ? { ...emptyFeedHealth, ...snap.feedHealth } : { ...emptyFeedHealth },
+          pnl: normalizePnlSummary(snap.pnl),
+          shadowPnl: normalizePnlSummary(snap.shadowPnl),
+          trades: [...(snap.trades ?? [])],
+          regime: { ...defaultRegime, ...snap.regime },
+          killSwitches: [...(snap.killSwitches ?? [])],
+          risk: { ...emptyRisk, ...snap.risk },
+          metrics: { ...emptyMetrics, ...snap.metrics },
+        };
+      }
+      registry.set(perMarketStateRx, perMarket);
+
+      // Apply active market's snapshot to display atoms
+      const activeId = registry.get(activeMarketIdRx);
+      const activeSnap = perMarket[activeId] ?? perMarket["btc"];
+      if (activeSnap) {
+        applyPerMarketSnapshot(registry as RxRegistry, activeSnap);
+        registry.update(tradesRx, (prev) => mergeTrades(prev, activeSnap.trades));
       }
 
       // Set enabled markets list and pre-seed per-market state for every market
@@ -513,7 +467,7 @@ export function useWebSocket() {
         registry.update(perMarketStateRx, (prev) => {
           const next = { ...prev };
           for (const { id } of data.enabledMarkets!) {
-            if (!next[id]) next[id] = emptyPerMarket();
+            if (!next[id]) next[id] = defaultPerMarketSnapshot();
           }
           return next;
         });

@@ -7,6 +7,7 @@ import type {
   Signal,
   StrategyDiagnostics,
 } from "../types.js";
+import type { OpenPosition } from "./exit-policy.js";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -89,6 +90,8 @@ export interface EngineState {
   lastPoll: number;
   lastReconcileAt: number;
   efficiencyIncidentBlocked: boolean;
+  efficiencyIncidentCooldownUntil: number;
+  openPositions: Map<string, OpenPosition>;
 }
 
 export function initialEngineState(mode: "live" | "shadow"): EngineState {
@@ -151,5 +154,7 @@ export function initialEngineState(mode: "live" | "shadow"): EngineState {
     lastPoll: 0,
     lastReconcileAt: 0,
     efficiencyIncidentBlocked: false,
+    efficiencyIncidentCooldownUntil: 0,
+    openPositions: new Map(),
   };
 }
